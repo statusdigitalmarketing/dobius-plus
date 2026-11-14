@@ -1177,3 +1177,9 @@
 - **FIX**: A transcript row may only clear a message the Mac already said it took (ack, or `duplicate` on Send again). A message whose answer was lost keeps its bubble until its OWN sendId settles it via Send again, or Remove. Deleted the placeholder machinery that existed only to make text matching safe.
 - **CONTEXT**: When identity is not in the data (rows have no sendId), no heuristic over that data is safe; route the decision through the party that has the identity. Each round of "tighter matching" was patching the wrong layer.
 - **DETECTION**: `grep -n "acked === true" mobile/phone-mode.js` (reconcileEchoes must keep this gate)
+
+### Architecture - 2026-11-14
+- **MISTAKE**: The runner answered a phone `send` as soon as `queue.push()` accepted it, and the phone treated that ack as delivery (dropped the message from storage). Codex r34: hold a permission open, send A, give back; A was acked, never reached the transcript, and vanished. In the harness the real CLI had even logged A as a queued record, then was stopped before reading it.
+- **FIX**: Two facts, two signals. The ack means queued. Each queued SDKUserMessage carries a client `uuid`; Claude names what it read in `user_message_uuids` on its reply frames, the runner reports `delivered` to main, and at the end reports `notSent` (still in its queue) and `unsure` (reached Claude unread). Main keeps the ended list per tab after the run is forgotten; the phone keeps a message in storage until it is read, and turns losses back into Not sent / Not confirmed.
+- **CONTEXT**: "Accepted into my buffer" is never "delivered" when another process consumes the buffer asynchronously and can be stopped. Look for a consumer-side receipt (here the SDK's client uuid echo) before inventing a heuristic; keep a counted fallback only for producers that lack it.
+- **DETECTION**: `grep -n "user_message_uuids\|t: 'delivered'" electron/phone-runner.mjs electron/phone-mode.js`

@@ -29,6 +29,7 @@
  * would otherwise run every Electron app as plain Node) and every DOBIUS_PHONE_* name.
  */
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -43,6 +44,11 @@ const ASK_MS = 10_000; // any one answer from main
 const RUN_ID = /^[0-9a-f]{32}$/;
 const SESSION_ID = /^[a-zA-Z0-9][\w-]{0,99}$/;
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?:\[1m\])?$/;
+// ponytail: phone messages the runner still tracks as not yet read by Claude. The queue holds at most 32 unread, and a
+// read message is stamped on Claude's next reply (or counted out after two results on a CLI that does not stamp), so
+// this only fills if Claude stops stamping mid-run; the oldest is then forgotten here, and main, which never heard it
+// was read, reports it as not confirmed.
+const MAX_UNREAD = 256;
 export const RESEND_TEXT = 'This conversation just moved to my phone while your last question or permission request was open, and it was cancelled. Please ask it again.';
 
 /** Text from another process, made safe to print on a terminal or send on: no control characters, bounded. */
@@ -299,6 +305,11 @@ export async function runRunner({
   let finishing = false;
   let turnActive = false;
   let lastStatus = null;
+  // Phone messages Claude has not been seen to read, by client id: { reqId, results }. A reply to `send` says only that
+  // the message is queued here; this is what tells main it reached Claude, and what is left of it says which did not
+  // when the run ends (Codex r34).
+  const unread = new Map();
+  let stamps = false; // this Claude names the messages it read (user_message_uuids)
 
   let gotStart;
   const startMsg = new Promise((r) => { gotStart = r; });
@@ -319,14 +330,43 @@ export async function runRunner({
     ctlCh.send({ t: 'state', status: s });
   };
 
+  // Main hears which phone messages Claude read, by main's request ids.
+  const markRead = (ids) => {
+    const reqIds = [];
+    for (const id of ids) { const e = unread.get(id); if (e) { unread.delete(id); reqIds.push(e.reqId); } }
+    if (reqIds.length) main?.send({ t: 'delivered', reqIds });
+  };
+  // A frame from Claude: the ids it names were read. A CLI that never names any gets the fallback: a message the SDK took
+  // is in the turn that was running when it arrived (folded in) or the next one, so two results after it was taken, it
+  // was read.
+  const noteFrame = (m) => {
+    const ids = Array.isArray(m?.user_message_uuids) ? m.user_message_uuids.filter((x) => typeof x === 'string')
+      : typeof m?.user_message_uuid === 'string' ? [m.user_message_uuid] : [];
+    if (ids.length) { stamps = true; markRead(ids); }
+    if (m?.type !== 'result' || !queue || unread.size === 0) return;
+    const waiting = queue.waiting();
+    const done = [];
+    for (const [id, e] of unread) {
+      if (waiting.has(id)) continue;
+      e.results += 1;
+      if (!stamps && e.results >= 2) done.push(id);
+    }
+    markRead(done);
+  };
+
   async function finish(reason) {
     if (finishing) return;
     finishing = true;
     const why = plain(reason, 200);
+    // What never reached Claude (still in the queue) and what reached it unread; both before anything is closed.
+    const waiting = queue ? queue.waiting() : new Set();
+    const notSent = [];
+    const unsure = [];
+    for (const [id, e] of unread) (waiting.has(id) ? notSent : unsure).push(e.reqId);
     try { router?.cancelAll('ended'); } catch { /* ending anyway */ }
     queue?.close();
     try { q?.close(); } catch { /* ending anyway */ }
-    main?.send({ t: 'ended', reason: why });
+    main?.send({ t: 'ended', reason: why, notSent, unsure });
     ctlCh.send({ t: 'ended', reason: why });
     if (claudeProc && claudeProc.exitCode == null && claudeProc.signalCode == null) {
       await Promise.race([new Promise((r) => claudeProc.once('exit', r)), sys.sleep(exitWaitMs)]);
@@ -390,6 +430,7 @@ export async function runRunner({
     try {
       for await (const m of q) {
         if (finishing) break;
+        noteFrame(m);
         if (m?.type === 'result') turnActive = false;
         else if (m?.type === 'assistant' || m?.type === 'stream_event') turnActive = true;
         pushState();
@@ -441,7 +482,10 @@ export async function runRunner({
     if (finishing || !queue) return reply(false, 'ending', 'the phone session is ending');
     if (m.t === 'send') {
       if (typeof m.text !== 'string' || !m.text.trim()) return reply(false, 'bad_request', 'empty message');
-      if (!queue.push(m.text)) return reply(false, 'busy', 'too many messages are already waiting');
+      const uuid = randomUUID();
+      if (!queue.push(m.text, uuid)) return reply(false, 'busy', 'too many messages are already waiting');
+      unread.set(uuid, { reqId: m.reqId, results: 0 });
+      if (unread.size > MAX_UNREAD) unread.delete(unread.keys().next().value);
       turnActive = true;
       pushState();
       return reply(true);

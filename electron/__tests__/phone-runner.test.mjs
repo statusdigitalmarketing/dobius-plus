@@ -30,7 +30,7 @@ async function until(fn, ms = 8000, what = 'condition') {
   }
 }
 
-function setup({ answerRunner = true, claudeOkDelay = 400, gateToken = GATE_TOKEN, stubborn = false } = {}) {
+function setup({ answerRunner = true, claudeOkDelay = 400, gateToken = GATE_TOKEN, stubborn = false, stamps = true } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(tmpBase(), 'pr-')));
   const runDir = ensureRunDir(root);
   const bin = path.join(root, 'bin');
@@ -60,7 +60,8 @@ const fakeSdk = { query({ prompt, options }) {
     env: { ELECTRON_RUN_AS_NODE: options.env.ELECTRON_RUN_AS_NODE ?? null, DOBIUS_PHONE_X: options.env.DOBIUS_PHONE_X ?? null, CLAUDE_CODE_ENTRYPOINT: options.env.CLAUDE_CODE_ENTRYPOINT } }));
   async function* gen() {
     for await (const m of prompt) {
-      yield { type: 'assistant' };
+      // Like Claude: the reply names the client id of the message it read (unless this run plays an older CLI).
+      yield { type: 'assistant', ...(${stamps} && m.uuid ? { user_message_uuids: [m.uuid] } : {}) };
       if (m.message.content === 'perm') {
         const r = await options.canUseTool('Bash', { command: 'ls' }, { toolUseID: 'tu1', signal: new AbortController().signal, title: 'Claude wants to run ls' });
         fs.appendFileSync(${JSON.stringify(logs.perm)}, JSON.stringify(r) + '\\n');
@@ -156,6 +157,45 @@ test('gate + runner: Claude gets nothing before main records it, cards round tri
     assert.equal(alive(claudePid), false);
     assert.equal(alive(hello.pid), false);
     assert.ok(ctx.log.find((m) => m.t === 'ended' && m.reason === 'given back on the phone'));
+  } finally { await ctx.cleanup(); }
+});
+
+test('runner: a message still queued when the phone gives back is reported never sent, one Claude read is delivered (Codex r34)', async () => {
+  const ctx = await setup({ claudeOkDelay: 0 }).ready;
+  try {
+    const g = ctx.gate();
+    await until(() => ctx.log.find((m) => m.t === 'state' && m.status === 'idle'), 8000, 'idle');
+    assert.equal((await ctx.cmd({ t: 'send', reqId: 'r1', text: 'hello' })).ok, true);
+    await until(() => ctx.log.find((m) => m.t === 'delivered'), 5000, 'delivered');
+    assert.deepEqual(ctx.log.filter((m) => m.t === 'delivered').map((m) => m.reqIds), [['r1']]);
+    // Claude holds a permission open, so the SDK takes nothing more: the next message waits in the runner's queue.
+    assert.equal((await ctx.cmd({ t: 'send', reqId: 'r2', text: 'perm' })).ok, true);
+    await until(() => ctx.log.find((m) => m.t === 'card'), 5000, 'card');
+    assert.equal((await ctx.cmd({ t: 'send', reqId: 'r3', text: 'A' })).ok, true, 'the reply only says it is queued');
+    assert.equal((await ctx.cmd({ t: 'give-back', reqId: 'r4' })).ok, true);
+    assert.equal(await g.done, 0);
+    const ended = ctx.log.find((m) => m.t === 'ended');
+    assert.deepEqual(ended.notSent, ['r3'], 'A never reached Claude');
+    assert.deepEqual(ended.unsure, [], 'the permission message was read (stamped), so nothing is in doubt');
+    assert.deepEqual(ctx.log.filter((m) => m.t === 'delivered').map((m) => m.reqIds), [['r1'], ['r2']]);
+  } finally { await ctx.cleanup(); }
+});
+
+test('runner: a Claude that names nothing read counts a message read two results after it was taken; the rest are unsure (Codex r34)', async () => {
+  const ctx = await setup({ claudeOkDelay: 0, stamps: false }).ready;
+  try {
+    const g = ctx.gate();
+    await until(() => ctx.log.find((m) => m.t === 'state' && m.status === 'idle'), 8000, 'idle');
+    assert.equal((await ctx.cmd({ t: 'send', reqId: 'a', text: 'one' })).ok, true);
+    await until(() => ctx.log.filter((m) => m.t === 'state' && m.status === 'idle').length >= 2, 5000, 'first turn');
+    assert.equal(ctx.log.some((m) => m.t === 'delivered'), false, 'one result is not enough without a stamp');
+    assert.equal((await ctx.cmd({ t: 'send', reqId: 'b', text: 'two' })).ok, true);
+    await until(() => ctx.log.find((m) => m.t === 'delivered'), 5000, 'delivered after two results');
+    assert.deepEqual(ctx.log.filter((m) => m.t === 'delivered').map((m) => m.reqIds), [['a']]);
+    assert.equal((await ctx.cmd({ t: 'give-back', reqId: 'c' })).ok, true);
+    assert.equal(await g.done, 0);
+    const ended = ctx.log.find((m) => m.t === 'ended');
+    assert.deepEqual([ended.notSent, ended.unsure], [[], ['b']]);
   } finally { await ctx.cleanup(); }
 });
 

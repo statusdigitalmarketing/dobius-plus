@@ -315,19 +315,27 @@ A message sent from the phone keeps its own bubble and `sendId` until the transc
 `failed`), it says Not confirmed by the Mac. Both offer Send again with the same `sendId`: the Mac forgets an id it did
 not take and answers `duplicate` for one that arrived, so nothing is delivered twice. Send again goes to the run the
 message was written for: once that run is over (back on the Mac, or a later move), it puts the words in the box
-instead, and only into an empty box. A transcript row carries no sendId, so a row only ever clears the bubble of a
-message the Mac said it took (ack, or `duplicate` on Send again): the same words from another phone or an earlier
-message look identical (Codex r27 to r30). Such a row must not have been there when the message was sent (its baseline
+instead, and only into an empty box. The Mac's `ack` says only that the runner queued the message (it shows
+Queued for after this turn). Read by Claude is a second fact (Codex r34): each queued message carries a client `uuid`,
+Claude names the ones it read in `user_message_uuids` on its reply, and the runner tells main (`delivered`, by request
+id; on a Claude that names none, two results after the SDK took it). The phone learns it from `phoneState.delivered`
+(the live run's newest 64 sendIds). When a run ends, the runner reports which messages never left its queue
+(`notSent`) and which reached Claude unread (`unsure`); main keeps that list per tab for a day after the run is
+forgotten (`phoneState.ended`, 4 runs, 64 ids each, memory only), and the phone turns those back into Not sent or Not
+confirmed. A queued message missing from a complete list was read; a run the Mac no longer knows leaves its queued
+messages Not confirmed. A transcript row carries no sendId, so a row only ever clears the bubble of a message the Mac
+says Claude read: the same words from another phone or an earlier message look identical (Codex r27 to r30). Such a row must not have been there when the message was sent (its baseline
 of row ids and queued rows) and must be written since (30 s allowed for clock skew), and each row clears one message.
 A message that was refused or never answered keeps its bubble until Send again settles it by its own sendId, or Remove.
-Messages not yet answered as taken are kept per tab in the phone's storage, so leaving the tab or reloading the app
-brings them back as Not confirmed with Send again. The composer lets at most 5 wait on a tab and keeps messages for at
+Messages Claude is not known to have read are kept per tab in the phone's storage, so leaving the tab or reloading the
+app brings back a queued one as queued (the next phoneState settles it) and any other as Not confirmed with Send
+again. The composer lets at most 5 wait on a tab and keeps messages for at
 most 20 tabs at once; past either a new message stays in the box with a note, so none is pushed out of storage unseen.
 Entries older than 7 days are dropped. Each message is stored under its own key (`<base>|<tab>|<sendId>`): two pages
 open on one phone share that storage, and a save writes or removes only the messages that page loaded or sent, never
 reading and rewriting a shared list, so neither can lose the other's however their saves interleave (Codex r31, r32).
 
-The Mac remembers each send id per run with its outcome: pending, taken, or unknown (no answer within 10 s). A retry
+The Mac remembers each send id per run with its outcome: pending, taken, delivered, or unknown (no answer within 10 s). A retry
 of a pending id waits for the first answer; of an unknown id it is answered `timeout` again, never `duplicate`, until
 the runner's late answer (kept 5 minutes) settles it; a refused id is forgotten so a retry delivers it. 4096 ids per
 run are kept; a retry of an id older than that could be delivered again (accepted bound).

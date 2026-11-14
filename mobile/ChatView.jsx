@@ -8,7 +8,7 @@ import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, 
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 import { remarkCommandBoxes, CMD_TAG } from './command-blocks.js';
 import PhoneCards from './PhoneCards';
-import { phoneOffered, phoneKnown, sendOutcome, pruneEchoes, ageEchoes, waitingCount, MAX_OUTSTANDING, OUTBOX_TABS, outboxFull, echoBaseline, loadOutbox, saveOutbox, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
+import { phoneOffered, phoneKnown, sendOutcome, applyRunState, pruneEchoes, ageEchoes, waitingCount, MAX_OUTSTANDING, OUTBOX_TABS, outboxFull, echoBaseline, loadOutbox, saveOutbox, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
 // blocks, lists were showing as raw pipes/asterisks: Sam's v1.0.53 report);
@@ -667,7 +667,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // Claude's queue and never appeared here; the server now also surfaces
   // queued entries). An echo drops once the transcript shows the same text,
   // or after 90s (e.g. the tab was a bare shell that ran it as a command).
-  // Phone messages from an earlier visit that were never answered as taken come back first, as not confirmed.
+  // Phone messages from an earlier visit that Claude was not known to have read come back first: queued if the Mac took
+  // them (its next state settles them), otherwise as not confirmed.
   const outboxKey = pairingKey(connection.pairing, OUTBOX_KEY);
   const [echoes, setEchoes] = useState(() => loadPhoneOutbox(outboxKey, tabId));
   // Every sendId this page loaded or sent: a save writes or removes only these, never another open page's (Codex r31).
@@ -862,6 +863,11 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           if (!s.on) { setCardBusy(false); setCardNote(''); }
           else setMoveSheet(null); // moved, whatever became of the request that asked
           setPhone(s);
+          // Which phone messages Claude read, and after a run which it never got (Codex r34).
+          setEchoes((cur) => {
+            const n = applyRunState(cur, s);
+            return n === cur ? cur : pruneEchoes(n, messagesRef.current || [], normEcho);
+          });
         }
       } else if ((msg.type === 'ack' || msg.type === 'opError') && msg.id === tabId && msg.reqId != null
           && phoneReqs.current.has(msg.reqId)) {
@@ -1043,12 +1049,12 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       // at most once (phone-mode.js sendOutcome). Several failed messages never share or overwrite one.
       const outcome = sendOutcome(msg);
       if (outcome === 'sent') {
-        // Taken: no longer kept for Send again; the bubble stays until the transcript shows it. Its row may already be
-        // here (an answer that came late, or Send again answered `duplicate`), so look at the rows held now too.
-        setEchoes((cur) => pruneEchoes(cur.map((e) => (e.sendId === entry.sendId ? { ...e, acked: true, fail: null } : e)), messagesRef.current || [], normEcho));
+        // Queued on the Mac: it stays kept until the Mac says Claude read it (applyRunState), which may have come first.
+        setEchoes((cur) => cur.map((e) => (e.sendId === entry.sendId && !e.delivered ? { ...e, acked: true, fail: null } : e)));
         return;
       }
-      setEchoes((cur) => cur.map((e) => (e.sendId === entry.sendId ? { ...e, fail: outcome } : e)));
+      // A message the Mac already listed as read keeps that, whatever this late answer says.
+      setEchoes((cur) => cur.map((e) => (e.sendId === entry.sendId && !e.delivered ? { ...e, fail: outcome } : e)));
       showSendNote(outcome === 'failed' ? `Not sent: ${why}` : 'The Mac did not confirm a message. Tap Send again on it: it is delivered at most once.');
     } else if (failed) flashPhoneNote(why);
   };
@@ -1319,7 +1325,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       // The phone keeps every message the Mac has not answered, across visits, and keeps at most this many: past it a
       // new one waits in the box rather than pushing an older one out unseen (Codex r29).
       if (waitingCount(echoes) >= MAX_OUTSTANDING) {
-        showSendNote(`${MAX_OUTSTANDING} messages are still waiting for the Mac. Send this one once they are answered, or remove one.`);
+        showSendNote(`${MAX_OUTSTANDING} messages are still waiting to reach Claude. Send this one once Claude has them, or remove one that did not go.`);
         return;
       }
       // Across tabs too: a tab's waiting messages are never pushed out of storage for another's (Codex r30).
@@ -1841,7 +1847,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           />
         ))}
         {echoes.map((e) => (
-          <Bubble key={`echo-${e.sendId || e.at}`} role="user" content={e.content} timestamp={e.at} sending
+          <Bubble key={`echo-${e.sendId || e.at}`} role="user" content={e.content} timestamp={e.at}
+            sending={!e.sendId || (!e.acked && !e.delivered)} queued={!!e.acked && !e.delivered}
             failed={e.fail || null} onRetry={e.fail ? () => retryEcho(e) : undefined}
             onRemove={e.fail && e.sendId ? () => setEchoes((cur) => cur.filter((x) => x.sendId !== e.sendId)) : undefined} />
         ))}

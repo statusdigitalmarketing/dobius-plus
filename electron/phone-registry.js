@@ -299,8 +299,8 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS, isLive = () => true, e
 
     /**
      * True the first time a send id is seen in this run, which records it 'pending' (bounded memory, oldest forgotten
-     * first). sendStateOf says what became of one: 'pending' (waiting on the runner), 'taken' (the runner queued it)
-     * or 'unknown' (no answer in time); a send the runner refused is forgotten instead.
+     * first). sendStateOf says what became of one: 'pending' (waiting on the runner), 'taken' (the runner queued it),
+     * 'delivered' (Claude read it) or 'unknown' (no answer in time); a send the runner refused is forgotten instead.
      */
     firstSend(run, sendId) {
       if (run.sendIds.has(sendId)) return false;

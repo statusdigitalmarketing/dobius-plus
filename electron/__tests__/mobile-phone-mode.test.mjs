@@ -3,7 +3,7 @@
 // Run: node --test electron/__tests__/mobile-phone-mode.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { phoneOffered, phoneKnown, sendOutcome, reconcileEchoes, pruneEchoes, ageEchoes, ECHO_TTL_MS, waitingCount, MAX_OUTSTANDING, OUTBOX_TABS, outboxFull, echoBaseline, loadOutbox, saveOutbox, ARRIVAL_SKEW_MS, freshId, readPhoneState, questionAnswer, togglePick, permissionAnswer, planAnswer, refusalText } from '../../mobile/phone-mode.js';
+import { phoneOffered, phoneKnown, sendOutcome, reconcileEchoes, applyRunState, pruneEchoes, ageEchoes, ECHO_TTL_MS, waitingCount, MAX_OUTSTANDING, OUTBOX_TABS, outboxFull, echoBaseline, loadOutbox, saveOutbox, ARRIVAL_SKEW_MS, freshId, readPhoneState, questionAnswer, togglePick, permissionAnswer, planAnswer, refusalText } from '../../mobile/phone-mode.js';
 import { validateAnswer, validatePhoneRequest } from '../phone-protocol.js';
 import { answerMisfit } from '../phone-runner-core.mjs';
 
@@ -43,7 +43,10 @@ test('ids fit the Mac\'s sendId and reqId rules', () => {
 test('readPhoneState: only this tab, off and on shapes, cards filtered', () => {
   assert.equal(readPhoneState({ type: 'phoneState', id: 'other', on: false }, T), null);
   assert.equal(readPhoneState({ type: 'selector', id: T }, T), null);
-  assert.deepEqual(readPhoneState({ type: 'phoneState', id: T, on: false, gen: 3 }, T), { on: false, gen: 3 });
+  assert.deepEqual(readPhoneState({ type: 'phoneState', id: T, on: false, gen: 3 }, T), { on: false, gen: 3, ended: [] });
+  const off = readPhoneState({ type: 'phoneState', id: T, on: false, ended: [{ runId: 'r1', lost: [{ sendId: 'a', why: 'not_sent' }, { sendId: 'b', why: 'evil' }, { why: 'unsure' }] }, { lost: [] }, { runId: 'r2', truncated: true }] }, T);
+  assert.deepEqual(off.ended.map((e) => [e.runId, [...e.lost], e.truncated]), [['r1', [['a', 'not_sent'], ['b', 'unsure']], false], ['r2', [], true]]);
+  assert.deepEqual(readPhoneState({ type: 'phoneState', id: T, on: true, runId: 'r', delivered: ['s1', 7, 's2'] }, T).delivered, ['s1', 's2']);
   const s = readPhoneState({ type: 'phoneState', id: T, on: true, gen: 4, runId: 'r', sessionId: 's', status: 'bogus', pending: [{ requestId: 'q1', kind: 'question' }, { kind: 'question' }, { requestId: 'x', kind: 'evil' }, null] }, T);
   assert.equal(s.status, 'starting', 'an unknown status is not trusted');
   assert.deepEqual(s.pending.map((c) => c.requestId), ['q1']);
@@ -102,7 +105,7 @@ test('a phone message arrives only by a row that was not there when it was sent 
   const echoArrived = (e, rows) => reconcileEchoes([e], rows).length === 0;
   const since = Date.parse('2026-11-14T16:00:00Z');
   const recent = { id: 'u1', role: 'user', content: 'continue', timestamp: '2026-11-14T15:59:50Z' };
-  const echo = { content: 'continue', sendId: 's1', acked: true, since, ...echoBaseline('continue', [recent, { role: 'user', content: 'other', id: 'u0' }]) };
+  const echo = { content: 'continue', sendId: 's1', acked: true, delivered: true, since, ...echoBaseline('continue', [recent, { role: 'user', content: 'other', id: 'u0' }]) };
   assert.deepEqual([echo.known, echo.knownQueued], [['u1'], 0]);
   assert.equal(echoArrived(echo, [recent]), false, 'a row from 10 s before the send is an earlier message');
   assert.equal(echoArrived(echo, [{ id: 'u0', role: 'user', content: 'continue', timestamp: '2026-11-14T15:00:00Z' }]), false, 'an older page');
@@ -114,10 +117,10 @@ test('a phone message arrives only by a row that was not there when it was sent 
   assert.equal(echoArrived(echo, [{ role: 'user', content: 'continue', timestamp: '2026-11-14T16:00:05Z' }]), false, 'no id, not queued: not proof');
 });
 
-test('one transcript row clears one acked phone message, oldest first (Codex r29)', () => {
+test('one transcript row clears one phone message Claude read, oldest first (Codex r29, r34)', () => {
   const since = Date.parse('2026-11-14T16:00:00Z');
-  const a = { content: 'continue', sendId: 'sa', since, known: [], knownQueued: 0, acked: true };
-  const b = { content: 'continue', sendId: 'sb', since: since + 1000, known: [], knownQueued: 0, acked: true };
+  const a = { content: 'continue', sendId: 'sa', since, known: [], knownQueued: 0, acked: true, delivered: true };
+  const b = { content: 'continue', sendId: 'sb', since: since + 1000, known: [], knownQueued: 0, acked: true, delivered: true };
   const row = (id) => ({ id, role: 'user', content: 'continue', timestamp: '2026-11-14T16:00:05Z' });
   assert.deepEqual(reconcileEchoes([a, b], [row('u1')]).map((e) => e.sendId), ['sb']);
   assert.deepEqual(reconcileEchoes([a, b], [row('u1'), row('u2')]), []);
@@ -137,15 +140,16 @@ test('a row never clears a message the Mac did not say it took: only its own sen
   // Another phone sent the same words and its row arrived: none of these is that message.
   assert.deepEqual(reconcileEchoes([lost, refused, pending], rows).map((e) => e.sendId), ['sa', 'sb', 'sc']);
   assert.deepEqual(reconcileEchoes([lost, refused, pending], [{ role: 'user', content: 'continue', queued: true }]).map((e) => e.sendId), ['sa', 'sb', 'sc']);
-  // Send again answered (ack or duplicate): now it is the Mac's word, and a row may clear it.
-  assert.deepEqual(reconcileEchoes([{ ...lost, fail: null, acked: true }], rows), []);
-  assert.equal(waitingCount([lost, refused, pending, { ...lost, sendId: 'sd', acked: true, fail: null }]), 3);
+  // Taken by the Mac is only queued: a row clears it once the Mac says Claude read it (Codex r34).
+  assert.deepEqual(reconcileEchoes([{ ...lost, fail: null, acked: true }], rows).map((e) => e.sendId), ['sa']);
+  assert.deepEqual(reconcileEchoes([{ ...lost, fail: null, acked: true, delivered: true }], rows), []);
+  assert.equal(waitingCount([lost, refused, pending, { ...lost, sendId: 'sd', acked: true, fail: null }, { ...lost, sendId: 'se', delivered: true, fail: null }]), 4);
 });
 
-test('pruneEchoes: acked ones by their rows, local ones by their words, the rest by age; the same array when nothing changed', () => {
+test('pruneEchoes: read ones by their rows, local ones by their words, the rest by age; the same array when nothing changed', () => {
   const since = Date.parse('2026-11-14T22:24:24Z');
   const t = 'Reply with only the word peach.';
-  const a = { content: t, sendId: 'a', since, at: since, known: [], knownQueued: 0, acked: true };
+  const a = { content: t, sendId: 'a', since, at: since, known: [], knownQueued: 0, acked: true, delivered: true };
   const b = { content: t, sendId: 'b', since: since + 380, at: since + 380, known: [], knownQueued: 0, fail: 'unconfirmed' };
   const rows = [{ role: 'user', content: t, timestamp: '2026-11-14T22:24:25Z', id: '60cb90' }, { role: 'assistant', content: 'peach' }];
   const next = pruneEchoes([a, b], rows, undefined, since + 4000);
@@ -155,7 +159,37 @@ test('pruneEchoes: acked ones by their rows, local ones by their words, the rest
   const local = { content: 'hi', at: since };
   assert.deepEqual(pruneEchoes([local], [{ role: 'user', content: 'hi' }], undefined, since + 1000), [], 'a local echo goes once its words show');
   assert.deepEqual(ageEchoes([local], since + ECHO_TTL_MS + 1), [], 'and after the wait');
-  assert.deepEqual(ageEchoes([a], since + ECHO_TTL_MS + 1), [], 'an acked one whose row never came goes after the wait: the Mac has it');
+  assert.deepEqual(ageEchoes([a], since + ECHO_TTL_MS + 1), [], 'one Claude read whose row never came goes after the wait');
+  const queued = { ...a, delivered: false };
+  assert.equal(ageEchoes([queued], since + 10 * ECHO_TTL_MS).length, 1, 'one only queued on the Mac stays until Claude reads it (Codex r34)');
+});
+
+test('applyRunState: read by sendId while the run lives, and after it the Mac\'s list of what never reached Claude decides (Codex r34)', () => {
+  const now = 5_000_000;
+  const m = (id, extra = {}) => ({ content: id, sendId: id, runId: 'r1', since: 1, at: 1, known: [], knownQueued: 0, ...extra });
+  const queuedA = m('a', { acked: true });
+  const lostAnswer = m('b', { fail: 'unconfirmed' });
+  const live = { on: true, runId: 'r1', delivered: ['a', 'b'], ended: [] };
+  const [a1, b1] = applyRunState([queuedA, lostAnswer], live, now);
+  assert.deepEqual([a1.delivered, a1.at, a1.fail], [true, now, null]);
+  assert.deepEqual([b1.delivered, b1.fail, b1.acked], [true, null, true], 'a lost answer is settled by the Mac listing it as read');
+  const same = [queuedA];
+  assert.equal(applyRunState(same, { on: true, runId: 'r1', delivered: [], ended: [] }, now), same, 'nothing new: the same array');
+  // The run is over (given back): its list says c never left the queue, d reached Claude unread; e is not listed.
+  const c = m('c', { acked: true }); const d = m('d', { acked: true }); const e = m('e', { acked: true });
+  const refused = m('f', { fail: 'failed' }); const unanswered = m('g', { fail: 'unconfirmed' });
+  const lost = new Map([['c', 'not_sent'], ['d', 'unsure']]);
+  const off = { on: false, ended: [{ runId: 'r1', lost, truncated: false }] };
+  const out = applyRunState([c, d, e, refused, unanswered], off, now);
+  assert.deepEqual(out.map((x) => [x.sendId, x.fail || null, !!x.delivered]),
+    [['c', 'failed', false], ['d', 'unconfirmed', false], ['e', null, true], ['f', 'failed', false], ['g', 'unconfirmed', false]]);
+  // A later run on the tab: the old run's message is judged by the old run's list, not the new run's.
+  assert.equal(applyRunState([c], { on: true, runId: 'r2', delivered: ['c'], ended: off.ended }, now)[0].fail, 'failed');
+  // A list the Mac cut short, or a run it no longer knows: a queued message is not confirmed, never called read.
+  assert.equal(applyRunState([e], { on: false, ended: [{ runId: 'r1', lost: new Map(), truncated: true }] }, now)[0].fail, 'unconfirmed');
+  assert.equal(applyRunState([e], { on: false, ended: [] }, now)[0].fail, 'unconfirmed');
+  // Only a message the Mac took is called read by its absence: a refused one stays Not sent.
+  assert.equal(applyRunState([refused], off, now)[0], refused);
 });
 
 // localStorage's methods over a Map, for the outbox tests.
@@ -173,16 +207,16 @@ function fakeStorage() {
 const BASE = 'dobius-mobile-phone-msg:pair1';
 const RUN = 'r'.repeat(32);
 
-test('the outbox keeps unanswered phone messages across visits and brings them back as not confirmed (Codex r28)', () => {
+test('the outbox keeps phone messages Claude has not read across visits: unanswered ones not confirmed, queued ones queued (Codex r28, r34)', () => {
   const now = Date.parse('2026-11-14T16:00:00Z');
   const st = fakeStorage();
   const e = (i, extra = {}) => ({ content: `m${i}`, sendId: `s${i}`, runId: RUN, since: now - 100 + i, known: ['x'], knownQueued: 0, ...extra });
-  saveOutbox(st, BASE, 'term-/p/a b:1', [e(1), e(2, { acked: true }), e(3, { fail: 'failed' })], new Set());
-  assert.equal(st.keys().length, 2, 'a message the Mac took is not kept');
+  saveOutbox(st, BASE, 'term-/p/a b:1', [e(1), e(2, { acked: true }), e(3, { fail: 'failed' }), e(4, { acked: true, delivered: true })], new Set());
+  assert.equal(st.keys().length, 3, 'a message Claude read is not kept; one only queued on the Mac is');
   const back = loadOutbox(st, BASE, 'term-/p/a b:1', now);
-  assert.deepEqual(back.map((x) => [x.sendId, x.fail]), [['s1', 'unconfirmed'], ['s3', 'failed']]);
+  assert.deepEqual(back.map((x) => [x.sendId, x.fail, x.acked === true]), [['s1', 'unconfirmed', false], ['s2', null, true], ['s3', 'failed', false]]);
   assert.deepEqual(loadOutbox(st, BASE, 'term-/p/other', now), [], 'only this tab');
-  saveOutbox(st, BASE, 'term-/p/a b:1', [], new Set(['s1', 's3']));
+  saveOutbox(st, BASE, 'term-/p/a b:1', [], new Set(['s1', 's2', 's3']));
   assert.equal(st.keys().length, 0, 'settled ones are removed');
   st.setItem(`${BASE}|T|s9`, JSON.stringify(e(9, { sendId: 's9', since: now - 8 * 86_400_000 })));
   st.setItem(`${BASE}|T|s8`, '{not json');
@@ -203,8 +237,8 @@ test('two pages on one phone never lose each other\'s messages, however their sa
   saveOutbox(st, BASE, 'T', [msg('A', { fail: 'unconfirmed' })], ownedA);
   saveOutbox(st, BASE, 'T', [msg('B', { fail: 'unconfirmed' })], ownedB);
   assert.deepEqual(loadOutbox(st, BASE, 'T', now).map((e) => e.sendId).sort(), ['A', 'B']);
-  // Page A's message is answered: only A's key goes.
-  saveOutbox(st, BASE, 'T', [msg('A', { acked: true })], ownedA);
+  // Page A's message is read by Claude: only A's key goes.
+  saveOutbox(st, BASE, 'T', [msg('A', { acked: true, delivered: true })], ownedA);
   assert.deepEqual(loadOutbox(st, BASE, 'T', now).map((e) => e.sendId), ['B']);
 });
 

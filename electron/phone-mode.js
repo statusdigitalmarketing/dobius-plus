@@ -11,7 +11,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { createPhoneRegistry } from './phone-registry.js';
+import { createPhoneRegistry, MAX_SEND_IDS } from './phone-registry.js';
 import {
   realSys, parsePsAll, groupState, pidState, endGroup, endPid, taggedRows, createRunStore, sweepAtLaunch,
 } from './phone-procs.js';
@@ -30,6 +30,14 @@ export const COMMAND_MS = 10_000; // a command to the runner must be answered wi
 const LATE_MS = 5 * 60_000; // a send that timed out still hears the runner's late answer this long
 export const SPAWN_WAIT_MS = 5_000; // a runner hello waits this long for its gate's spawn report
 const TICK_MS = 1_000;
+// What became of a run's phone messages is kept after the run ends, so a phone that comes back later learns which never
+// reached Claude (Codex r34). ponytail: memory only, at most ENDED_TABS tabs x ENDED_RUNS runs x ENDED_LOST ids, for a
+// day; a phone asking after a Mac restart finds nothing and shows those messages as not confirmed.
+const ENDED_TABS = 64;
+const ENDED_RUNS = 4;
+const ENDED_LOST = 64;
+const ENDED_MS = 24 * 3600_000;
+const DELIVERED_SHOWN = 64; // the newest sendIds a live run reports as read by Claude
 
 const REQUEST_ID = /^[\x21-\x7e]{1,200}$/;
 const CARD_KINDS = new Set(['question', 'permission', 'plan']);
@@ -80,7 +88,58 @@ export function createPhoneMode(d) {
   let reqSeq = 0;
 
   const fail = (code, error) => ({ ok: false, code, error });
-  const notify = (run) => { try { d.notify?.(run.tabId, reg.stateOf(run.tabId)); } catch (e) { log(`phone: notify failed: ${e.message}`); } };
+  const notify = (run) => { try { d.notify?.(run.tabId, stateOf(run.tabId)); } catch (e) { log(`phone: notify failed: ${e.message}`); } };
+
+  // tabId -> [{ runId, at, lost: Map(sendId -> 'not_sent' | 'unsure'), truncated }], oldest tab first.
+  const endedByTab = new Map();
+  const endedOf = (tabId) => (endedByTab.get(tabId) || []).filter((e) => now() - e.at < ENDED_MS);
+  const endedRun = (run) => endedOf(run.tabId).find((e) => e.runId === run.runId);
+
+  // The run is ending: every phone message not known to have reached Claude is lost until the runner says otherwise
+  // (its `ended` names those that never left its queue; a later `delivered` takes one off). Once per run.
+  function noteEnded(run) {
+    if (endedRun(run)) return;
+    const ids = [...(run.sendIds || [])].filter(([, st]) => st !== 'delivered').map(([id]) => id);
+    const lost = new Map(ids.slice(-ENDED_LOST).map((id) => [id, 'unsure']));
+    const list = [...endedOf(run.tabId), { runId: run.runId, at: now(), lost, truncated: ids.length > ENDED_LOST }].slice(-ENDED_RUNS);
+    endedByTab.delete(run.tabId);
+    endedByTab.set(run.tabId, list);
+    if (endedByTab.size > ENDED_TABS) endedByTab.delete(endedByTab.keys().next().value);
+  }
+
+  /** The phone's view of a tab: the registry's state, the sendIds Claude read in the live run, and ended runs' losses. */
+  function stateOf(tabId) {
+    const s = { ...reg.stateOf(tabId) };
+    const run = reg.runOfTab(tabId);
+    if (s.on && run?.delivered?.length) s.delivered = [...run.delivered];
+    const ended = endedOf(tabId);
+    if (ended.length) {
+      s.ended = ended.map((e) => ({
+        runId: e.runId, lost: [...e.lost].map(([sendId, why]) => ({ sendId, why })), ...(e.truncated ? { truncated: true } : {}),
+      }));
+    }
+    return s;
+  }
+
+  // Main's request id of each send the runner took, so its `delivered` and `ended` can be mapped back to sendIds.
+  function noteSendReq(run, reqId, sendId) {
+    if (!run.sendReqs) run.sendReqs = new Map();
+    run.sendReqs.set(reqId, sendId);
+    if (run.sendReqs.size > MAX_SEND_IDS) run.sendReqs.delete(run.sendReqs.keys().next().value);
+  }
+  function onDelivered(run, reqIds) {
+    let changed = false;
+    for (const reqId of reqIds) {
+      const sendId = run.sendReqs?.get(reqId);
+      if (!sendId) continue;
+      run.sendReqs.delete(reqId);
+      reg.setSendState(run, sendId, 'delivered');
+      run.delivered = [...(run.delivered || []), sendId].slice(-DELIVERED_SHOWN);
+      endedRun(run)?.lost.delete(sendId);
+      changed = true;
+    }
+    if (changed) notify(run);
+  }
 
   function record(run) {
     try {
@@ -279,7 +338,18 @@ export function createPhoneMode(d) {
       if (w && w.runId === run.runId) { replies.delete(m.reqId); clearTimeout(w.timer); w.resolve(m); }
       return undefined;
     }
-    if (m.t === 'ended') { endRun(run, plain(m.reason, 200) || 'ended'); return undefined; }
+    if (m.t === 'delivered') { if (Array.isArray(m.reqIds)) onDelivered(run, m.reqIds.slice(0, 256)); return undefined; }
+    if (m.t === 'ended') {
+      noteEnded(run);
+      const lost = endedRun(run)?.lost;
+      for (const reqId of Array.isArray(m.notSent) ? m.notSent.slice(0, 256) : []) {
+        const sendId = run.sendReqs?.get(reqId);
+        if (sendId && lost?.has(sendId)) lost.set(sendId, 'not_sent');
+      }
+      endRun(run, plain(m.reason, 200) || 'ended');
+      notify(run);
+      return undefined;
+    }
     return undefined;
   }
 
@@ -392,6 +462,7 @@ export function createPhoneMode(d) {
   // ---- ending and cleanup ----
 
   function endRun(run, reason) {
+    noteEnded(run);
     if (reg.end(run, reason)) run.endingAt = now();
     for (const [id, w] of replies) if (w.runId === run.runId) { replies.delete(id); clearTimeout(w.timer); w.resolve({ ok: false, code: 'ending', error: 'the phone session is ending' }); }
     afterChange(run);
@@ -512,8 +583,9 @@ export function createPhoneMode(d) {
 
   // `late`, when given, still receives the runner's answer after a timeout (for LATE_MS), so a send that timed out
   // learns whether it was taken after all. One entry per timed-out command, removed when it answers or expires.
-  function command(run, conn, obj, { late } = {}) {
+  function command(run, conn, obj, { late, onReqId } = {}) {
     const reqId = `c${++reqSeq}`;
+    onReqId?.(reqId);
     const ms = d.commandMs ?? COMMAND_MS;
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -539,6 +611,8 @@ export function createPhoneMode(d) {
   // What a runner answer means for a send id: taken, refused (forgotten, so it may go again) or not known. A late
   // answer to a send that timed out lands here too (Codex r28).
   function settleSend(run, sendId, r) {
+    // A reply and the runner's `delivered` can arrive in one read, the reply settling a microtask later: never undo it.
+    if (reg.sendStateOf(run, sendId) === 'delivered') return;
     if (r?.ok) reg.setSendState(run, sendId, 'taken');
     else if (SEND_NOT_TAKEN.has(r?.code)) reg.forgetSend(run, sendId);
     else reg.setSendState(run, sendId, 'unknown');
@@ -549,7 +623,7 @@ export function createPhoneMode(d) {
     if (error) return error;
     const key = `${run.runId}:${sendId}`;
     const state = reg.sendStateOf(run, sendId);
-    if (state === 'taken') return { ok: true, duplicate: true };
+    if (state === 'taken' || state === 'delivered') return { ok: true, duplicate: true };
     // No answer yet for the first try: say so again, never "duplicate", until the runner's answer settles it.
     if (state === 'unknown') return fail('timeout', NOT_KNOWN);
     if (state === 'pending') {
@@ -561,7 +635,7 @@ export function createPhoneMode(d) {
       return SEND_NOT_TAKEN.has(r.code) ? send(tabId, runId, text, sendId) : r;
     }
     reg.firstSend(run, sendId);
-    const p = command(run, conn, { t: 'send', text }, { late: (m) => settleSend(run, sendId, m) })
+    const p = command(run, conn, { t: 'send', text }, { late: (m) => settleSend(run, sendId, m), onReqId: (id) => noteSendReq(run, id, sendId) })
       .then((r) => { settleSend(run, sendId, r); return r; })
       .finally(() => { if (sending.get(key) === p) sending.delete(key); });
     sending.set(key, p);
@@ -603,7 +677,7 @@ export function createPhoneMode(d) {
     /** The session a tab's conversation on the phone runs (until released), so session tracking counts it running. */
     sessionOfTab: (tabId) => { const r = reg.runOfTab(tabId); return r && !r.released ? r.sessionId : null; },
     gen: (tabId) => reg.gen(tabId),
-    stateOf: (tabId) => reg.stateOf(tabId),
+    stateOf,
     close: async () => { if (tickTimer) clearInterval(tickTimer); tickTimer = null; await server?.close(); ready = false; },
     // tests
     _registry: reg, _tick: tick, _runDir: () => runDir,

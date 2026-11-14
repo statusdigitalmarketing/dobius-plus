@@ -24,15 +24,30 @@ const STATUSES = new Set(['starting', 'idle', 'working', 'waiting', 'ending']);
 export function readPhoneState(msg, tabId) {
   if (!msg || msg.type !== 'phoneState' || msg.id !== tabId) return null;
   const gen = Number.isSafeInteger(msg.gen) && msg.gen >= 0 ? msg.gen : null;
-  if (msg.on !== true) return { on: false, gen };
+  const ended = readEnded(msg.ended);
+  if (msg.on !== true) return { on: false, gen, ended };
   return {
-    on: true, gen,
+    on: true, gen, ended,
+    delivered: Array.isArray(msg.delivered) ? msg.delivered.filter((x) => typeof x === 'string').slice(-64) : [],
     runId: typeof msg.runId === 'string' ? msg.runId : null,
     sessionId: typeof msg.sessionId === 'string' ? msg.sessionId : null,
     status: STATUSES.has(msg.status) ? msg.status : 'starting',
     error: typeof msg.error === 'string' ? msg.error : '',
     pending: Array.isArray(msg.pending) ? msg.pending.filter((c) => c && typeof c.requestId === 'string' && ['question', 'permission', 'plan'].includes(c.kind)) : [],
   };
+}
+
+// Ended runs as the Mac reports them: which phone messages never reached Claude ('not_sent') or reached it unread
+// ('unsure'), and `truncated` when the Mac kept only part of that list.
+function readEnded(list) {
+  if (!Array.isArray(list)) return [];
+  return list.slice(-8).filter((e) => e && typeof e.runId === 'string').map((e) => ({
+    runId: e.runId,
+    truncated: e.truncated === true,
+    lost: new Map((Array.isArray(e.lost) ? e.lost : []).slice(0, 64)
+      .filter((x) => x && typeof x.sendId === 'string')
+      .map((x) => [x.sendId, x.why === 'not_sent' ? 'not_sent' : 'unsure'])),
+  }));
 }
 
 /** What the header says while the conversation is on the phone. */
@@ -126,8 +141,8 @@ export function echoBaseline(content, rows, norm = (t) => String(t).trim()) {
 }
 
 /**
- * Takes away the bubbles of phone messages the transcript now shows. Only a message the Mac said it took (`acked`) is
- * matched to a row: a row carries no sendId, so the same words from another phone, or an earlier message, would look
+ * Takes away the bubbles of phone messages the transcript now shows. Only a message the Mac said Claude read
+ * (`delivered`) is matched to a row: a row carries no sendId, so the same words from another phone, or an earlier message, would look
  * the same, and a message whose answer was lost must keep its bubble and Send again until its own sendId settles it
  * (Send again answers `duplicate` for one that arrived) or it is removed (Codex r30). One row per message, oldest first,
  * never a row that was there when it was sent. Echoes without a sendId are left alone. The same array when nothing
@@ -138,7 +153,7 @@ export function reconcileEchoes(echoes, rows, norm = (t) => String(t).trim()) {
   const used = new Set();
   const queuedUsed = new Map();
   const cleared = new Set();
-  const order = list.filter((e) => e && e.sendId && e.acked === true && !e.fail).sort((a, b) => a.since - b.since);
+  const order = list.filter((e) => e && e.sendId && e.delivered === true && !e.fail).sort((a, b) => a.since - b.since);
   for (const e of order) {
     const want = norm(e.content);
     const known = new Set(Array.isArray(e.known) ? e.known : []);
@@ -166,13 +181,13 @@ export function reconcileEchoes(echoes, rows, norm = (t) => String(t).trim()) {
   return cleared.size ? list.filter((e) => !cleared.has(e)) : list;
 }
 
-/** How long a bubble waits for its row before it goes. A phone message that failed or was never confirmed stays. */
+/** How long a bubble waits for its row before it goes. A phone message Claude has not read stays. */
 export const ECHO_TTL_MS = 90_000;
 
-/** Echoes past their wait dropped, except a phone message that failed or was never confirmed. Same array if none. */
+/** Echoes past their wait dropped, except a phone message Claude is not known to have read. Same array if none. */
 export function ageEchoes(cur, now = Date.now()) {
   if (!cur || cur.length === 0) return cur;
-  const kept = cur.filter((e) => e.fail || now - e.at < ECHO_TTL_MS);
+  const kept = cur.filter((e) => e.fail || (e.sendId && !e.delivered) || now - e.at < ECHO_TTL_MS);
   return kept.length === cur.length ? cur : kept;
 }
 
@@ -188,10 +203,41 @@ export function pruneEchoes(cur, rows, norm = (t) => String(t).trim(), now = Dat
   return ageEchoes(local.length === cur.length ? cur : local, now);
 }
 
-/** Phone messages on this tab still waiting for the Mac's answer. */
-export const waitingCount = (echoes) => (echoes || []).filter((e) => e && e.sendId && !e.acked).length;
+/**
+ * Applies what the Mac says about a tab's runs to its phone messages (Codex r34). The Mac's answer to a send says only
+ * that the runner queued it: the message is read by Claude when the Mac lists its sendId as delivered (that also
+ * settles one whose answer was lost). Once its run is over, the Mac's list of that run's losses decides: never sent
+ * ('not_sent') comes back Not sent, reached Claude unread ('unsure') Not confirmed; a queued message missing from a
+ * complete list was read. A run the Mac no longer knows leaves its queued messages Not confirmed. `s` is a
+ * readPhoneState result; the same array when nothing changed.
+ */
+export function applyRunState(echoes, s, now = Date.now()) {
+  if (!echoes || echoes.length === 0 || !s) return echoes;
+  const read = new Set(s.on ? s.delivered || [] : []);
+  let changed = false;
+  const next = echoes.map((e) => {
+    if (!e || !e.sendId || e.delivered) return e;
+    const live = s.on && s.runId === e.runId;
+    if (live) {
+      if (!read.has(e.sendId)) return e;
+      changed = true;
+      return { ...e, acked: true, delivered: true, fail: null, at: now };
+    }
+    if (!e.acked) return e; // never taken, or its answer was lost: Send again settles it
+    const ended = (s.ended || []).find((x) => x.runId === e.runId);
+    const why = ended?.lost.get(e.sendId);
+    changed = true;
+    if (why) return { ...e, acked: false, fail: why === 'not_sent' ? 'failed' : 'unconfirmed' };
+    if (!ended || ended.truncated) return { ...e, acked: false, fail: 'unconfirmed' };
+    return { ...e, delivered: true, at: now };
+  });
+  return changed ? next : echoes;
+}
 
-/** How many phone messages may wait for an answer on one tab: the outbox keeps exactly these, so none is dropped. */
+/** Phone messages on this tab Claude is not known to have read (each kept in the outbox until it is). */
+export const waitingCount = (echoes) => (echoes || []).filter((e) => e && e.sendId && !e.delivered).length;
+
+/** How many phone messages may wait to reach Claude on one tab: the outbox keeps exactly these, so none is dropped. */
 export const MAX_OUTSTANDING = 5;
 /** How many tabs may have phone messages waiting at once; past it the composer refuses rather than drop a tab's. */
 export const OUTBOX_TABS = 20;
@@ -227,8 +273,9 @@ function readEntry(storage, key, now) {
 
 /**
  * The phone messages not yet known to have reached a tab, as kept between visits (the chat screen unmounts when the
- * person leaves the tab), oldest first, 7 days at most (older or unreadable entries are removed). One read on load
- * means "the answer was never seen", so each comes back as not confirmed, with Send again (Codex r28).
+ * person leaves the tab), oldest first, 7 days at most (older or unreadable entries are removed). One the Mac took
+ * comes back queued, for the Mac's next state to settle (applyRunState); any other one's answer was never seen, so it
+ * comes back as not confirmed, with Send again (Codex r28).
  */
 export function loadOutbox(storage, base, tabId, now = Date.now()) {
   const list = [];
@@ -242,22 +289,23 @@ export function loadOutbox(storage, base, tabId, now = Date.now()) {
     content: e.content, sendId: e.sendId, runId: e.runId, since: e.since, at: e.since,
     known: Array.isArray(e.known) ? e.known.filter((k) => typeof k === 'string').slice(-MAX_KNOWN) : [],
     knownQueued: Number.isInteger(e.knownQueued) ? e.knownQueued : 0,
-    fail: e.fail === 'failed' ? 'failed' : 'unconfirmed',
+    ...(e.acked === true && !e.fail ? { acked: true, fail: null } : { fail: e.fail === 'failed' ? 'failed' : 'unconfirmed' }),
   }));
 }
 
 /**
- * Saves this page's phone messages for a tab: each one not yet answered as taken is written under its own key, and each
- * sendId in `owned` (what this page loaded or sent) that is no longer waiting is removed. Nothing else is touched.
+ * Saves this page's phone messages for a tab: each one Claude is not known to have read is written under its own key,
+ * and each sendId in `owned` (what this page loaded or sent) that is no longer waiting is removed. Nothing else is
+ * touched.
  */
 export function saveOutbox(storage, base, tabId, echoes, owned) {
-  const waiting = new Map((echoes || []).filter((e) => e && e.sendId && !e.acked).map((e) => [e.sendId, e]));
+  const waiting = new Map((echoes || []).filter((e) => e && e.sendId && !e.delivered).map((e) => [e.sendId, e]));
   for (const id of new Set([...(owned || []), ...waiting.keys()])) {
     const key = msgKey(base, tabId, id);
     const e = waiting.get(id);
     if (!e) { storage.removeItem(key); continue; }
     const { content, sendId, runId, since, known, knownQueued, fail } = e;
-    const value = JSON.stringify({ content, sendId, runId, since, known, knownQueued, fail: fail || null });
+    const value = JSON.stringify({ content, sendId, runId, since, known, knownQueued, fail: fail || null, acked: e.acked === true });
     if (storage.getItem(key) !== value) storage.setItem(key, value);
   }
 }

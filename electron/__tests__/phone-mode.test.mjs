@@ -389,6 +389,69 @@ test('a send the runner refuses can go again with the same id; one that timed ou
   } finally { await ctx.cleanup(); }
 });
 
+test('the phone learns which messages Claude read, and after the run which it never got, even once the run is forgotten (Codex r34)', async () => {
+  const ctx = setup({ commandMs: 300 });
+  try {
+    const { runId, runner, gate, doneToken } = await live(ctx);
+    const sendOne = async (text, id) => {
+      const p = ctx.mode.send('T1', runId, text, id);
+      const m = await runner.next();
+      return { p, m };
+    };
+    // The reply and the runner's `delivered` in one write: the reply settles a microtask later and must not undo it.
+    const a = await sendOne('a', 'send-a');
+    runner.send({ t: 'reply', reqId: a.m.reqId, ok: true });
+    runner.send({ t: 'delivered', reqIds: [a.m.reqId, 'c-unknown'] });
+    assert.deepEqual(await a.p, { ok: true });
+    const [, b] = await Promise.all([ctx.mode.send('T1', runId, 'b', 'send-b'), serve(runner)]);
+    const [, c] = await Promise.all([ctx.mode.send('T1', runId, 'c', 'send-c'), serve(runner)]);
+    const [, e] = await Promise.all([ctx.mode.send('T1', runId, 'e', 'send-e'), serve(runner)]);
+    await sleep(50);
+    let st = ctx.mode.stateOf('T1');
+    assert.deepEqual(st.delivered, ['send-a']);
+    assert.equal(st.ended, undefined);
+    assert.deepEqual(await ctx.mode.send('T1', runId, 'a', 'send-a'), { ok: true, duplicate: true });
+
+    // Give back with the runner slow to answer: main ends the run itself, then hears from the runner.
+    const gb = ctx.mode.giveBack('T1', runId);
+    assert.equal((await runner.next()).t, 'give-back');
+    assert.deepEqual(await gb, { ok: true });
+    assert.deepEqual(ctx.mode.stateOf('T1').ended[0].lost.map((x) => x.sendId), ['send-b', 'send-c', 'send-e']);
+    // The runner: c never left its queue, b reached Claude unread; e was read as it ended.
+    runner.send({ t: 'delivered', reqIds: [e.reqId] });
+    runner.send({ t: 'ended', reason: 'given back on the phone', notSent: [c.reqId], unsure: [b.reqId] });
+    await sleep(50);
+    const lost = [{ sendId: 'send-b', why: 'unsure' }, { sendId: 'send-c', why: 'not_sent' }];
+    assert.deepEqual(ctx.mode.stateOf('T1').ended, [{ runId, lost }]);
+    // Cleanup finishes and the run is forgotten: a phone asking later still learns it.
+    for (const pid of [2200, 2300, 2100]) ctx.sys.table.delete(pid);
+    runner.end();
+    gate.end();
+    const done = client(socketPath(ctx.mode._runDir()));
+    done.send({ t: 'done', token: doneToken });
+    assert.deepEqual(await done.next(), { t: 'done-ok' });
+    await ctx.mode._tick();
+    assert.equal(ctx.mode._registry.list().length, 0, 'forgotten');
+    st = ctx.mode.stateOf('T1');
+    assert.equal(st.on, false);
+    assert.deepEqual(st.ended, [{ runId, lost }]);
+  } finally { await ctx.cleanup(); }
+});
+
+test('a runner that drops without a word leaves every message Claude was not seen to read as not confirmed (Codex r34)', async () => {
+  const ctx = setup();
+  try {
+    const { runId, runner } = await live(ctx);
+    const [, a] = await Promise.all([ctx.mode.send('T1', runId, 'a', 'send-a'), serve(runner)]);
+    await Promise.all([ctx.mode.send('T1', runId, 'b', 'send-b'), serve(runner)]);
+    runner.send({ t: 'delivered', reqIds: [a.reqId] });
+    await sleep(30);
+    runner.end();
+    await sleep(80);
+    assert.deepEqual(ctx.mode.stateOf('T1').ended, [{ runId, lost: [{ sendId: 'send-b', why: 'unsure' }] }]);
+  } finally { await ctx.cleanup(); }
+});
+
 test('a retry while the first send is still waiting gets its outcome, not an early duplicate (Codex r27)', async () => {
   const ctx = setup();
   try {

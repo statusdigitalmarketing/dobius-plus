@@ -250,18 +250,21 @@ export function createInputQueue(max = MAX_QUEUED_MESSAGES) {
   const items = [];
   let waiter = null;
   let closed = false;
-  const msg = (text) => ({ type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null });
+  // `uuid`, when given, is the message's client id: Claude names it in `user_message_uuids` on the reply that read it.
+  const msg = (text, uuid) => ({ type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null, ...(uuid ? { uuid } : {}) });
   const close = () => {
     closed = true;
     if (waiter) { const w = waiter; waiter = null; w({ value: undefined, done: true }); }
   };
   return {
     /** False when closed or full; the caller refuses the send rather than dropping it silently. */
-    push(text) {
+    push(text, uuid) {
       if (closed || items.length >= max) return false;
-      if (waiter) { const w = waiter; waiter = null; w({ value: msg(text), done: false }); } else items.push(msg(text));
+      if (waiter) { const w = waiter; waiter = null; w({ value: msg(text, uuid), done: false }); } else items.push(msg(text, uuid));
       return true;
     },
+    /** The client ids of the messages the SDK has not taken yet: those never reached Claude. */
+    waiting() { return new Set(items.map((m) => m.uuid).filter(Boolean)); },
     close,
     get closed() { return closed; },
     [Symbol.asyncIterator]() {
