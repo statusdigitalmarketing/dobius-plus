@@ -1135,3 +1135,9 @@
 - **FIX**: process.cpuUsage(), fastest of three, a fixed bound only where the gap is wide (stripAnsi: 70 to 150ms now vs 450 to 500ms old), a ratio against a function measured in the same run where it is narrow (claudeTuiPresent under 1.5x stripAnsi), and a source check for the structural property (every stripAnsi call in mobile-server.js passes TUI_TAIL).
 - **CONTEXT**: Any perf guard that runs in the release preflight on this Mac must not use wall time. Sabotage-check each bound against the exact regression it guards, inside the real test run (the same bound measured 3.5x standalone and 1.8x in-test).
 - **DETECTION**: `grep -rn "Date.now() - t0\|performance.now() - " electron/__tests__ | grep -i "assert"`
+
+### Process - 2026-11-14
+- **MISTAKE**: Release notes for 2.2.32 said "When the Mac is offline". Notes show on Windows too, and Max's Claude had already flagged Mac wording in the 2.2.30 notes, so the same note came back a second time before anything checked for it. (2.2.30's "Your Macs" and "Add a Mac" name phone screens and stay.) The first check (PR #16) missed "that Mac", possessives, quoted and zero-width-split spellings, and wrongly refused "MAC address"; my own 2.2.33 draft then tripped it with "on the Mac".
+- **FIX**: `scripts/whats-new-check.mjs` `machineNamedMac(line)` refuses any standalone "Mac"/"mac" word in a notes line (after removing "Add a Mac"), so release.sh stops on it. Write "this computer" or "the computer".
+- **CONTEXT**: A reviewer's wording note that repeats across releases is a missing check, not a typo. Turn it into a test the release refuses on, the first time it repeats.
+- **DETECTION**: `node scripts/whats-new-check.mjs patch` (and `grep -n "[Mm]ac\b" electron/whats-new/*.md` for older notes)
