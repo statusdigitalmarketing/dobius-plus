@@ -239,7 +239,14 @@ test('an earlier run\'s session is held from construction, before init, until th
   const mode = createPhoneMode({ ...ctx.d, userData });
   try {
     assert.deepEqual([...mode.heldSessions()], [S2], 'held before init');
+    assert.equal(mode.heldUntilSwept(S2), true, 'a launch resume should wait for the sweep (Codex impl r17)');
+    let swept = false;
+    void mode.whenSwept().then(() => { swept = true; });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(swept, false, 'not settled before init');
     await mode.init();
+    await mode.whenSwept();
+    assert.equal(mode.heldUntilSwept(S2), false);
     assert.deepEqual([...mode.heldSessions()], [], 'released once the sweep found it safe');
   } finally {
     await mode.close();
@@ -478,4 +485,23 @@ test('a gate that does not run under the tab\'s shell is refused and the run end
     assert.equal(ctx.mode.stateOf('T1').status, 'ending');
     assert.ok(ctx.mode.heldSessions().has(S));
   } finally { await ctx.cleanup(); }
+});
+
+test('a failed init still settles whenSwept, and keeps the start hold (Codex impl r17)', async () => {
+  const userData = fs.realpathSync(fs.mkdtempSync(path.join(tmpBase(), 'pm-')));
+  const S2 = '1b5c2a6e-1111-4222-8333-444455556666';
+  fs.writeFileSync(path.join(userData, 'phone-runs.json'), JSON.stringify([{ runId: 'c'.repeat(32), sessionId: S2, boot: 1, pgid: null, claudePid: null, aliveAt: 0 }]));
+  const ctx = setup();
+  const sys = { ...ctx.sys, bootSec: async () => { throw new Error('no boot time'); } };
+  const mode = createPhoneMode({ ...ctx.d, userData, sys });
+  try {
+    await assert.rejects(mode.init(), /no boot time/);
+    await mode.whenSwept();
+    assert.equal(mode.heldUntilSwept(S2), true);
+    assert.ok(mode.heldSessions().has(S2));
+  } finally {
+    await mode.close();
+    await ctx.cleanup();
+    fs.rmSync(userData, { recursive: true, force: true });
+  }
 });

@@ -16,7 +16,7 @@
     "test:phonesock": "node --test --test-timeout=10000 --test-force-exit electron/__tests__/phone-socket.test.mjs",
     "test:phonerunner": "node --test --test-timeout=30000 --test-force-exit electron/__tests__/phone-runner.test.mjs",
     "test:phonemode": "node --test --test-timeout=20000 --test-force-exit electron/__tests__/phone-mode.test.mjs",
-    "test:phonews": "node --import ./electron/__tests__/register.mjs --test --test-timeout=20000 ./electron/__tests__/phone-mode-ws.test.mjs",
+    "test:phonews": "node --import ./electron/__tests__/register.mjs --test --test-timeout=20000 ./electron/__tests__/phone-mode-ws.test.mjs ./electron/__tests__/held-settled.test.mjs",
     "test:phonecore": "node --test --test-timeout=5000 --test-force-exit electron/__tests__/phone-runner-core.test.mjs",
     "test:phonelaunch": "node --test electron/__tests__/phone-launch.test.mjs",
     "test:phoneprocs": "node --test electron/__tests__/phone-procs.test.mjs",

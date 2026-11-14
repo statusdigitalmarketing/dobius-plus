@@ -61,6 +61,10 @@ export function createPhoneMode(d) {
   let startHeld = new Set();
   try { for (const r of store.read()) if (typeof r?.sessionId === 'string' && r.sessionId) startHeld.add(r.sessionId); }
   catch (e) { log(`phone: could not read earlier runs: ${e.message}`); }
+  // Settles when init's sweep has decided (or init failed): a launch resume waits on it before claiming a session the
+  // start hold covers, instead of being refused once and never retried (Codex P1, impl round 17).
+  let sweptDone;
+  const swept = new Promise((resolve) => { sweptDone = resolve; });
   const conns = new Map(); // runId -> runner connection
   const replies = new Map(); // reqId -> { resolve, timer }
   const spawnWaits = new Map(); // runId -> wake: a runner hello waiting for its gate's spawn report (one per run)
@@ -92,6 +96,9 @@ export function createPhoneMode(d) {
 
   /** Start the socket after cleaning up what a crash left. Call before auto-resume answers any claim. */
   async function init() {
+    try { return await initNow(); } finally { sweptDone(); }
+  }
+  async function initNow() {
     runDir = ensureRunDir(d.userData);
     boot = await sys.bootSec();
     // Leftover one-time files from an earlier run of Dobius: their tokens died with it.
@@ -116,6 +123,10 @@ export function createPhoneMode(d) {
     return out;
   };
   /** A tab whose input belongs to phone mode (every typing path refuses it). */
+  /** Whether a session is held only until the launch sweep decides (the claim would be refused now, maybe not later). */
+  const heldUntilSwept = (sessionId) => startHeld.has(sessionId);
+  /** Settles once the launch sweep has decided, whatever it found. */
+  const whenSwept = () => swept;
   const isPhoneTab = (tabId) => { const r = reg.runOfTab(tabId); return !!r && !r.released; };
 
   // ---- start ----
@@ -540,7 +551,7 @@ export function createPhoneMode(d) {
   }
 
   return {
-    init, take, send, answer, stopTurn, giveBack, tabClosed, quitSweep, heldSessions, isPhoneTab,
+    init, take, send, answer, stopTurn, giveBack, tabClosed, quitSweep, heldSessions, heldUntilSwept, whenSwept, isPhoneTab,
     /** The session a tab's conversation on the phone runs (until released), so session tracking counts it running. */
     sessionOfTab: (tabId) => { const r = reg.runOfTab(tabId); return r && !r.released ? r.sessionId : null; },
     gen: (tabId) => reg.gen(tabId),

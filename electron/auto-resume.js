@@ -31,7 +31,7 @@
 
 import { getAutoResume, getSessionTabMap, loadConfig, clearSessionTabUncertain, getPreviousLaunchAt } from './config-manager.js';
 import {
-  listTerminals, writeTerminal, releaseSessionResume, claimSessionResume,
+  listTerminals, writeTerminal, releaseSessionResume, claimSessionResume, waitHeldSettled,
   getTerminalWebContentsId,
   terminalInputSeq, terminalBusy,
 } from './terminal-manager.js';
@@ -517,6 +517,9 @@ async function queueResumeNow(e, delayMs) {
     // Critical, round 8), and reserving UNCONDITIONALLY stole the session from
     // a resume the phone had legitimately started while the app was still
     // booting (Codex Critical, round 9). A claim does neither.
+    // A session phone mode holds only until its launch sweep decides: wait for that (bounded) rather than be refused
+    // once and never retried (Codex P1, impl round 17). untouched() is asked again right after the claim.
+    try { await waitHeldSettled(e.sessionId); } catch { /* claim anyway: refused is the safe side */ }
     let claimed = true;
     try { claimed = await claimSessionResume(e.sessionId, e.tabId); } catch { /* proceed */ }
     if (!claimed) {

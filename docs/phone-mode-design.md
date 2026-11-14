@@ -371,8 +371,9 @@ every `phone*` request answers `opError: off`.
     still there), independently of the claim.
   - At the next launch, before auto-resume and before any claim is answered, main reads that file. Its sessions are
     held from the moment phone mode is built (first thing when the app is ready, read synchronously) until the sweep
-    below says which are safe; auto-resume does not wait for the sweep, it is refused only for those sessions
-    (Codex P1 x2, implementation round 16). A record from an
+    below says which are safe; auto-resume starts at once and decides from its early snapshot, and only a resume of
+    one of those sessions waits (60 s at most) for the sweep before it claims, so a hold that lifts does not skip the
+    tab for the whole launch (Codex P1 x2, implementation round 16; P1, round 17). A failed sweep keeps them held. A record from an
     earlier boot is dropped without signalling anything: every process in it died with that boot, and its ids may now
     belong to anyone (Codex P2, design round 5). For a record from this boot, a recorded process still alive whose
     pid and start time match is SIGKILLed and confirmed gone, and until that is done every claim for its session is

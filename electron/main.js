@@ -3520,7 +3520,7 @@ async function setupPhoneMode() {
   phoneMain = pm;
   // Before the first await: the gate must hold an earlier run's sessions from the moment Dobius is ready.
   setPhoneMode(pm, () => phoneModeOn(getSettings()));
-  setHeldSessions(() => pm.heldSessions());
+  setHeldSessions(() => pm.heldSessions(), { pending: (sid) => pm.heldUntilSwept(sid), settled: () => pm.whenSwept() });
   setKillSignal((id) => (pm.isPhoneTab(id) ? 'SIGKILL' : undefined));
   setPhoneTabCheck((id) => pm.isPhoneTab(id));
   onBeforeInstall(() => pm.quitSweep());

@@ -1103,7 +1103,34 @@ export async function liveClaudeSessionIds() {
 // (docs/phone-mode-design.md "While on the phone"). A failed read holds nothing new; the process table still counts.
 let heldSessionsFn = () => new Set();
 const heldElsewhere = () => { try { const s = heldSessionsFn(); return s instanceof Set ? s : new Set(); } catch { return new Set(); } };
-export function setHeldSessions(fn) { heldSessionsFn = typeof fn === 'function' ? fn : () => new Set(); }
+let heldSettle = { pending: () => false, settled: () => Promise.resolve() };
+/**
+ * `opts.pending(sessionId)`: the session is held only until the owner finishes starting up; `opts.settled()` settles
+ * when it has. waitHeldSettled uses them so a one-shot launch resume is not refused by a hold that is about to lift.
+ */
+export function setHeldSessions(fn, opts = {}) {
+  heldSessionsFn = typeof fn === 'function' ? fn : () => new Set();
+  heldSettle = {
+    pending: typeof opts.pending === 'function' ? opts.pending : () => false,
+    settled: typeof opts.settled === 'function' ? opts.settled : () => Promise.resolve(),
+  };
+}
+/**
+ * Wait, at most `maxMs`, while `sessionId` is held only until the hold's owner has started (phone mode's launch sweep).
+ * Returns at once when it is not. Past the cap the caller claims anyway and is refused: the safe side.
+ */
+export async function waitHeldSettled(sessionId, maxMs = 60_000) {
+  let pending = false;
+  try { pending = heldSettle.pending(sessionId) === true; } catch { pending = false; }
+  if (!pending) return;
+  let timer = null;
+  try {
+    await Promise.race([
+      Promise.resolve().then(() => heldSettle.settled()).catch(() => {}),
+      new Promise((resolve) => { timer = setTimeout(resolve, maxMs); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
 
 // The signal closing a tab's PTY sends: SIGHUP unless the owner names another (phone mode: SIGKILL, so a shell stopped
 // with SIGSTOP still ends and cannot carry a pending fallback past the release).
