@@ -1559,5 +1559,6 @@ a.today-title:active { opacity: 0.7; }
   -webkit-tap-highlight-color: transparent;
 }
 .chat-retry:active { opacity: 0.6; }
+.chat-retry.chat-remove { color: var(--dim); font-weight: 500; padding-left: 0; }
 /* The shell command a permission card asks about, shown whole and scrollable, never clipped silently. */
 .phone-command { max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

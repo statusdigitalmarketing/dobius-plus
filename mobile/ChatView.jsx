@@ -8,7 +8,7 @@ import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, 
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 import { remarkCommandBoxes, CMD_TAG } from './command-blocks.js';
 import PhoneCards from './PhoneCards';
-import { phoneOffered, phoneKnown, sendOutcome, echoArrived, echoBaseline, readOutbox, writeOutbox, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
+import { phoneOffered, phoneKnown, sendOutcome, pruneEchoes, ageEchoes, shownEchoes, waitingCount, MAX_OUTSTANDING, echoBaseline, readOutbox, writeOutbox, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
 // blocks, lists were showing as raw pipes/asterisks: Sam's v1.0.53 report);
@@ -405,7 +405,7 @@ const Activity = memo(function Activity({ activity }) {
   );
 });
 
-const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending, failed, onRetry, command, detail, detailLabel, blocks: rawBlocks, startOpen, live }) {
+const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending, failed, onRetry, onRemove, command, detail, detailLabel, blocks: rawBlocks, startOpen, live }) {
   const blocks = useMemo(() => (role === 'assistant' ? normalizeBlocks(rawBlocks) : null), [role, rawBlocks]);
   const text = String(content ?? '');
   const shown = rowText(text, blocks); // what the reader sees, and what Copy copies
@@ -429,6 +429,7 @@ const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending,
           <div className="chat-msg-state chat-msg-failed" role="status">
             {failed === 'failed' ? 'Not sent' : 'Not confirmed by the Mac'}
             {onRetry && <button type="button" className="chat-retry" onClick={onRetry}>Send again</button>}
+            {onRemove && <button type="button" className="chat-retry chat-remove" onClick={onRemove}>Remove</button>}
           </div>
         ) : (queued || sending) && <div className="chat-msg-state">{sending ? 'Sending…' : 'Queued for after this turn'}</div>}
       </div>
@@ -676,7 +677,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     try {
       const map = JSON.parse(localStorage.getItem(outboxKey) || '{}');
       const had = Array.isArray(map?.[tabId]);
-      if (!had && !echoes.some((e) => e.sendId && !e.acked)) return;
+      if (!had && waitingCount(echoes) === 0) return;
       localStorage.setItem(outboxKey, JSON.stringify(writeOutbox(map, tabId, echoes)));
     } catch (err) { console.warn('[phone] outbox not saved:', err?.message || err); }
   }, [echoes, outboxKey, tabId]);
@@ -879,13 +880,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           // File identical to what we hold: keep messages as-is, but still
           // age out echo bubbles (their 90s TTL must not depend on the
           // transcript changing).
-          setEchoes((cur) => {
-            if (cur.length === 0) return cur;
-            const now = Date.now();
-            // A phone message that failed stays until it is sent again or the transcript shows it.
-            const kept = cur.filter((e) => e.fail || now - e.at < 90_000);
-            return kept.length === cur.length ? cur : kept;
-          });
+          // A phone message that failed stays until it is sent again or the transcript shows it.
+          setEchoes((cur) => ageEchoes(cur, normEcho));
           return;
         }
         // A reply for a smaller window than the one now asked for (a poll still
@@ -948,17 +944,9 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         }
         // Prune echoes the transcript now covers (same trimmed text, queued or
         // real) and any older than 90s.
-        setEchoes((cur) => {
-          if (cur.length === 0) return cur;
-          const norm = normEcho;
-          const seen = new Set(next.filter((m) => m.role === 'user').map((m) => norm(m.content)));
-          const now = Date.now();
-          // A phone message (sendId) is matched to a row that was not there when it was sent: an older message with
-          // the same words must not clear one that failed, or its only copy is gone (Codex r27, r28).
-          const arrived = (e) => (e.sendId ? echoArrived(e, next, norm) : seen.has(norm(e.content)));
-          const kept = cur.filter((e) => !arrived(e) && (e.fail || now - e.at < 90_000));
-          return kept.length === cur.length ? cur : kept;
-        });
+        // A phone message (sendId) is matched to a row that was not there when it was sent, one row per message
+        // (Codex r27, r28, r29); see pruneEchoes.
+        setEchoes((cur) => pruneEchoes(cur, next, normEcho));
         if (next.length > 0) {
           emptyStreakRef.current = 0;
           sigRef.current = msg.sig || null;
@@ -1325,6 +1313,12 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       // are that message sent again, with its sendId.
       const prior = echoes.find((e) => e.fail && e.sendId && e.content === text && e.runId === phone.runId);
       if (prior) { if (retryEcho(prior)) setDraft(''); return; }
+      // The phone keeps every message the Mac has not answered, across visits, and keeps at most this many: past it a
+      // new one waits in the box rather than pushing an older one out unseen (Codex r29).
+      if (waitingCount(echoes) >= MAX_OUTSTANDING) {
+        showSendNote(`${MAX_OUTSTANDING} messages are still waiting for the Mac. Send this one once they are answered, or remove one.`);
+        return;
+      }
       const sendId = freshId('s');
       if (!phone.runId || !phoneRequest('phoneSend', { runId: phone.runId, text, sendId }, { text, sendId })) {
         showSendNote('Not sent: not connected to the Mac right now. Send it again in a moment.');
@@ -1821,9 +1815,10 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
             live={working && i === lastClaude && i === messages.length - 1}
           />
         ))}
-        {echoes.map((e) => (
+        {shownEchoes(echoes).map((e) => (
           <Bubble key={`echo-${e.sendId || e.at}`} role="user" content={e.content} timestamp={e.at} sending
-            failed={e.fail || null} onRetry={e.fail ? () => retryEcho(e) : undefined} />
+            failed={e.fail || null} onRetry={e.fail ? () => retryEcho(e) : undefined}
+            onRemove={e.fail && e.sendId ? () => setEchoes((cur) => cur.filter((x) => x.sendId !== e.sendId)) : undefined} />
         ))}
         {sessionId && working && <Activity activity={tab?.waiting === 'background' ? { verb: 'Waiting on background task' } : activity} />}
       </main>

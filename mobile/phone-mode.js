@@ -126,50 +126,132 @@ export function echoBaseline(content, rows, norm = (t) => String(t).trim()) {
 }
 
 /**
- * Whether the transcript shows this phone message: a user row with the same words (`norm`ed both sides) that was not
- * in its baseline and was written no earlier than it was first sent (less the skew allowance), or more queued rows
- * with those words than the baseline had. A row without an id proves nothing.
+ * Matches phone messages (echoes with a sendId) to transcript rows, oldest first. Each row (by id) and each queued row
+ * stands for ONE message: two sends of the same words are confirmed by two rows, never one (Codex r29). A confirmed
+ * message is not dropped but kept hidden (`done`), still holding its row on every later poll, for as long as another
+ * message with the same words is waiting: without that, the next poll would hand the same row to the one still waiting.
+ * A message the Mac said it did not take ('failed') is never confirmed by a row; only Send again or Remove ends it.
+ * Echoes without a sendId are returned untouched. Returns the same array when nothing changed.
  */
-export function echoArrived(echo, rows, norm = (t) => String(t).trim()) {
-  const want = norm(echo.content);
-  const known = new Set(Array.isArray(echo.known) ? echo.known : []);
-  const since = echo.since - ARRIVAL_SKEW_MS;
-  let queued = 0;
-  for (const m of rows || []) {
-    if (!m || m.role !== 'user' || norm(m.content) !== want) continue;
-    if (m.queued === true) queued += 1;
-    else if (typeof m.id === 'string' && m.id && !known.has(m.id) && Date.parse(m.timestamp) >= since) return true;
+export function reconcileEchoes(echoes, rows, norm = (t) => String(t).trim()) {
+  const list = echoes || [];
+  const used = new Set();
+  const queuedUsed = new Map();
+  const confirmed = new Set();
+  const order = list.filter((e) => e && e.sendId && e.fail !== 'failed').sort((a, b) => a.since - b.since);
+  for (const e of order) {
+    const want = norm(e.content);
+    const known = new Set(Array.isArray(e.known) ? e.known : []);
+    const since = e.since - ARRIVAL_SKEW_MS;
+    let queued = 0;
+    let hit = false;
+    for (const m of rows || []) {
+      if (!m || m.role !== 'user' || norm(m.content) !== want) continue;
+      if (m.queued === true) { queued += 1; continue; }
+      if (typeof m.id === 'string' && m.id && !used.has(m.id) && !known.has(m.id) && Date.parse(m.timestamp) >= since) {
+        used.add(m.id);
+        hit = true;
+        break;
+      }
+    }
+    if (!hit) {
+      const taken = queuedUsed.get(want) || 0;
+      if (queued - taken > (Number.isInteger(e.knownQueued) ? e.knownQueued : 0)) {
+        queuedUsed.set(want, taken + 1);
+        hit = true;
+      }
+    }
+    if (hit && !e.done) confirmed.add(e);
   }
-  return queued > (Number.isInteger(echo.knownQueued) ? echo.knownQueued : 0);
+  let next = confirmed.size ? list.map((e) => (confirmed.has(e) ? { ...e, done: true, fail: null } : e)) : list;
+  // A hidden one is kept only while a message with its words still waits (failed ones too: Send again revives them).
+  const waiting = new Set(next.filter((e) => e && e.sendId && !e.done).map((e) => norm(e.content)));
+  const kept = next.filter((e) => !(e && e.done) || waiting.has(norm(e.content)));
+  if (kept.length !== next.length) next = kept;
+  return next;
 }
 
-const OUTBOX_PER_TAB = 5;
+/** How long a sent message's bubble waits for its row (see ageEchoes). */
+export const ECHO_TTL_MS = 90_000;
+
+/**
+ * Echoes past their wait: a local one goes, a phone message the Mac took becomes a hidden placeholder (its row may still
+ * come and must not confirm another with the same words), one that failed stays. A hidden one goes once nothing with
+ * its words waits. The same array when nothing changed.
+ */
+export function ageEchoes(cur, norm = (t) => String(t).trim(), now = Date.now()) {
+  if (!cur || cur.length === 0) return cur;
+  let changed = false;
+  const aged = [];
+  for (const e of cur) {
+    if (e.done || e.fail || now - e.at < ECHO_TTL_MS) aged.push(e);
+    else if (e.sendId && e.acked) { aged.push({ ...e, done: true }); changed = true; } else changed = true;
+  }
+  const waiting = new Set(aged.filter((e) => e.sendId && !e.done).map((e) => norm(e.content)));
+  const kept = aged.filter((e) => !e.done || waiting.has(norm(e.content)));
+  return changed || kept.length !== aged.length ? kept : cur;
+}
+
+/**
+ * The chat's echoes after a transcript reply: phone messages matched by reconcileEchoes, other local echoes dropped once
+ * a user row has their words, then ageEchoes. The same array when nothing changed, so a poll that changes nothing
+ * re-renders nothing.
+ */
+export function pruneEchoes(cur, rows, norm = (t) => String(t).trim(), now = Date.now()) {
+  if (!cur || cur.length === 0) return cur;
+  const seen = new Set((rows || []).filter((m) => m && m.role === 'user').map((m) => norm(m.content)));
+  const matched = reconcileEchoes(cur, rows, norm);
+  const local = matched.filter((e) => e.sendId || !seen.has(norm(e.content)));
+  // reconcileEchoes marks a confirmed one hidden rather than dropping it, so the length alone cannot say whether
+  // anything changed (the ship-test caught exactly that).
+  const base = matched === cur && local.length === cur.length ? cur : local;
+  return ageEchoes(base, norm, now);
+}
+
+/** The echoes the chat shows: hidden (confirmed) ones are only bookkeeping. */
+export const shownEchoes = (echoes) => (echoes || []).filter((e) => e && !e.done);
+/** Phone messages still waiting for the Mac's answer on this tab. */
+export const waitingCount = (echoes) => (echoes || []).filter((e) => e && e.sendId && !e.acked && !e.done).length;
+
+/** How many phone messages may wait for an answer on one tab: the outbox keeps exactly these, so none is dropped. */
+export const MAX_OUTSTANDING = 5;
+const OUTBOX_PER_TAB = MAX_OUTSTANDING;
 const OUTBOX_TABS = 20;
+const OUTBOX_DONE = 20; // hidden confirmed messages kept per tab, the newest
 const OUTBOX_DAYS = 7;
 
 /**
  * The phone messages not yet known to have reached a tab, as kept between visits (the chat screen unmounts when the
- * person leaves the tab): at most 5 per tab, 20 tabs, 7 days. One read on load means "the answer was never seen", so
+ * person leaves the tab): at most 5 waiting per tab (plus up to 20 hidden confirmed ones that hold their rows), 20 tabs,
+ * 7 days. One read on load means "the answer was never seen", so
  * each comes back as not confirmed, with Send again (Codex r28).
  */
 export function readOutbox(map, tabId, now = Date.now()) {
   const list = map && typeof map === 'object' && Array.isArray(map[tabId]) ? map[tabId] : [];
-  return list.filter((e) => e && typeof e.content === 'string' && e.content && typeof e.sendId === 'string' && typeof e.runId === 'string'
-    && Number.isFinite(e.since) && now - e.since < OUTBOX_DAYS * 86_400_000)
-    .slice(-OUTBOX_PER_TAB)
-    .map((e) => ({
-      content: e.content, sendId: e.sendId, runId: e.runId, since: e.since, at: e.since,
-      known: Array.isArray(e.known) ? e.known.filter((k) => typeof k === 'string').slice(-MAX_KNOWN) : [],
-      knownQueued: Number.isInteger(e.knownQueued) ? e.knownQueued : 0,
-      fail: e.fail === 'failed' ? 'failed' : 'unconfirmed',
-    }));
+  const valid = list.filter((e) => e && typeof e.content === 'string' && e.content && typeof e.sendId === 'string' && typeof e.runId === 'string'
+    && Number.isFinite(e.since) && now - e.since < OUTBOX_DAYS * 86_400_000);
+  const shape = (e) => ({
+    content: e.content, sendId: e.sendId, runId: e.runId, since: e.since, at: e.since,
+    known: Array.isArray(e.known) ? e.known.filter((k) => typeof k === 'string').slice(-MAX_KNOWN) : [],
+    knownQueued: Number.isInteger(e.knownQueued) ? e.knownQueued : 0,
+  });
+  const done = valid.filter((e) => e.done === true).slice(-OUTBOX_DONE).map((e) => ({ ...shape(e), done: true, fail: null }));
+  const waiting = valid.filter((e) => e.done !== true).slice(-OUTBOX_PER_TAB)
+    .map((e) => ({ ...shape(e), fail: e.fail === 'failed' ? 'failed' : 'unconfirmed' }));
+  return [...done, ...waiting];
 }
 
 /** The outbox map with this tab's entries replaced by `echoes` (phone messages not yet answered as taken). */
 export function writeOutbox(map, tabId, echoes, now = Date.now()) {
   const next = { ...(map && typeof map === 'object' ? map : {}) };
-  const keep = (echoes || []).filter((e) => e && e.sendId && !e.acked).slice(-OUTBOX_PER_TAB)
-    .map(({ content, sendId, runId, since, known, knownQueued, fail }) => ({ content, sendId, runId, since, known, knownQueued, fail: fail || null }));
+  const pick = ({ content, sendId, runId, since, known, knownQueued, fail, done }) => ({ content, sendId, runId, since, known, knownQueued, fail: fail || null, ...(done ? { done: true } : {}) });
+  const list = (echoes || []).filter((e) => e && e.sendId);
+  const waiting = list.filter((e) => !e.done && !e.acked).slice(-OUTBOX_PER_TAB);
+  // Hidden confirmed ones are kept with them only while one with the same words waits (see reconcileEchoes).
+  const words = new Set(waiting.map((e) => e.content));
+  // An acked one is stored the same way: the Mac took it, so its row is coming and must not confirm another.
+  const done = list.filter((e) => (e.done || e.acked) && words.has(e.content)).slice(-OUTBOX_DONE).map((e) => ({ ...e, done: true }));
+  const keep = waiting.length ? [...done, ...waiting].map(pick) : [];
   if (keep.length) next[tabId] = keep; else delete next[tabId];
   const newest = (v) => Math.max(0, ...(Array.isArray(v) ? v.map((e) => e?.since || 0) : [0]));
   const entries = Object.entries(next).filter(([, v]) => Array.isArray(v) && now - newest(v) < OUTBOX_DAYS * 86_400_000)

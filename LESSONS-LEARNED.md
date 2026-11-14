@@ -1165,3 +1165,9 @@
 - **FIX**: Finish or give back the phone run before editing anything the renderer imports (`src/`, `shared/`) or running `npm run build:mobile`; restart Claude in the tab afterwards. A packaged harness build has no Vite and is immune.
 - **CONTEXT**: Dev harness only. Useful by accident: the run's cleanup after a lost PTY was seen working (no runner or Claude left, session released).
 - **DETECTION**: `grep -n "page reload\|Could not Fast Refresh" <harness>/harness.log`
+
+### UI/UX - 2026-11-14
+- **MISTAKE**: Changed `reconcileEchoes` to mark a confirmed phone message hidden (`done`) instead of removing it, but the ChatView prune still ended `return kept.length === cur.length ? cur : kept`. Same length meant the update was thrown away, so in the ship-test the first of two same-word sends sat on "Sending..." though its row was on screen. The unit tests passed because the prune lived inline in ChatView, untested. A first version also restarted its "used rows" set every poll, so a confirmed message's row was handed to the waiting one on the NEXT poll (found only by watching several polls in the harness).
+- **FIX**: Moved the prune into `pruneEchoes` / `ageEchoes` in mobile/phone-mode.js and decide "changed" by array identity from the helper, not by length. Confirmed messages stay as hidden placeholders while one with the same words waits, so their rows stay theirs across polls and visits.
+- **CONTEXT**: Any state update that short-circuits on `length` breaks the moment an item is replaced instead of removed. Test multi-poll behaviour (call the reducer twice on the same rows), not one call.
+- **DETECTION**: `grep -n "kept.length === cur.length" mobile/*.jsx`
