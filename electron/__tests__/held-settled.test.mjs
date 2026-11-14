@@ -53,7 +53,7 @@ test('a throwing owner is not pending; no options is not pending', async () => {
 test('auto-resume waits before its launch claim', () => {
   const src = fs.readFileSync(new URL('../auto-resume.js', import.meta.url), 'utf8');
   const body = src.slice(src.indexOf('async function queueResumeNow('));
-  assert.match(body, /await waitHeldSettled\(e\.sessionId\);[^\n]*\n\s*let claimed = true;\n\s*try \{ claimed = await claimSessionResume\(e\.sessionId, e\.tabId\)/);
+  assert.match(body, /await waitHeldSettled\(e\.sessionId\);[^\n]*\n[\s\S]{0,200}?\}\n\s*let claimed = true;\n\s*try \{ claimed = await claimSessionResume\(e\.sessionId, e\.tabId\)/);
   const main = fs.readFileSync(new URL('../main.js', import.meta.url), 'utf8');
   assert.match(main, /setHeldSessions\(\(\) => pm\.heldSessions\(\), \{ pending: \(sid\) => pm\.heldUntilSwept\(sid\), settled: \(\) => pm\.whenSwept\(\) \}\)/);
 });
@@ -69,8 +69,27 @@ test('heldSettlePending answers what the owner says, and false on a throw', () =
 test('the launch pass does not wait behind a held tab: it is queued on its own (Codex impl r18)', () => {
   const src = fs.readFileSync(new URL('../auto-resume.js', import.meta.url), 'utf8');
   const loop = src.slice(src.indexOf('const sweepWaits = new Set();'), src.indexOf('async function queueResume('));
-  assert.match(loop, /if \(heldSettlePending\(e\.sessionId\)\) \{\s*sweepWaits\.add\(e\.tabId\);\s*void queueResume\(e, delayMs\)\.catch\([^\n]*\n\s*continue;\s*\}\s*await queueResume\(e, delayMs\);/);
+  assert.match(loop, /if \(heldSettlePending\(e\.sessionId\)\) \{\s*sweepWaits\.add\(e\.tabId\);\s*void queueResume\(e, 0\)\.catch\([^\n]*\n\s*continue;\s*\}\s*const now = Date\.now\(\);\s*await queueResume\(e, takeWriteSlot\(/);
   assert.match(loop, /for \(const c of candidates\) if \(!sweepWaits\.has\(c\.tabId\)\) preparing\.delete\(c\.tabId\);/, 'a waiting tab keeps its preparing entry');
+});
+
+test('one write clock: a slot taken later never lands on one already given out (Codex impl r19)', async () => {
+  const ar = await import('../auto-resume.js');
+  const base = Date.now() + 1e9; // far past anything an earlier slot reserved
+  const t2 = ar.takeWriteSlot(base, 2000, 50);
+  assert.equal(t2, base);
+  // The held tab released at T2's deadline: it goes after T2's gap, not at the same moment.
+  const t1 = ar.takeWriteSlot(base, 2000, 50);
+  assert.equal(t1, base + 4050);
+  assert.equal(ar.takeWriteSlot(base + 1e6, 0, 50), base + 1e6, 'a later earliest wins over the clock');
+});
+
+test('every resume path takes its slot from the shared clock', () => {
+  const src = fs.readFileSync(new URL('../auto-resume.js', import.meta.url), 'utf8');
+  assert.equal((src.match(/takeWriteSlot\(/g) || []).length, 4, 'definition, launch pass, released hold, restored tab');
+  assert.ok(!/cumulativeMs|nextRestoredAt/.test(src), 'no second clock left');
+  const now = src.slice(src.indexOf('async function queueResumeNow('));
+  assert.match(now, /if \(heldSettlePending\(e\.sessionId\)\) \{\s*try \{ await waitHeldSettled\(e\.sessionId\); \}[^\n]*\n\s*const now = Date\.now\(\);\s*delayMs = takeWriteSlot\(/);
 });
 
 test.after(() => { tm.setHeldSessions(() => new Set()); fs.rmSync(process.env.DOBIUS_TEST_USERDATA, { recursive: true, force: true }); });
