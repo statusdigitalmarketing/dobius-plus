@@ -186,32 +186,34 @@ ok('empty/null input is not live');
     '\u001bP' + 'a'.repeat(245758) + '\n' + '\u001b[400G' + '\u001b[B'.repeat(5458),
     '\u001b[400C'.repeat(43000),
   ];
-  // CPU time, fastest of three runs, not wall time: wall time on this Mac (load 20+ on 18 cores with dozens of
-  // sessions) failed two release preflights on 2026-11-14 with nothing wrong in the code, and a budget scaled by load
-  // average admits the regression once the load drops (Codex P2, PR #15). Measured 2026-11-14, 10 calls on the first
-  // input: stripAnsi 70 to 150ms now and 450 to 500ms for the code before 095453b, so it gets a fixed 200ms.
-  // claudeTuiPresent is the production caller and costs what stripAnsi does on these inputs (70 to 100ms); a caller
-  // that drops the tail argument brings the expansion back while stripAnsi alone stays fast (Codex P2, PR #15 round 3)
-  // and costs 1.8 times as much in this run (each escape pads at most 400 characters and joining them is cheap, so that
-  // regression costs memory far more than CPU). So it is bounded against stripAnsi measured in the same run, which load
-  // moves together, at 1.5x with a 20ms floor, and every stripAnsi call in mobile-server.js must pass the tail, which no
-  // load can move. The reference strips what tuiVisibleTail strips: the text after the last newline (the second input's
-  // unterminated DCS costs stripAnsi nothing, while tuiVisibleTail parses the 5458 cursor moves after it; Codex P2,
-  // PR #15 round 4).
+  // CPU time, fastest of three runs, each bound against work measured in the same run, never a fixed number: wall time
+  // failed two release preflights on this busy Mac on 2026-11-14 with nothing wrong, a budget scaled by load average
+  // admits the regression once the load drops, and a fixed CPU budget fails a slower processor (Codex P2, PR #15 rounds
+  // 2 and 5). Measured 2026-11-14, 10 calls, fastest of three:
+  // - stripAnsi against the same input with each 400 cursor move made a 1 (the same escapes to parse, a one-column pad
+  //   each): 1.0x, 1.0x and 1.56x now; 3.0 to 3.3x, 1.0x and 2.65 to 2.8x for the code before 095453b. Bound 2.2x.
+  // - claudeTuiPresent, the production caller, against stripAnsi of the text tuiVisibleTail strips (after the last
+  //   newline): 0.9 to 1.1x now; 1.7 to 1.9x with the tail argument dropped in tuiVisibleTail (Codex P2, rounds 3 and 4),
+  //   which costs memory far more than CPU. Bound 1.5x, and every stripAnsi call in mobile-server.js must pass the tail.
+  // Both have a 20ms floor for the input that costs almost nothing either way.
   const cpuMs = (f) => { const c0 = process.cpuUsage(); f(); const c = process.cpuUsage(c0); return (c.user + c.system) / 1000; };
   const ten = (f) => cpuMs(() => { for (let n = 0; n < 10; n += 1) f(); });
   for (const r of amp) {
+    const flat = r.replaceAll('[400', '[1');
+    assert.notEqual(flat, r);
     const suffix = r.slice(r.lastIndexOf('\n') + 1);
     let strip = Infinity;
+    let flatMs = Infinity;
     let ref = Infinity;
     let tui = Infinity;
-    const okNow = () => strip < 200 && tui < Math.max(20, 1.5 * ref);
+    const okNow = () => strip < Math.max(20, 2.2 * flatMs) && tui < Math.max(20, 1.5 * ref);
     for (let tries = 0; tries < 3 && !okNow(); tries += 1) {
       strip = Math.min(strip, ten(() => stripAnsi(r, 4096)));
+      flatMs = Math.min(flatMs, ten(() => stripAnsi(flat, 4096)));
       ref = suffix === r ? strip : Math.min(ref, ten(() => stripAnsi(suffix, 4096)));
       tui = Math.min(tui, ten(() => claudeTuiPresent(r)));
     }
-    assert.ok(strip < 200, `10 stripAnsi calls took ${strip.toFixed(0)}ms of CPU at best of 3 (budget 200ms)`);
+    assert.ok(strip < Math.max(20, 2.2 * flatMs), `10 stripAnsi calls took ${strip.toFixed(0)}ms of CPU, ${flatMs.toFixed(0)}ms with one-column moves`);
     assert.ok(tui < Math.max(20, 1.5 * ref), `10 claudeTuiPresent calls took ${tui.toFixed(0)}ms of CPU, stripAnsi of the same text ${ref.toFixed(0)}ms`);
   }
   const msSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mobile-server.js'), 'utf8');
