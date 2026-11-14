@@ -3,7 +3,7 @@
 // Run: node --test electron/__tests__/mobile-phone-mode.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { phoneOffered, phoneKnown, sendOutcome, echoArrived, ARRIVAL_SKEW_MS, freshId, readPhoneState, questionAnswer, togglePick, permissionAnswer, planAnswer, refusalText } from '../../mobile/phone-mode.js';
+import { phoneOffered, phoneKnown, sendOutcome, echoArrived, echoBaseline, readOutbox, writeOutbox, ARRIVAL_SKEW_MS, freshId, readPhoneState, questionAnswer, togglePick, permissionAnswer, planAnswer, refusalText } from '../../mobile/phone-mode.js';
 import { validateAnswer, validatePhoneRequest } from '../phone-protocol.js';
 import { answerMisfit } from '../phone-runner-core.mjs';
 
@@ -98,14 +98,36 @@ test('refusal text: the Mac\'s sentence, capitalised and ended; a known code oth
   assert.equal(refusalText('x', 'y'.repeat(400)), 'It could not be moved right now.', 'an overlong message is not shown');
 });
 
-test('a phone message arrives only by a row written since it was sent, never an older one with the same words (Codex r27)', () => {
+test('a phone message arrives only by a row that was not there when it was sent (Codex r27, r28)', () => {
   const since = Date.parse('2026-11-14T16:00:00Z');
-  const echo = { content: 'continue', since };
-  const old = { role: 'user', content: 'continue', timestamp: '2026-11-14T15:00:00Z' };
-  assert.equal(echoArrived(echo, [old]), false);
-  assert.equal(echoArrived(echo, [old, { role: 'user', content: ' continue ', timestamp: '2026-11-14T16:00:05Z' }]), true);
-  assert.equal(echoArrived(echo, [{ role: 'user', content: 'continue', timestamp: new Date(since - ARRIVAL_SKEW_MS + 1).toISOString() }]), true, 'a Mac clock a little behind');
+  const recent = { id: 'u1', role: 'user', content: 'continue', timestamp: '2026-11-14T15:59:50Z' };
+  const echo = { content: 'continue', since, ...echoBaseline('continue', [recent, { role: 'user', content: 'other', id: 'u0' }]) };
+  assert.deepEqual([echo.known, echo.knownQueued], [['u1'], 0]);
+  assert.equal(echoArrived(echo, [recent]), false, 'a row from 10 s before the send is an earlier message');
+  assert.equal(echoArrived(echo, [{ id: 'u0', role: 'user', content: 'continue', timestamp: '2026-11-14T15:00:00Z' }]), false, 'an older page');
+  assert.equal(echoArrived(echo, [recent, { id: 'u2', role: 'user', content: ' continue ', timestamp: '2026-11-14T16:00:05Z' }]), true);
+  assert.equal(echoArrived(echo, [{ id: 'u3', role: 'user', content: 'continue', timestamp: new Date(since - ARRIVAL_SKEW_MS + 1).toISOString() }]), true, 'a Mac clock a little behind');
   assert.equal(echoArrived(echo, [{ role: 'user', content: 'continue', queued: true }]), true);
-  assert.equal(echoArrived(echo, [{ role: 'assistant', content: 'continue', timestamp: '2026-11-14T16:00:05Z' }]), false);
-  assert.equal(echoArrived(echo, [{ role: 'user', content: 'continue' }]), false, 'no time, not queued: not proof');
+  assert.equal(echoArrived({ ...echo, knownQueued: 1 }, [{ role: 'user', content: 'continue', queued: true }]), false, 'a queued one that was already there');
+  assert.equal(echoArrived(echo, [{ id: 'u4', role: 'assistant', content: 'continue', timestamp: '2026-11-14T16:00:05Z' }]), false);
+  assert.equal(echoArrived(echo, [{ role: 'user', content: 'continue', timestamp: '2026-11-14T16:00:05Z' }]), false, 'no id, not queued: not proof');
+});
+
+test('the outbox keeps unanswered phone messages across visits, bounded, and brings them back as not confirmed (Codex r28)', () => {
+  const now = Date.parse('2026-11-14T16:00:00Z');
+  const e = (i, extra = {}) => ({ content: `m${i}`, sendId: `s${i}`, runId: 'r'.repeat(32), since: now - i, known: ['x'], knownQueued: 0, ...extra });
+  let map = writeOutbox({}, 'T', [e(1), e(2, { acked: true }), e(3, { fail: 'failed' })], now);
+  assert.deepEqual(map.T.map((x) => x.sendId), ['s1', 's3'], 'a message the Mac took is not kept');
+  const back = readOutbox(map, 'T', now);
+  assert.deepEqual(back.map((x) => [x.sendId, x.fail]), [['s1', 'unconfirmed'], ['s3', 'failed']]);
+  map = writeOutbox(map, 'T', Array.from({ length: 9 }, (_, i) => e(i)), now);
+  assert.equal(map.T.length, 5);
+  map = writeOutbox(map, 'T', [], now);
+  assert.equal('T' in map, false);
+  let many = {};
+  for (let i = 0; i < 30; i++) many = writeOutbox(many, `T${i}`, [e(i)], now);
+  assert.equal(Object.keys(many).length, 20);
+  assert.deepEqual(readOutbox({ T: [e(1, { since: now - 8 * 86_400_000 })] }, 'T', now), [], 'older than a week');
+  assert.deepEqual(readOutbox({ T: [{ content: 5 }, null, e(1, { runId: 7 })] }, 'T', now), [], 'garbage is dropped');
+  assert.deepEqual(readOutbox(null, 'T', now), []);
 });

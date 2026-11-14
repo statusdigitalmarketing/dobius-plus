@@ -323,7 +323,7 @@ valid `reqId` (or none). With the setting off, `phoneTake` is refused `off`, but
 | Request | Fields | Effect |
 |---|---|---|
 | `phoneTake` | `id`, `sessionId`, `gen` (from `phoneState`) | Moves the tab's Claude to the phone. The ack carries the new `runId` |
-| `phoneSend` | `id`, `runId`, `text` (1 to 8 KB, not blank), `sendId` (1 to 64 of `[A-Za-z0-9_-]`) | Sends a message; the same `sendId` twice is sent once (`duplicate:true`). An id refused `not_live`, `busy` or `bad_request` was not taken and may be sent again; after `timeout` or `failed` it is not known, the id stays used, and a retry with it is delivered at most once. A retry that arrives while the first send is still waiting gets that send's outcome (`duplicate` once it was taken, a delivery of its own if it was refused) |
+| `phoneSend` | `id`, `runId`, `text` (1 to 8 KB, not blank), `sendId` (1 to 64 of `[A-Za-z0-9_-]`) | Sends a message; the same `sendId` twice is sent once (`duplicate:true`). An id refused `not_live`, `busy` or `bad_request` was not taken and may be sent again; after `timeout` or `failed` it is not known, the id stays used, and a retry with it is delivered at most once. A retry that arrives while the first send is still waiting gets that send's outcome (`duplicate` once it was taken, a delivery of its own if it was refused); a retry after a `timeout` is answered `timeout` again until the runner's late answer settles it |
 | `phoneAnswer` | `id`, `runId`, `requestId`, `answer` | Answers one pending card |
 | `phoneStop` | `id`, `runId` | Interrupts the current turn |
 | `phoneGiveBack` | `id`, `runId` | Ends phone mode; the tab resumes the conversation on the Mac |

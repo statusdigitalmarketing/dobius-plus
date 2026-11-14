@@ -360,8 +360,8 @@ test('the setting turned off mid-run: no new move, but the run still takes messa
   } finally { await ctx.cleanup(); }
 });
 
-test('a send the runner refuses can go again with the same id; one that timed out cannot (Codex r26)', async () => {
-  const ctx = setup();
+test('a send the runner refuses can go again with the same id; one that timed out is not known until the runner answers (Codex r26, r28)', async () => {
+  const ctx = setup({ commandMs: 300 });
   try {
     const { runId, runner } = await live(ctx);
     const [r1] = await Promise.all([ctx.mode.send('T1', runId, 'hi', 'send-busy'), serve(runner, () => ({ ok: false, code: 'busy', error: 'full' }))]);
@@ -369,10 +369,23 @@ test('a send the runner refuses can go again with the same id; one that timed ou
     const [r2, m2] = await Promise.all([ctx.mode.send('T1', runId, 'hi', 'send-busy'), serve(runner)]);
     assert.deepEqual(r2, { ok: true }, 'delivered on the retry, not called a duplicate');
     assert.equal(m2.text, 'hi');
-    // No answer from the runner: not known whether it arrived, so the id stays used.
+    // No answer in time: not known, and a retry says so again rather than "duplicate".
     const r3 = await ctx.mode.send('T1', runId, 'lost?', 'send-lost');
     assert.equal(r3.code, 'timeout');
-    assert.deepEqual(await ctx.mode.send('T1', runId, 'lost?', 'send-lost'), { ok: true, duplicate: true });
+    const late = await runner.next();
+    assert.equal((await ctx.mode.send('T1', runId, 'lost?', 'send-lost')).code, 'timeout');
+    // The runner's late answer settles it: refused, so the retry is the delivery.
+    runner.send({ t: 'reply', reqId: late.reqId, ok: false, code: 'busy', error: 'full' });
+    await sleep(30);
+    const [r4, m4] = await Promise.all([ctx.mode.send('T1', runId, 'lost?', 'send-lost'), serve(runner)]);
+    assert.deepEqual(r4, { ok: true });
+    assert.equal(m4.text, 'lost?');
+    // A late "taken" makes the retry a duplicate, and nothing is sent again.
+    assert.equal((await ctx.mode.send('T1', runId, 'slow', 'send-slow')).code, 'timeout');
+    const slow = await runner.next();
+    runner.send({ t: 'reply', reqId: slow.reqId, ok: true });
+    await sleep(30);
+    assert.deepEqual(await ctx.mode.send('T1', runId, 'slow', 'send-slow'), { ok: true, duplicate: true });
   } finally { await ctx.cleanup(); }
 });
 

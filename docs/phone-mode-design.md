@@ -315,8 +315,16 @@ A message sent from the phone keeps its own bubble and `sendId` until the transc
 `failed`), it says Not confirmed by the Mac. Both offer Send again with the same `sendId`: the Mac forgets an id it did
 not take and answers `duplicate` for one that arrived, so nothing is delivered twice. Send again goes to the run the
 message was written for: once that run is over (back on the Mac, or a later move), it puts the words in the box
-instead, and only into an empty box. A bubble clears when the transcript shows a user row with the same words written
-since it was first sent (30 s allowed for clock skew); an older message with the same words does not count (Codex r27).
+instead, and only into an empty box. A bubble clears when the transcript shows a user row with the same words that
+was not there when the message was sent (its baseline of row ids and queued rows) and was written since (30 s allowed
+for clock skew); an older message with the same words never counts (Codex r27, r28). Messages not yet answered as
+taken are kept per tab in the phone's storage (5 per tab, 20 tabs, 7 days), so leaving the tab or reloading the app
+brings them back as Not confirmed with Send again.
+
+The Mac remembers each send id per run with its outcome: pending, taken, or unknown (no answer within 10 s). A retry
+of a pending id waits for the first answer; of an unknown id it is answered `timeout` again, never `duplicate`, until
+the runner's late answer (kept 5 minutes) settles it; a refused id is forgotten so a retry delivers it. 4096 ids per
+run are kept; a retry of an id older than that could be delivered again (accepted bound).
 
 | Request | Answer | Effect |
 |---|---|---|

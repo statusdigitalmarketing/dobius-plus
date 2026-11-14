@@ -27,6 +27,7 @@ export const SHELL_KILL_MS = 5_000; // a closed tab's shell still there after th
 export const ALIVE_MS = 60_000; // how often a live run's record has its aliveAt refreshed
 export const STOP_MS = 10_000; // the TUI Claude must exit within this of SIGHUP
 export const COMMAND_MS = 10_000; // a command to the runner must be answered within this
+const LATE_MS = 5 * 60_000; // a send that timed out still hears the runner's late answer this long
 export const SPAWN_WAIT_MS = 5_000; // a runner hello waits this long for its gate's spawn report
 const TICK_MS = 1_000;
 
@@ -509,10 +510,21 @@ export function createPhoneMode(d) {
     return { run, conn };
   }
 
-  function command(run, conn, obj) {
+  // `late`, when given, still receives the runner's answer after a timeout (for LATE_MS), so a send that timed out
+  // learns whether it was taken after all. One entry per timed-out command, removed when it answers or expires.
+  function command(run, conn, obj, { late } = {}) {
     const reqId = `c${++reqSeq}`;
+    const ms = d.commandMs ?? COMMAND_MS;
     return new Promise((resolve) => {
-      const timer = setTimeout(() => { replies.delete(reqId); resolve({ ok: false, code: 'timeout', error: 'the phone session did not answer' }); }, COMMAND_MS);
+      const timer = setTimeout(() => {
+        replies.delete(reqId);
+        if (late) {
+          const t2 = setTimeout(() => replies.delete(reqId), LATE_MS);
+          t2.unref?.();
+          replies.set(reqId, { runId: run.runId, resolve: late, timer: t2 });
+        }
+        resolve({ ok: false, code: 'timeout', error: 'the phone session did not answer' });
+      }, ms);
       replies.set(reqId, { runId: run.runId, resolve: (m) => resolve(m.ok ? { ok: true } : fail(m.code || 'failed', m.error || 'refused')), timer });
       if (!conn.send({ ...obj, reqId })) { replies.delete(reqId); clearTimeout(timer); resolve(fail('not_live', 'the phone session is not connected')); }
     });
@@ -522,25 +534,36 @@ export function createPhoneMode(d) {
   // gets that send's outcome, never an early "duplicate" for a message the runner may still refuse (Codex r27). Each
   // entry lives at most COMMAND_MS.
   const sending = new Map();
+  const NOT_KNOWN = 'it is not known yet whether that message arrived';
+
+  // What a runner answer means for a send id: taken, refused (forgotten, so it may go again) or not known. A late
+  // answer to a send that timed out lands here too (Codex r28).
+  function settleSend(run, sendId, r) {
+    if (r?.ok) reg.setSendState(run, sendId, 'taken');
+    else if (SEND_NOT_TAKEN.has(r?.code)) reg.forgetSend(run, sendId);
+    else reg.setSendState(run, sendId, 'unknown');
+  }
 
   async function send(tabId, runId, text, sendId) {
     const { run, conn, error } = liveRun(tabId, runId);
     if (error) return error;
     const key = `${run.runId}:${sendId}`;
-    const first = sending.get(key);
-    if (first) {
+    const state = reg.sendStateOf(run, sendId);
+    if (state === 'taken') return { ok: true, duplicate: true };
+    // No answer yet for the first try: say so again, never "duplicate", until the runner's answer settles it.
+    if (state === 'unknown') return fail('timeout', NOT_KNOWN);
+    if (state === 'pending') {
+      const first = sending.get(key);
+      if (!first) return fail('timeout', NOT_KNOWN);
       const r = await first;
       if (r.ok) return { ok: true, duplicate: true };
       // Not taken: the id was forgotten, so this retry is the delivery. Anything else is not known, and says so.
       return SEND_NOT_TAKEN.has(r.code) ? send(tabId, runId, text, sendId) : r;
     }
-    if (!reg.firstSend(run, sendId)) return { ok: true, duplicate: true };
-    const p = command(run, conn, { t: 'send', text }).then((r) => {
-      // Refused before the runner queued it (not connected, its queue full, empty): the same id may go again. A
-      // timeout is not known either way and keeps the id, so a retry of a message that did arrive is not sent twice.
-      if (!r.ok && SEND_NOT_TAKEN.has(r.code)) reg.forgetSend(run, sendId);
-      return r;
-    }).finally(() => { if (sending.get(key) === p) sending.delete(key); });
+    reg.firstSend(run, sendId);
+    const p = command(run, conn, { t: 'send', text }, { late: (m) => settleSend(run, sendId, m) })
+      .then((r) => { settleSend(run, sendId, r); return r; })
+      .finally(() => { if (sending.get(key) === p) sending.delete(key); });
     sending.set(key, p);
     return p;
   }

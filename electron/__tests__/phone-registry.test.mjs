@@ -212,7 +212,7 @@ test('send ids: deduped and bounded', () => {
   assert.equal(reg.firstSend(run, 'a'), true);
   assert.equal(reg.firstSend(run, 'a'), false);
   for (let i = 0; i < MAX_SEND_IDS; i++) reg.firstSend(run, `s${i}`);
-  assert.equal(run.sendIds.length, MAX_SEND_IDS);
+  assert.equal(run.sendIds.size, MAX_SEND_IDS);
   assert.equal(reg.firstSend(run, 'a'), true); // the oldest was forgotten
 });
 

@@ -8,7 +8,7 @@ import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, 
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 import { remarkCommandBoxes, CMD_TAG } from './command-blocks.js';
 import PhoneCards from './PhoneCards';
-import { phoneOffered, phoneKnown, sendOutcome, echoArrived, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
+import { phoneOffered, phoneKnown, sendOutcome, echoArrived, echoBaseline, readOutbox, writeOutbox, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
 // blocks, lists were showing as raw pipes/asterisks: Sam's v1.0.53 report);
@@ -19,6 +19,20 @@ import { phoneOffered, phoneKnown, sendOutcome, echoArrived, freshId, readPhoneS
 // never eats typed-but-unsent text (Sam's report). One localStorage key holds
 // a { tabId: { text, at } } map, pruned to 40 entries / 7 days on write.
 const DRAFTS_KEY = 'dobius-mobile-drafts';
+// Phone mode messages not yet known to have arrived, per tab (mobile/phone-mode.js readOutbox / writeOutbox).
+const OUTBOX_KEY = 'dobius-mobile-phone-outbox';
+// The words of a message as the transcript shows them. Normalizes the `!` composer prefix on BOTH sides: the transcript
+// records a bash command as <bash-input>cmd</bash-input>, which the server collapses to "! cmd", while the user may have
+// typed "!cmd" or "!  cmd". Without this the echo never matched and the bubble sat on "sending…" for a command that had
+// already run.
+const normEcho = (t) => {
+  const s2 = String(t).trim();
+  return s2.startsWith('!') ? `! ${s2.slice(1).trim()}` : s2;
+};
+function loadOutbox(key, tabId) {
+  if (!tabId) return [];
+  try { return readOutbox(JSON.parse(localStorage.getItem(key) || '{}'), tabId); } catch { return []; }
+}
 // Older messages load a page at a time when the reader reaches the top (Sam:
 // "when I scroll to the top I can't find older stuff"), never all at once.
 // The Mac caps one request at 2000 entries.
@@ -652,7 +666,20 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // Claude's queue and never appeared here; the server now also surfaces
   // queued entries). An echo drops once the transcript shows the same text,
   // or after 90s (e.g. the tab was a bare shell that ran it as a command).
-  const [echoes, setEchoes] = useState([]);
+  // Phone messages from an earlier visit that were never answered as taken come back first, as not confirmed.
+  const outboxKey = pairingKey(connection.pairing, OUTBOX_KEY);
+  const [echoes, setEchoes] = useState(() => loadOutbox(outboxKey, tabId));
+  // Kept outside the view: leaving the tab unmounts it, and a message whose answer it never saw must not vanish
+  // (Codex r28). Small and bounded (writeOutbox), written only when the echoes change.
+  useEffect(() => {
+    if (!tabId) return;
+    try {
+      const map = JSON.parse(localStorage.getItem(outboxKey) || '{}');
+      const had = Array.isArray(map?.[tabId]);
+      if (!had && !echoes.some((e) => e.sendId && !e.acked)) return;
+      localStorage.setItem(outboxKey, JSON.stringify(writeOutbox(map, tabId, echoes)));
+    } catch (err) { console.warn('[phone] outbox not saved:', err?.message || err); }
+  }, [echoes, outboxKey, tabId]);
   // On-screen terminal keys row (esc/tab/arrows/^C) for full-TUI dialogs.
   const [showKeys, setShowKeys] = useState(false);
   const fileInputRef = useRef(null);
@@ -923,19 +950,11 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         // real) and any older than 90s.
         setEchoes((cur) => {
           if (cur.length === 0) return cur;
-          // Normalize the `!` composer prefix on BOTH sides: the transcript
-          // records a bash command as <bash-input>cmd</bash-input>, which the
-          // server collapses to "! cmd", while the user may have typed
-          // "!cmd" or "!  cmd". Without this the echo never matched and the
-          // bubble sat on "sending…" for a command that had already run.
-          const norm = (t) => {
-            const s2 = String(t).trim();
-            return s2.startsWith('!') ? `! ${s2.slice(1).trim()}` : s2;
-          };
+          const norm = normEcho;
           const seen = new Set(next.filter((m) => m.role === 'user').map((m) => norm(m.content)));
           const now = Date.now();
-          // A phone message (sendId) is matched to a row written since it was sent: an older message with the same
-          // words must not clear one that failed, or its only copy is gone (Codex r27).
+          // A phone message (sendId) is matched to a row that was not there when it was sent: an older message with
+          // the same words must not clear one that failed, or its only copy is gone (Codex r27, r28).
           const arrived = (e) => (e.sendId ? echoArrived(e, next, norm) : seen.has(norm(e.content)));
           const kept = cur.filter((e) => !arrived(e) && (e.fail || now - e.at < 90_000));
           return kept.length === cur.length ? cur : kept;
@@ -1033,7 +1052,11 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       // Each message keeps its own bubble and sendId: Send again on it goes with the same id, which the Mac delivers
       // at most once (phone-mode.js sendOutcome). Several failed messages never share or overwrite one.
       const outcome = sendOutcome(msg);
-      if (outcome === 'sent') return;
+      if (outcome === 'sent') {
+        // Taken: no longer kept for Send again; the bubble stays until the transcript shows it.
+        setEchoes((cur) => cur.map((e) => (e.sendId === entry.sendId ? { ...e, acked: true, fail: null } : e)));
+        return;
+      }
       setEchoes((cur) => cur.map((e) => (e.sendId === entry.sendId ? { ...e, fail: outcome } : e)));
       showSendNote(outcome === 'failed' ? `Not sent: ${why}` : 'The Mac did not confirm a message. Tap Send again on it: it is delivered at most once.');
     } else if (failed) flashPhoneNote(why);
@@ -1310,7 +1333,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       setSendNote('');
       sentAtRef.current = Date.now();
       // runId: Send again goes to the run it was written for, never to a later one on the same tab (Codex r27).
-      setEchoes((cur) => [...cur, { content: text, at: Date.now(), since: Date.now(), sendId, runId: phone.runId }]);
+      const base = echoBaseline(text, messagesRef.current || [], normEcho);
+      setEchoes((cur) => [...cur, { content: text, at: Date.now(), since: Date.now(), sendId, runId: phone.runId, ...base }]);
       setDraft('');
       atBottomRef.current = true;
       return;

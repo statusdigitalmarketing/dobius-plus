@@ -105,18 +105,76 @@ export function sendOutcome(msg) {
 }
 
 // How far a Mac's transcript time may sit before the phone's send time and still be that send (clock skew, a slow
-// write). An older row with the same words is an earlier message, not this one (Codex r27).
+// write).
 export const ARRIVAL_SKEW_MS = 30_000;
+const MAX_KNOWN = 50;
 
 /**
- * Whether the transcript shows this phone message: a user row with the same words (`norm`ed both sides) that is
- * queued, or was written no earlier than the message was first sent (less the skew allowance).
+ * What the transcript already held with the same words when a phone message was sent: those rows' ids, and how many
+ * queued rows. A row in this baseline is an earlier message, never this one (Codex r27, r28).
+ */
+export function echoBaseline(content, rows, norm = (t) => String(t).trim()) {
+  const want = norm(content);
+  const known = [];
+  let knownQueued = 0;
+  for (const m of rows || []) {
+    if (!m || m.role !== 'user' || norm(m.content) !== want) continue;
+    if (m.queued === true) knownQueued += 1;
+    else if (typeof m.id === 'string' && m.id) known.push(m.id);
+  }
+  return { known: known.slice(-MAX_KNOWN), knownQueued };
+}
+
+/**
+ * Whether the transcript shows this phone message: a user row with the same words (`norm`ed both sides) that was not
+ * in its baseline and was written no earlier than it was first sent (less the skew allowance), or more queued rows
+ * with those words than the baseline had. A row without an id proves nothing.
  */
 export function echoArrived(echo, rows, norm = (t) => String(t).trim()) {
   const want = norm(echo.content);
+  const known = new Set(Array.isArray(echo.known) ? echo.known : []);
   const since = echo.since - ARRIVAL_SKEW_MS;
-  return (rows || []).some((m) => m && m.role === 'user' && norm(m.content) === want
-    && (m.queued === true || Date.parse(m.timestamp) >= since));
+  let queued = 0;
+  for (const m of rows || []) {
+    if (!m || m.role !== 'user' || norm(m.content) !== want) continue;
+    if (m.queued === true) queued += 1;
+    else if (typeof m.id === 'string' && m.id && !known.has(m.id) && Date.parse(m.timestamp) >= since) return true;
+  }
+  return queued > (Number.isInteger(echo.knownQueued) ? echo.knownQueued : 0);
+}
+
+const OUTBOX_PER_TAB = 5;
+const OUTBOX_TABS = 20;
+const OUTBOX_DAYS = 7;
+
+/**
+ * The phone messages not yet known to have reached a tab, as kept between visits (the chat screen unmounts when the
+ * person leaves the tab): at most 5 per tab, 20 tabs, 7 days. One read on load means "the answer was never seen", so
+ * each comes back as not confirmed, with Send again (Codex r28).
+ */
+export function readOutbox(map, tabId, now = Date.now()) {
+  const list = map && typeof map === 'object' && Array.isArray(map[tabId]) ? map[tabId] : [];
+  return list.filter((e) => e && typeof e.content === 'string' && e.content && typeof e.sendId === 'string' && typeof e.runId === 'string'
+    && Number.isFinite(e.since) && now - e.since < OUTBOX_DAYS * 86_400_000)
+    .slice(-OUTBOX_PER_TAB)
+    .map((e) => ({
+      content: e.content, sendId: e.sendId, runId: e.runId, since: e.since, at: e.since,
+      known: Array.isArray(e.known) ? e.known.filter((k) => typeof k === 'string').slice(-MAX_KNOWN) : [],
+      knownQueued: Number.isInteger(e.knownQueued) ? e.knownQueued : 0,
+      fail: e.fail === 'failed' ? 'failed' : 'unconfirmed',
+    }));
+}
+
+/** The outbox map with this tab's entries replaced by `echoes` (phone messages not yet answered as taken). */
+export function writeOutbox(map, tabId, echoes, now = Date.now()) {
+  const next = { ...(map && typeof map === 'object' ? map : {}) };
+  const keep = (echoes || []).filter((e) => e && e.sendId && !e.acked).slice(-OUTBOX_PER_TAB)
+    .map(({ content, sendId, runId, since, known, knownQueued, fail }) => ({ content, sendId, runId, since, known, knownQueued, fail: fail || null }));
+  if (keep.length) next[tabId] = keep; else delete next[tabId];
+  const newest = (v) => Math.max(0, ...(Array.isArray(v) ? v.map((e) => e?.since || 0) : [0]));
+  const entries = Object.entries(next).filter(([, v]) => Array.isArray(v) && now - newest(v) < OUTBOX_DAYS * 86_400_000)
+    .sort((a, b) => newest(b[1]) - newest(a[1])).slice(0, OUTBOX_TABS);
+  return Object.fromEntries(entries);
 }
 
 /** Why a move did not happen, in the words the sheet shows. The Mac's own sentence wins when it sent one. */

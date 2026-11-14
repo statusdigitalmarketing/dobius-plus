@@ -16,7 +16,9 @@ import crypto from 'node:crypto';
 
 export const MAX_RUNS = 4;
 export const MAX_PENDING = 8;
-export const MAX_SEND_IDS = 64;
+// Send ids remembered per run, with what became of each. A run is one stay on the phone; 4096 ids of at most 64 chars
+// is under 1 MB per run (4 runs at most). Past that the oldest is forgotten, and a retry of it could be delivered again.
+export const MAX_SEND_IDS = 4096;
 export const MAX_GENS = 2000; // tab generations remembered; the oldest is forgotten first (it gets a NEW one on next use)
 export const EPOCH_SPAN = 2 ** 22; // generations per epoch; epochs are below 2^31, so every generation is below 2^53
 const randomEpoch = () => crypto.randomInt(1, 2 ** 31);
@@ -140,7 +142,7 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS, isLive = () => true, e
         runnerStart: null, runnerPgid: null, helloAccepted: false, claudePid: null, claudeStart: null,
         groupGone: false, claudeGone: false, gateGone: false, tagSweepClean: false, doneReceived: false, tabClosed: false,
         shellGone: false, tuiSeen: false, released: false, endReason: null, error: null,
-        pending: new Map(), sendIds: [],
+        pending: new Map(), sendIds: new Map(),
       };
       runs.set(run.runId, run);
       bumpGen(tabId);
@@ -295,19 +297,22 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS, isLive = () => true, e
     },
     dropPending(run, requestId) { return run.pending.delete(requestId); },
 
-    /** True the first time a send id is seen in this run (bounded memory, oldest forgotten first). */
+    /**
+     * True the first time a send id is seen in this run, which records it 'pending' (bounded memory, oldest forgotten
+     * first). sendStateOf says what became of one: 'pending' (waiting on the runner), 'taken' (the runner queued it)
+     * or 'unknown' (no answer in time); a send the runner refused is forgotten instead.
+     */
     firstSend(run, sendId) {
-      if (run.sendIds.includes(sendId)) return false;
-      run.sendIds.push(sendId);
-      if (run.sendIds.length > MAX_SEND_IDS) run.sendIds.shift();
+      if (run.sendIds.has(sendId)) return false;
+      run.sendIds.set(sendId, 'pending');
+      if (run.sendIds.size > MAX_SEND_IDS) run.sendIds.delete(run.sendIds.keys().next().value);
       return true;
     },
+    sendStateOf(run, sendId) { return run.sendIds.get(sendId); },
+    setSendState(run, sendId, state) { if (run.sendIds.has(sendId)) run.sendIds.set(sendId, state); },
 
     /** A send the runner clearly did not take: its id may be tried again and delivered then. */
-    forgetSend(run, sendId) {
-      const i = run.sendIds.lastIndexOf(sendId);
-      if (i >= 0) run.sendIds.splice(i, 1);
-    },
+    forgetSend(run, sendId) { run.sendIds.delete(sendId); },
 
     releaseReason,
     cleanupDone,
