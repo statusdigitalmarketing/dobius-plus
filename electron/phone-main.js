@@ -123,6 +123,7 @@ export function createPhoneMain(m) {
     claudeInfo: (id) => m.claudeInfo(id),
     presence: (info, tabId) => presenceFor(tabId, info, true),
     accountProblem: (tabId, pid) => accountProblem(seen.get(tabId), pid, spawnedBinding(tabId), m.accounts(), m.envFor),
+    binding: (tabId) => seen.get(tabId)?.dir,
     hasTranscript: (sessionId) => m.hasTranscript(sessionId),
     processArgv: (pid) => new Promise((resolve, reject) => {
       execFile('/bin/ps', ['-ww', '-o', 'command=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' }, (err, out) => {

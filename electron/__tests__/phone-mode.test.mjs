@@ -230,6 +230,60 @@ test('take: a pairing revoked before the stop moves nothing; revoked after it, t
   } finally { await b.cleanup(); }
 });
 
+test('an earlier run\'s session is held from construction, before init, until the sweep clears it (Codex impl r16)', async () => {
+  const userData = fs.realpathSync(fs.mkdtempSync(path.join(tmpBase(), 'pm-')));
+  const S2 = '1b5c2a6e-1111-4222-8333-444455556666';
+  // An earlier boot's record: the sweep drops it without signalling anything.
+  fs.writeFileSync(path.join(userData, 'phone-runs.json'), JSON.stringify([{ runId: 'c'.repeat(32), sessionId: S2, boot: 1, pgid: null, claudePid: null, aliveAt: 0 }]));
+  const ctx = setup();
+  const mode = createPhoneMode({ ...ctx.d, userData });
+  try {
+    assert.deepEqual([...mode.heldSessions()], [S2], 'held before init');
+    await mode.init();
+    assert.deepEqual([...mode.heldSessions()], [], 'released once the sweep found it safe');
+  } finally {
+    await mode.close();
+    await ctx.cleanup();
+    fs.rmSync(userData, { recursive: true, force: true });
+  }
+});
+
+test('the gate must find the account the conversation ran on, after the shell\'s startup files (Codex impl r16)', async () => {
+  for (const [cfg, ok] of [['/p/b', false], [undefined, false], [null, false], ['/p/a/', false], ['/p/a', true]]) {
+    const ctx = setup({ binding: () => '/p/a' });
+    try {
+      await ctx.mode.init();
+      const r = await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
+      assert.equal(r.ok, true);
+      const dir = ctx.mode._runDir();
+      const token = fs.readFileSync(ticketPath(dir, r.runId), 'utf8');
+      fs.unlinkSync(ticketPath(dir, r.runId));
+      ctx.sys.table.set(2100, { pid: 2100, pgid: 2000, ppid: 2000 });
+      const gate = client(socketPath(dir));
+      gate.send({ t: 'gate', token, pid: 2100, ...(cfg === undefined ? {} : { cfg }) });
+      const reply = await gate.next();
+      assert.equal(reply.t, ok ? 'gate-ok' : 'refused', String(cfg));
+      if (!ok) assert.equal(reply.code, 'account');
+      else assert.equal(typeof reply.runnerToken, 'string');
+      // Refused or not, the session stays held: a refused run keeps its claim until its processes are confirmed gone.
+      assert.ok(ctx.mode.heldSessions().has(S));
+      gate.end();
+    } finally { await ctx.cleanup(); }
+  }
+});
+
+test('sessionOfTab names the session a tab runs on the phone, and nothing for other tabs', async () => {
+  const ctx = setup();
+  try {
+    await ctx.mode.init();
+    assert.equal(ctx.mode.sessionOfTab('T1'), null);
+    const r = await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
+    assert.equal(r.ok, true);
+    assert.equal(ctx.mode.sessionOfTab('T1'), S);
+    assert.equal(ctx.mode.sessionOfTab('T2'), null);
+  } finally { await ctx.cleanup(); }
+});
+
 test('full run: handshake, carried flags, cards, sends once per id, give back, done, released and forgotten', async () => {
   const ctx = setup();
   try {

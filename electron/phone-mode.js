@@ -55,6 +55,12 @@ export function createPhoneMode(d) {
   // isLive is asked only when the generation map is full (2000 tabs moved in one launch).
   const reg = createPhoneRegistry({ isLive: (id) => { try { return d.tabs().some((t) => t.id === id); } catch { return true; } } });
   const store = createRunStore(path.join(d.userData, 'phone-runs.json'), log);
+  // Sessions an earlier Dobius's runs may still be writing: held from construction, read synchronously, until the
+  // startup sweep says which are safe (Codex P1, impl round 16: History could resume one while init was awaiting). A
+  // failed init keeps them held for this launch, the safe side.
+  let startHeld = new Set();
+  try { for (const r of store.read()) if (typeof r?.sessionId === 'string' && r.sessionId) startHeld.add(r.sessionId); }
+  catch (e) { log(`phone: could not read earlier runs: ${e.message}`); }
   const conns = new Map(); // runId -> runner connection
   const replies = new Map(); // reqId -> { resolve, timer }
   const spawnWaits = new Map(); // runId -> wake: a runner hello waiting for its gate's spawn report (one per run)
@@ -94,6 +100,7 @@ export function createPhoneMode(d) {
     }
     const swept = await sweepAtLaunch(sys, store);
     for (const s of swept.blocked) blocked.add(s);
+    startHeld = new Set();
     for (const line of swept.log) log(`phone: ${line}`);
     server = await startPhoneSocket(runDir, { handler: (conn, msg) => { void onMessage(conn, msg); }, onClose, log });
     ready = true;
@@ -104,7 +111,7 @@ export function createPhoneMode(d) {
 
   /** Sessions no other surface may resume now: phone claims, and what a launch sweep could not clean. */
   const heldSessions = () => {
-    const out = new Set(blocked);
+    const out = new Set([...blocked, ...startHeld]);
     for (const r of reg.list()) if (!r.released) out.add(r.sessionId);
     return out;
   };
@@ -144,6 +151,8 @@ export function createPhoneMode(d) {
     // The account it runs on must be the tab's own, or the restart would bring it back on another login.
     const acct = d.accountProblem ? d.accountProblem(tabId, info.pid) : null;
     if (acct) return fail('cannot', acct);
+    // The binding the gate must find once the new shell has run its startup files (undefined: not checked).
+    const binding = d.binding ? d.binding(tabId) : undefined;
     if (rec.sessionId !== sessionId) return fail('stale_view', 'the tab is on a different conversation now; look again');
     if (!(await d.hasTranscript(sessionId).catch(() => false))) return fail('no_transcript', 'that conversation has nothing to resume yet');
     const act = d.activity(tabId);
@@ -166,7 +175,7 @@ export function createPhoneMode(d) {
     if (!b.ok) return fail(b.code, b.code === 'too_many' ? 'four conversations are already on the phone' : 'that conversation is busy');
     const run = b.run;
     Object.assign(run, {
-      carry: carryOverFlags(argv), resendNote: waitingOnPerson, ptyPid: null, ptyStart: null, cwd, aliveAt: now(),
+      carry: carryOverFlags(argv), resendNote: waitingOnPerson, ptyPid: null, ptyStart: null, cwd, aliveAt: now(), binding,
       startedAt: now(), endingAt: null, gateStart: null, closedAt: null,
     });
     const manual = `The conversation is safe: run claude --resume ${sessionId} in ${cwd}, in this tab.`;
@@ -270,6 +279,16 @@ export function createPhoneMode(d) {
     }
     const run = r.run;
     dropTokenFile(ticketPath(runDir, run.runId), log); // already consumed by the gate; a leftover would be a bug
+    // The new shell's startup files or prompt hooks can change CLAUDE_CONFIG_DIR after the spawn chose the account: the
+    // gate reports what it inherited and must match what the conversation ran on, or nothing starts (Codex P1, impl
+    // round 16). The gate exits non-zero on a refusal, so the launch's own `claude --resume` does not run either.
+    if (run.binding !== undefined && (m.cfg === undefined || (m.cfg !== null && typeof m.cfg !== 'string') || m.cfg !== run.binding)) {
+      reg.end(run, "the tab's shell switched to another Claude account, so the conversation was not moved");
+      conn.send({ t: 'refused', code: 'account', error: "the tab's shell switched to another Claude account" });
+      afterChange(run);
+      conn.close('refused');
+      return;
+    }
     // One ps: the gate's own start time, and that it runs under this tab's shell (whose identity this fixes).
     const rows = Number.isSafeInteger(m.pid) && m.pid > 1 ? parsePsAll(await sys.psAll().catch(() => '')) : [];
     const gateRow = rows.find((x) => x.pid === m.pid);
@@ -522,6 +541,8 @@ export function createPhoneMode(d) {
 
   return {
     init, take, send, answer, stopTurn, giveBack, tabClosed, quitSweep, heldSessions, isPhoneTab,
+    /** The session a tab's conversation on the phone runs (until released), so session tracking counts it running. */
+    sessionOfTab: (tabId) => { const r = reg.runOfTab(tabId); return r && !r.released ? r.sessionId : null; },
     gen: (tabId) => reg.gen(tabId),
     stateOf: (tabId) => reg.stateOf(tabId),
     close: async () => { if (tickTimer) clearInterval(tickTimer); tickTimer = null; await server?.close(); ready = false; },

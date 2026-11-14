@@ -219,6 +219,12 @@ Owns a small registry: tabId -> { sessionId, token, socket, status, pending (at 
   a move the person asked for on conversation A can never stop or message conversation B that took the tab since
   (Codex P2, design round 2). Stop the pid (SIGHUP), wait for exit, claim the session for the tab
   (`claimSessionResume`), restart the tab with the `phone` launch.
+  - **The account stays the one the conversation ran on.** The restart's account is the binding the running Claude
+    was found with in the process scan, spelled exactly as configured (Keychain keys a login by the string, so `/p/b`
+    and `/p/b/` are two logins), and it must equal the tab's own spawn binding or the move is refused before anything
+    is stopped (Codex P1 x2, implementation round 15). The new shell's startup files can still change
+    CLAUDE_CONFIG_DIR, so the gate reports the value it inherited in its hello and main refuses it, before any Claude
+    starts, when it differs (round 16); the gate then exits non-zero and the launch's `claude --resume` does not run.
   - That claim is a **phone claim**: held in main's registry for as long as the run exists, with no 10 minute expiry
     (the tab-bound reservation in `terminal-manager.js` expires after 600 000 ms and is not enough for a phone session
     of any length). `claimSessionResume` refuses every other caller while it is held.
@@ -234,7 +240,9 @@ Owns a small registry: tabId -> { sessionId, token, socket, status, pending (at 
   open, and it was cancelled. Please ask it again." So the card appears on the phone. This is the only message Dobius
   ever sends itself, and only in this case.
 - **While on the phone**, the session counts as live: `liveClaudeSessionIds` and the claim gate include it, so no
-  other surface resumes it (auto-resume, History, another tab, the phone's own Resume).
+  other surface resumes it (auto-resume, History, another tab, the phone's own Resume). Session tracking (the capture
+  tick and the quit reconciliation) counts the tab as running that session, so its running stamp survives a relaunch
+  and the tab resumes it afterwards (Codex P2, implementation round 16).
   - Every path that types into a tab already refuses here, because the foreground program is the runner, not Claude:
     dobius-send, /openTab, team delivery, voice routing, the selector card. Not trusted alone: the choke points
     (`sendToTab`, `answerSelector`, `submitPromptDetailed`) also refuse a phone-mode tab by name.
@@ -361,7 +369,10 @@ every `phone*` request answers `opError: off`.
     in the quit sweep are removed only when main has confirmed ESRCH for the group and the Claude pid, never when the
     claim is released. Main starts that cleanup as soon as the run ends (SIGKILL 20 s after `ending` if the group is
     still there), independently of the claim.
-  - At the next launch, before auto-resume and before any claim is answered, main reads that file. A record from an
+  - At the next launch, before auto-resume and before any claim is answered, main reads that file. Its sessions are
+    held from the moment phone mode is built (first thing when the app is ready, read synchronously) until the sweep
+    below says which are safe; auto-resume does not wait for the sweep, it is refused only for those sessions
+    (Codex P1 x2, implementation round 16). A record from an
     earlier boot is dropped without signalling anything: every process in it died with that boot, and its ids may now
     belong to anyone (Codex P2, design round 5). For a record from this boot, a recorded process still alive whose
     pid and start time match is SIGKILLed and confirmed gone, and until that is done every claim for its session is

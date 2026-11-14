@@ -3353,6 +3353,7 @@ async function hasTranscriptAnywhere(sessionId) {
 // Phone mode (electron/phone-mode.js via phone-main.js), built by setupPhoneMode; null until then and on Windows.
 let phoneMain = null;
 const isPhoneTab = (id) => { try { return phoneMain?.isPhoneTab(id) === true; } catch { return true; } };
+const phoneSessionOfTab = (id) => { try { return phoneMain?.sessionOfTab(id) || null; } catch { return null; } };
 // Any of these in Dobius's own environment signs in every Claude it starts the
 // same way, whatever CLAUDE_CONFIG_DIR says. By name only: no value is kept.
 const AUTH_OVERRIDE_NAMES = CLAUDE_AUTH_ENV;
@@ -3517,6 +3518,7 @@ async function setupPhoneMode() {
     },
   });
   phoneMain = pm;
+  // Before the first await: the gate must hold an earlier run's sessions from the moment Dobius is ready.
   setPhoneMode(pm, () => phoneModeOn(getSettings()));
   setHeldSessions(() => pm.heldSessions());
   setKillSignal((id) => (pm.isPhoneTab(id) ? 'SIGKILL' : undefined));
@@ -3931,6 +3933,10 @@ function setupSessionTabCapture() {
       const stampedTabs = new Set(Object.values(getSessionTabMap() || {}).filter((l) => l?.lastRunningAt && l.tabId).map((l) => l.tabId));
       for (const t of liveTabs) {
         probedAt.set(t.id, Date.now());
+        // A tab whose conversation is on the phone runs it, though its shell's child is the phone gate (Codex P2, impl
+        // round 16: the stamp was cleared and the tab came back as a shell after a relaunch).
+        const onPhone = phoneSessionOfTab(t.id);
+        if (onPhone) { infoByTab.set(t.id, { sessionId: onPhone, phone: true }); continue; }
         const got = await getTerminalClaudeInfo(t.id, { unknown: true, rootCheck: stampedTabs.has(t.id) });
         if (got === CLAUDE_UNKNOWN) unknownTabs.add(t.id);
         infoByTab.set(t.id, got === CLAUDE_UNKNOWN ? null : got);
@@ -5331,6 +5337,9 @@ function setupCrashLogging() {
 
 app.whenReady().then(() => {
   installErrorLog();
+  // Phone mode first: its claim gate holds an earlier run's sessions from here on, before any window, History or
+  // auto-resume can ask for one. The startup sweep runs in the background.
+  void setupPhoneMode().catch((err) => { logLine('phone', `setup failed: ${err?.message || err}`); });
   // Faults (and native crash reports from the last run) become GitHub issues
   // in the private reports repo, filed with this Mac's own gh login.
   startErrorReporter({ userDataDir: app.getPath('userData'), version: app.getVersion(), isPackaged: app.isPackaged, getSettings });
@@ -5702,14 +5711,8 @@ app.whenReady().then(() => {
   // electron/auto-resume.js. Its startupDelay is extended by the restore
   // stagger so it waits for the LAST reopened window before deciding the live
   // set is complete.
-  // Phone mode's startup sweep (runs an earlier Dobius left behind) holds their sessions before anything resumes. Its
-  // failure or a hang never keeps the tabs from resuming: auto-resume starts after it, or after 15 s at the latest.
-  const resumeDelay = 1500 + restoreStaggerMs;
-  const phoneSetup = setupPhoneMode().catch((err) => { logLine('phone', `setup failed: ${err?.message || err}`); });
-  void Promise.race([phoneSetup, new Promise((r) => { setTimeout(r, 15_000).unref?.(); })]).then(() => {
-    recordLaunch(); // before auto-resume reads it: when the previous run started, to tell a crash from a clean quit
-    void startAutoResume({ startupDelayMs: resumeDelay });
-  });
+  recordLaunch(); // before auto-resume reads it: when the previous run started, to tell a crash from a clean quit
+  void startAutoResume({ startupDelayMs: 1500 + restoreStaggerMs });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -6007,6 +6010,13 @@ app.on('before-quit', (e) => {
         // kept whatever stamp they had (bug report 2026-11-14). Bounded so a quit never starts dozens of ps at once.
         await mapLimit(liveTabs, QUIT_PROBE_CONCURRENCY, async (t) => {
           if (reconcileAborted) return;
+          const onPhone = phoneSessionOfTab(t.id);
+          if (onPhone) {
+            probedTabs += 1;
+            infoByTab.set(t.id, { sessionId: onPhone, phone: true });
+            if (tabToSid.get(t.id) === onPhone && getSessionTabMap()?.[onPhone]?.tabId === t.id) touchSessionTabLink(onPhone, quitStampAt ?? Date.now());
+            return;
+          }
           const got = await getTerminalClaudeInfo(t.id, { unknown: true, rootCheck: stampedTabs.has(t.id) });
           if (reconcileAborted) return;
           probedTabs += 1;

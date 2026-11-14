@@ -207,7 +207,9 @@ export function runGate({
     const c = await connectMain(socketPath(dir));
     if (c.error) { say(`Dobius: could not reach Dobius (${plain(c.error, 80)}).`); say(manual()); return finish(1); }
     main = c.ch;
-    const ok = await main.ask({ t: 'gate', token, pid: process.pid }, ['gate-ok']);
+    // cfg: the Claude account this shell will start Claude on, after its startup files ran (main checks it).
+    const cfg = typeof process.env.CLAUDE_CONFIG_DIR === 'string' ? process.env.CLAUDE_CONFIG_DIR : null;
+    const ok = await main.ask({ t: 'gate', token, pid: process.pid, cfg }, ['gate-ok']);
     if (ok.t !== 'gate-ok' || !RUN_ID.test(String(ok.runId)) || typeof ok.runnerToken !== 'string') {
       say(`Dobius: phone mode did not start (${plain(ok.error || ok.code || 'refused', 160)}).`);
       say(manual());
