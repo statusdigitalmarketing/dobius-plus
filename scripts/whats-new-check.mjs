@@ -18,6 +18,15 @@ export function nextVersion(current, bump) {
   throw new Error(`bump must be patch, minor or major: ${bump}`);
 }
 
+// The machine called a Mac: any "Mac" or "mac" standing alone as a word, whatever comes before it ("the", "that", a
+// quote, a zero-width space) or after it ("Mac's"). "When the Mac is offline" shipped twice (2.2.30, 2.2.32) past a
+// check that only knew "this Mac", and a list of determiners missed "that Mac" (Codex, PR 16). Not refused: the phone's
+// screen names "Add a Mac" and "Your Macs", "MAC address" (a network term, matched by case), "macOS" and "MacBook".
+export function machineNamedMac(line) {
+  const rest = String(line).replace(/\bAdd a Mac\b/g, '');
+  return /(?<![\p{L}\p{N}])[Mm]ac(?![\p{L}\p{N}])/u.test(rest);
+}
+
 export function checkNotes(version, dir = NOTES_DIR) {
   const file = path.join(dir, `${version}.md`);
   let text;
@@ -31,10 +40,9 @@ export function checkNotes(version, dir = NOTES_DIR) {
   // both: no emphasis, code, escapes, HTML, entities or links (Codex, PR 11). A "Tasks > Team" menu path is fine.
   const marked = p.bullets.find((b) => /[*_`~\\<]|&#?\w+;|\]\(/.test(b));
   if (marked) return { ok: false, error: `${path.basename(file)}: plain text only, the app shows markdown marks as typed: ${marked}` };
-  // "the Mac" and "your Mac" too: "When the Mac is offline" shipped twice (2.2.30, 2.2.32) past a "this Mac" only check.
-  // A screen named after Macs ("Your Macs", "Add a Mac") is a name, not the machine, and stays allowed.
-  const mac = p.bullets.find((b) => /\b(?:this|the|your)\s+Mac\b/i.test(b));
-  if (mac) return { ok: false, error: `${path.basename(file)}: say "this computer" or "the computer", not "the Mac" (the notes show on Windows too): ${mac}` };
+  if (p.bullets.some(machineNamedMac)) {
+    return { ok: false, error: `${path.basename(file)}: say "this computer" or "the computer", not "the Mac" (the notes show on Windows too): ${p.bullets.find(machineNamedMac)}` };
+  }
   return { ok: true, bullets: p.bullets };
 }
 
