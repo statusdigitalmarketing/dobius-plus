@@ -48,7 +48,7 @@ export async function handlePhoneOp(msg, deps) {
   if (r.type === 'phoneStateGet') return deps.send({ type: 'phoneState', ...pm.stateOf(r.id), id: r.id, reqId });
   let res;
   try {
-    if (r.type === 'phoneTake') res = await pm.take(r.id, { sessionId: r.sessionId, gen: r.gen });
+    if (r.type === 'phoneTake') res = await pm.take(r.id, { sessionId: r.sessionId, gen: r.gen, stillOk: deps.stillOk });
     else if (r.type === 'phoneSend') res = await pm.send(r.id, r.runId, r.text, r.sendId);
     else if (r.type === 'phoneAnswer') res = await pm.answer(r.id, r.runId, r.requestId, r.answer);
     else if (r.type === 'phoneStop') res = await pm.stopTurn(r.id, r.runId);

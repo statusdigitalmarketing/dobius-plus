@@ -113,16 +113,18 @@ export function createPhoneMode(d) {
 
   // ---- start ----
 
-  async function take(tabId, { sessionId, gen } = {}) {
+  // stillOk: the asking phone's pairing is still valid. Checked again right before Claude is stopped and before the tab
+  // restarts, so a pairing revoked during the checks moves nothing (Codex P1, impl round 14).
+  async function take(tabId, { sessionId, gen, stillOk = () => true } = {}) {
     if (!d.on()) return fail('off', 'phone mode is off on this Mac');
     if (!ready) return fail('not_ready', 'phone mode is still starting on this Mac');
     if (starting) return fail('busy', 'another conversation is moving to the phone; try again in a moment');
     starting = true;
-    try { return await takeLocked(tabId, sessionId, gen); }
+    try { return await takeLocked(tabId, sessionId, gen, stillOk); }
     finally { starting = false; }
   }
 
-  async function takeLocked(tabId, sessionId, gen) {
+  async function takeLocked(tabId, sessionId, gen, stillOk) {
     if (typeof sessionId !== 'string' || !Number.isSafeInteger(gen) || reg.gen(tabId) !== gen) return fail('stale_view', 'the tab changed; look again');
     if (reg.runOfTab(tabId)) return fail('on_phone', 'this tab is already on the phone');
     if (blocked.has(sessionId) || reg.claimOf(sessionId)) return fail('claimed', 'that conversation is still coming back from the phone');
@@ -137,7 +139,7 @@ export function createPhoneMode(d) {
     if (info.soleChild === false) return fail('other', 'another program shares the tab with Claude');
     const claudeStart = await sys.psStart(info.pid).catch(() => null);
     if (!claudeStart) return fail('unreadable', 'Claude in that tab could not be identified');
-    const rec = await d.presence(info).catch(() => null);
+    const rec = await d.presence(info, tabId).catch(() => null);
     if (!rec?.sessionId) return fail('unreadable', "Claude's own record of its conversation could not be read");
     if (rec.sessionId !== sessionId) return fail('stale_view', 'the tab is on a different conversation now; look again');
     if (!(await d.hasTranscript(sessionId).catch(() => false))) return fail('no_transcript', 'that conversation has nothing to resume yet');
@@ -156,6 +158,7 @@ export function createPhoneMode(d) {
     // No await from here to the stop.
     if (reg.gen(tabId) !== gen) return fail('stale_view', 'the tab changed; look again');
     if (d.inputSeq(tabId) !== inputSeq || d.inputHeld(tabId)) return fail('typed', 'something was typed in the tab, so it was left alone');
+    if (!stillOk()) return fail('revoked', 'this phone is no longer paired with the Mac');
     const b = reg.begin(tabId, sessionId);
     if (!b.ok) return fail(b.code, b.code === 'too_many' ? 'four conversations are already on the phone' : 'that conversation is busy');
     const run = b.run;
@@ -182,6 +185,7 @@ export function createPhoneMode(d) {
     while (d.alive(info.pid) && now() < stopBy) await d.sleep(100);
     if (d.alive(info.pid)) return cancel('failed', `Claude did not stop within ${STOP_MS / 1000} seconds, so nothing else was changed`);
     if (d.inputSeq(tabId) !== inputSeq) return cancel('typed', `Claude stopped, but something was typed in the tab, so it was not moved. ${manual}`);
+    if (!stillOk()) return cancel('revoked', `Claude stopped, but this phone is no longer paired, so it was not moved. ${manual}`);
     let restarted = false;
     try {
       restarted = d.restart(tabId, cwd, {

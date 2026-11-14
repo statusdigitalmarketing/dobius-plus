@@ -204,6 +204,32 @@ test('take: a restart that fails cancels the run, removes its files and frees th
   } finally { await ctx.cleanup(); }
 });
 
+test('take: a pairing revoked before the stop moves nothing; revoked after it, the tab is not restarted (Codex impl r14)', async () => {
+  const a = setup();
+  try {
+    await a.mode.init();
+    const r = await a.mode.take('T1', { sessionId: S, gen: a.mode.gen('T1'), stillOk: () => false });
+    assert.equal(r.code, 'revoked');
+    assert.deepEqual(a.calls.stop, []);
+    assert.deepEqual(a.calls.restart, []);
+    assert.equal(a.mode.heldSessions().size, 0);
+  } finally { await a.cleanup(); }
+  let paired = true;
+  const b = setup();
+  const stop = b.d.stop;
+  b.d.stop = (pid) => { stop(pid); paired = false; }; // unpaired while Claude was stopping
+  try {
+    await b.mode.init();
+    const r = await b.mode.take('T1', { sessionId: S, gen: b.mode.gen('T1'), stillOk: () => paired });
+    assert.equal(r.code, 'revoked');
+    assert.match(r.error, /claude --resume/);
+    assert.deepEqual(b.calls.stop, [900]);
+    assert.deepEqual(b.calls.restart, []);
+    assert.equal(b.mode.heldSessions().size, 0);
+    assert.equal(b.mode.isPhoneTab('T1'), false);
+  } finally { await b.cleanup(); }
+});
+
 test('full run: handshake, carried flags, cards, sends once per id, give back, done, released and forgotten', async () => {
   const ctx = setup();
   try {

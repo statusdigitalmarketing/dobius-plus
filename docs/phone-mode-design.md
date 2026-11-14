@@ -241,8 +241,9 @@ Owns a small registry: tabId -> { sessionId, token, socket, status, pending (at 
   - The phone's raw `input` route (`mobile-tab-ops.js handleTabOp` to `writeRawInput`) writes to the PTY without
     looking at its foreground program, so a phone Enter delayed past the switch would reach the runner and take the
     conversation back (Codex P2, design round 1). Each tab has a **phone generation**, bumped when it moves to the
-    phone and again when it comes back. The phone is told the generation with the tab list, the attach replay and
-    every `phoneState`, and every phone-originated tab write (`input`, `submitPrompt`, `selectorKey`, `resize`)
+    phone and again when it comes back. The phone is told the generation with the attach replay and every
+    `phoneState` (never in the tab list: a list fetched before a move and read after an attach could otherwise
+    replace the attached view's generation, Codex P1, impl round 14), and every phone-originated tab write (`input`, `submitPrompt`, `selectorKey`, `resize`)
     carries the generation **the phone was showing** when the person acted. A write is refused `opError: stale_view`
     when it is present and is not the tab's current one, checked when the frame arrives and again at the
     moment it is written (the existing `stillOk` check). So an Enter typed for prompt A, delayed past a whole trip to

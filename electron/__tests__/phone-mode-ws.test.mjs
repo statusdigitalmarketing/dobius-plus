@@ -28,7 +28,7 @@ function harness(over = {}) {
     authed: new Set(over.authed ?? [T]),
     stillOk: () => over.stillOk ?? true,
   };
-  return { calls, sent, run: (m) => handlePhoneOp(m, deps) };
+  return { calls, sent, deps, run: (m) => handlePhoneOp(m, deps) };
 }
 
 test('the six requests are the phone ops', () => {
@@ -60,7 +60,9 @@ test('refusals act on nothing and are answered', async () => {
 test('requests reach phone mode with only their checked fields, and acks carry run and generation', async () => {
   const h = harness();
   await h.run({ type: 'phoneTake', id: T, sessionId: S, gen: 4, reqId: 7, extra: 'x' });
-  assert.deepEqual(h.calls[0], ['take', T, { sessionId: S, gen: 4 }]);
+  const [name, tid, opts] = h.calls[0];
+  assert.deepEqual([name, tid, opts.sessionId, opts.gen, Object.keys(opts).sort()], ['take', T, S, 4, ['gen', 'sessionId', 'stillOk']]);
+  assert.equal(opts.stillOk, h.deps.stillOk, "the socket's own pairing check, asked again during the move");
   assert.deepEqual(h.sent[0], { type: 'ack', op: 'phoneTake', id: T, reqId: 7, runId: RUN, gen: 9 });
   await h.run({ type: 'phoneSend', id: T, runId: RUN, text: 'hi', sendId: 's1' });
   await h.run({ type: 'phoneAnswer', id: T, runId: RUN, requestId: 'tu1', answer: { kind: 'permission', allow: true, junk: 1 } });

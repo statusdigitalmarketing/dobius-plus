@@ -36,7 +36,7 @@ import {
 } from './terminal-manager.js';
 import { stripAnsi, spinnerStatus } from './selector-parser.js';
 import { terminalTextTail, terminalScreenText, submitPromptDetailed, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
-import { TAB_OPS, ACK_FEATURES, handleTabOp, phoneViewGate } from './mobile-tab-ops.js';
+import { TAB_OPS, ACK_FEATURES, handleTabOp, phoneViewGate, validReqId } from './mobile-tab-ops.js';
 import { PHONE_OPS, handlePhoneOp } from './phone-mode-ws.js';
 import { TODAY_FEATURES, handleTodayMessage } from './mobile-today.js';
 import { handleTasksMessage } from './mobile-tasks.js';
@@ -550,7 +550,6 @@ function buildTerminalsPayload() {
       // Ground truth from the PTY, not from the session link (Brett v1.0.56).
       claudeLive: claudeIsLive(t.id),
       sessionProject: link?.projectPath || null,
-      gen: phoneGenOf(t.id),
     };
   });
   return { type: 'terminals', list, recentExits: snap.recentExits };
@@ -703,8 +702,14 @@ export function setPhoneMode(pm, isOn) {
 const activePhoneMode = () => {
   try { return phoneMode && phoneModeOn() ? phoneMode : null; } catch { return null; }
 };
-/** The tab's phone generation for a phone view (list, attach), or undefined while phone mode is off. */
+/** The tab's phone generation for an attached phone view, or undefined while phone mode is off. */
 const phoneGenOf = (id) => activePhoneMode()?.gen(id);
+/**
+ * The generation gate for a phone write (mobile-tab-ops.js phoneViewGate). It asks the phone mode instance even with
+ * the setting off: a conversation already on the phone stays there until it comes back, and its tab must stay closed
+ * to writes meanwhile.
+ */
+const phoneGate = (id, m) => phoneViewGate(phoneMode, id, m && typeof m === 'object' ? m : {});
 /** Phone mode's state for a tab, to every socket that authorized it (phone-mode.js `notify`). */
 export function pushPhoneState(id, state) {
   if (!activePhoneMode() || typeof id !== 'string' || !state || typeof state !== 'object') return;
@@ -950,7 +955,7 @@ function handleTabWrite(socket, msg) {
     submitPrompt: submitPromptDetailed,
     // Phone mode: a key typed against an older tab generation, or one that would land on the gate while the tab is on
     // the phone, is refused on arrival and again at the write (mobile-tab-ops.js phoneViewGate).
-    viewGate: (id, m) => phoneViewGate(activePhoneMode(), id, m),
+    viewGate: (id, m) => phoneGate(id, m),
     onAccepted: (op, id, m) => afterTabWriteAccepted(socket, op, id, m),
   }).catch((err) => console.error('[mobile] tab op failed:', err?.message || err));
 }
@@ -1051,7 +1056,7 @@ function handleAuthedMessage(socket, msg, subs) {
       if (typeof msg.id !== 'string') break;
       const id = msg.id;
       // Phone mode: the same generation check as a typed key, on arrival and at the write.
-      const selGate = () => phoneViewGate(activePhoneMode(), id, msg);
+      const selGate = () => phoneGate(id, msg);
       const refusedSel = selGate();
       if (refusedSel) { wsSend(socket, { type: 'selectorKeyResult', id, ok: false, stale: true, token: '', code: refusedSel }); break; }
       answerSelector(id, msg.data, msg.token, () => knownToken(socket._authToken) && !selGate())
@@ -1091,7 +1096,7 @@ function handleAuthedMessage(socket, msg, subs) {
         // (e.g. ones created via `createTerminal` from mobile) still get
         // resized normally.
         if (socket._authedTabs.has(msg.id) && !terminalHasDesktopAttached(msg.id) && knownToken(socket._authToken)
-            && !phoneViewGate(activePhoneMode(), msg.id, msg)) {
+            && !phoneGate(msg.id, msg)) {
           resizeTerminal(msg.id, msg.cols, msg.rows);
         }
       }
@@ -1099,7 +1104,13 @@ function handleAuthedMessage(socket, msg, subs) {
 
     case 'kill':
       // A revoked phone's queued kill must not stop anything (the socket is closing, its frames may still be read).
-      if (typeof msg.id === 'string' && socket._authedTabs.has(msg.id) && knownToken(socket._authToken)) killTerminal(msg.id);
+      // A kill from a view of an earlier generation, or of a tab now on the phone, is refused like any other write
+      // (Codex P1, impl round 14: a kill delayed past a move would close the tab under the phone's run).
+      if (typeof msg.id === 'string' && socket._authedTabs.has(msg.id) && knownToken(socket._authToken)) {
+        const why = phoneGate(msg.id, msg);
+        if (why) wsSend(socket, { type: 'opError', op: 'kill', code: why, id: msg.id, reqId: validReqId(msg.reqId) ? (msg.reqId ?? null) : null });
+        else killTerminal(msg.id);
+      }
       break;
 
     case 'listProjects':
@@ -1656,6 +1667,10 @@ async function doStartMobileServer(stillCurrent) {
       }
       const text = voiceLine(transcript);
       if (!text) return res.status(400).json({ ok: false, error: 'transcript required' });
+      // The phone's own generation gate, on arrival; tab-send refuses a phone tab again right before it pastes
+      // (Codex P1, impl round 14).
+      const why = phoneGate(directTabId, req.body);
+      if (why) return res.status(409).json({ ok: false, code: why, error: why === 'on_phone' ? 'that conversation is on the phone' : 'the tab changed; look again' });
       // The guarded path (a dialog, a draft or someone typing stops it): a "1" said at a permission prompt must not
       // approve it.
       const r = await sendViaTabSend(directTabId, text, { claudeOnly: true });
