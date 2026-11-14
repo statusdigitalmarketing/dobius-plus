@@ -313,8 +313,10 @@ the setting off and a conversation still on the phone was taken for an older app
 A message sent from the phone keeps its own bubble and `sendId` until the transcript shows it. If the Mac refuses it
 (`busy`, `stale_run`, ...) the bubble says Not sent; if no answer comes or the answer does not say (`timeout`,
 `failed`), it says Not confirmed by the Mac. Both offer Send again with the same `sendId`: the Mac forgets an id it did
-not take and answers `duplicate` for one that arrived, so nothing is delivered twice. Back on the Mac, Send again puts
-the words in the box instead.
+not take and answers `duplicate` for one that arrived, so nothing is delivered twice. Send again goes to the run the
+message was written for: once that run is over (back on the Mac, or a later move), it puts the words in the box
+instead, and only into an empty box. A bubble clears when the transcript shows a user row with the same words written
+since it was first sent (30 s allowed for clock skew); an older message with the same words does not count (Codex r27).
 
 | Request | Answer | Effect |
 |---|---|---|

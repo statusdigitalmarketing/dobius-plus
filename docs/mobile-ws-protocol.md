@@ -323,7 +323,7 @@ valid `reqId` (or none). With the setting off, `phoneTake` is refused `off`, but
 | Request | Fields | Effect |
 |---|---|---|
 | `phoneTake` | `id`, `sessionId`, `gen` (from `phoneState`) | Moves the tab's Claude to the phone. The ack carries the new `runId` |
-| `phoneSend` | `id`, `runId`, `text` (1 to 8 KB, not blank), `sendId` (1 to 64 of `[A-Za-z0-9_-]`) | Sends a message; the same `sendId` twice is sent once (`duplicate:true`). An id refused `not_live`, `busy` or `bad_request` was not taken and may be sent again; after `timeout` or `failed` it is not known, the id stays used, and a retry with it is delivered at most once |
+| `phoneSend` | `id`, `runId`, `text` (1 to 8 KB, not blank), `sendId` (1 to 64 of `[A-Za-z0-9_-]`) | Sends a message; the same `sendId` twice is sent once (`duplicate:true`). An id refused `not_live`, `busy` or `bad_request` was not taken and may be sent again; after `timeout` or `failed` it is not known, the id stays used, and a retry with it is delivered at most once. A retry that arrives while the first send is still waiting gets that send's outcome (`duplicate` once it was taken, a delivery of its own if it was refused) |
 | `phoneAnswer` | `id`, `runId`, `requestId`, `answer` | Answers one pending card |
 | `phoneStop` | `id`, `runId` | Interrupts the current turn |
 | `phoneGiveBack` | `id`, `runId` | Ends phone mode; the tab resumes the conversation on the Mac |
@@ -342,7 +342,7 @@ generation: a take names the one it was shown, so a take decided from an old vie
 A card is one of:
 - `{requestId, kind:'question', tool, questions:[{index, question, header, multiSelect, options:[{label, description}]}], canAlways:false}`
 - `{requestId, kind:'plan', tool, summary (the plan, up to 16 KB), canAlways:false}`
-- `{requestId, kind:'permission', tool, title, description, displayName, reason, blockedPath, mcpServer, input (JSON, up to 4 KB), canAlways, defaultToNo}`
+- `{requestId, kind:'permission', tool, title, description, displayName, reason, blockedPath, mcpServer, command (the tool's `command` string, up to 4 KB, else empty), input (JSON, up to 4 KB), canAlways, defaultToNo}`
 
 All card text is untrusted (it can come from a tool or an MCP server) and is shown as text, never markup.
 

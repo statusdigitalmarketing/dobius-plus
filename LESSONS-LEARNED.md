@@ -1159,3 +1159,9 @@
 - **FIX**: Carry the stopped TUI's own `--permission-mode` / `--model` (runner's `carryOverFlags`) into the phone launch as `$8`/`$9`, allowlisted in JS and again in the shell (`PHONE_RESUME_MODES`, pinned equal to `CARRY_MODES` by a test).
 - **CONTEXT**: Any path that stops a Claude and restarts it for the person must restore the flags it was stopped with, not just the session id.
 - **DETECTION**: `grep -n "claude --resume \"\$2\"" shared/new-tab.js`
+
+### Testing - 2026-11-14
+- **MISTAKE**: Edited `shared/new-tab.js` and rebuilt `dist-mobile` while a phone-mode ship-test ran in the dev harness. Vite watches the whole repo: a renderer-imported file it cannot Fast Refresh, or any html under `dist-mobile`, reloads the project window, which kills every tab's PTY and ends the run (looks like "Claude is not running in that tab").
+- **FIX**: Finish or give back the phone run before editing anything the renderer imports (`src/`, `shared/`) or running `npm run build:mobile`; restart Claude in the tab afterwards. A packaged harness build has no Vite and is immune.
+- **CONTEXT**: Dev harness only. Useful by accident: the run's cleanup after a lost PTY was seen working (no runner or Claude left, session released).
+- **DETECTION**: `grep -n "page reload\|Could not Fast Refresh" <harness>/harness.log`

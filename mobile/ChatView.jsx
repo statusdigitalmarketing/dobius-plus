@@ -8,7 +8,7 @@ import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, 
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 import { remarkCommandBoxes, CMD_TAG } from './command-blocks.js';
 import PhoneCards from './PhoneCards';
-import { phoneOffered, phoneKnown, sendOutcome, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
+import { phoneOffered, phoneKnown, sendOutcome, echoArrived, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
 // blocks, lists were showing as raw pipes/asterisks: Sam's v1.0.53 report);
@@ -934,7 +934,10 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           };
           const seen = new Set(next.filter((m) => m.role === 'user').map((m) => norm(m.content)));
           const now = Date.now();
-          const kept = cur.filter((e) => !seen.has(norm(e.content)) && (e.fail || now - e.at < 90_000));
+          // A phone message (sendId) is matched to a row written since it was sent: an older message with the same
+          // words must not clear one that failed, or its only copy is gone (Codex r27).
+          const arrived = (e) => (e.sendId ? echoArrived(e, next, norm) : seen.has(norm(e.content)));
+          const kept = cur.filter((e) => !arrived(e) && (e.fail || now - e.at < 90_000));
           return kept.length === cur.length ? cur : kept;
         });
         if (next.length > 0) {
@@ -1272,13 +1275,16 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // Send again on a phone message that failed: the same sendId, so one that did arrive is not delivered twice. Back on
   // the Mac, its words go into the box to be sent from there. True when it went out.
   const retryEcho = (e) => {
-    if (!phoneOn) {
+    if (!phoneOn || phone.runId !== e.runId) {
+      // That phone session is over: the words go into the box, to be sent where the conversation is now. Only into an
+      // empty box, and the bubble stays until they are there (Codex r27).
+      if (input.trim()) { showSendNote('That phone session ended. Clear the box first, then tap Send again to put it there.'); return false; }
       setEchoes((cur) => cur.filter((x) => x.sendId !== e.sendId));
-      setDraft((cur) => (cur.trim() ? cur : e.content));
-      showSendNote('Back on the Mac: it is in the box, send it from there.');
+      setDraft(e.content);
+      showSendNote(phoneOn ? 'That message was for an earlier phone session: it is in the box.' : 'Back on the Mac: it is in the box, send it from there.');
       return false;
     }
-    if (!phone.runId || !phoneRequest('phoneSend', { runId: phone.runId, text: e.content, sendId: e.sendId }, { text: e.content, sendId: e.sendId })) {
+    if (!phoneRequest('phoneSend', { runId: e.runId, text: e.content, sendId: e.sendId }, { text: e.content, sendId: e.sendId })) {
       showSendNote('Not sent: not connected to the Mac right now. Send it again in a moment.');
       return false;
     }
@@ -1294,7 +1300,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     if (phoneOn) {
       // On the phone the message goes to the run, never typed into the tab. The same words as a message that failed
       // are that message sent again, with its sendId.
-      const prior = echoes.find((e) => e.fail && e.sendId && e.content === text);
+      const prior = echoes.find((e) => e.fail && e.sendId && e.content === text && e.runId === phone.runId);
       if (prior) { if (retryEcho(prior)) setDraft(''); return; }
       const sendId = freshId('s');
       if (!phone.runId || !phoneRequest('phoneSend', { runId: phone.runId, text, sendId }, { text, sendId })) {
@@ -1303,7 +1309,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       }
       setSendNote('');
       sentAtRef.current = Date.now();
-      setEchoes((cur) => [...cur, { content: text, at: Date.now(), sendId }]);
+      // runId: Send again goes to the run it was written for, never to a later one on the same tab (Codex r27).
+      setEchoes((cur) => [...cur, { content: text, at: Date.now(), since: Date.now(), sendId, runId: phone.runId }]);
       setDraft('');
       atBottomRef.current = true;
       return;

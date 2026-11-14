@@ -244,7 +244,8 @@ export const isRunScriptPath = (p) => typeof p === 'string' && /^\/[^\x00-\x1F\x
 const PHONE_ENV_SUFFIXES = ['', '_ID', '_CWD', '_TICKET', '_RUN', '_EXE', '_RUNNER', '_PERM', '_MODEL'];
 // The modes a phone resume may pass on, the same words as phone-runner-core.mjs CARRY_MODES, and a model name's shape.
 export const PHONE_RESUME_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'];
-const PHONE_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?:\[1m\])?$/;
+// Plain ( ) group, no (?:): the same source is the shell's POSIX ERE (`=~`) in the launch below.
+const PHONE_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(\[1m\])?$/;
 const phoneResumeMode = (v) => (PHONE_RESUME_MODES.includes(v) ? v : '');
 const phoneResumeModel = (v) => (typeof v === 'string' && PHONE_MODEL_RE.test(v) ? v : '');
 const safePath = (p) => typeof p === 'string' && isAbsPath(p) && !/[\x00-\x1F\x7F]/.test(p);
@@ -301,9 +302,11 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
   // phone: $2 session, $3 folder, $4 ticket, $5 run id, $6 Dobius binary, $7 runner, $8 permission mode, $9 model. The
   // and-list ends at the first failure, so `claude --resume` runs only when the gate exits 0 (it confirmed the runner
   // group and Claude are gone); the `done` line runs after it whatever its outcome (docs/phone-mode-design.md, "End").
-  // The mode is checked again against the fixed words and the model may not look like a flag: a login rc file runs
-  // before this script and could have exported other values.
-  const launch = phoning ? `__dobius_a=(); ${shellAllow('$8', PHONE_RESUME_MODES)} && __dobius_a+=(--permission-mode "$8"); [[ -n $9 && $9 != -* ]] && __dobius_a+=(--model "$9"); [[ $1 == phone ]] && cd -- "$3" && ELECTRON_RUN_AS_NODE=1 "$6" "$7" gate "$4" "$2" && claude --resume "$2" "\${__dobius_a[@]}"; [[ $1 == phone ]] && ELECTRON_RUN_AS_NODE=1 "$6" "$7" done "$4" "$5";`
+  // The mode and model are checked again in the shell (a login rc file runs before this script and could have exported
+  // other values) and blanked in the positional parameters when off-shape. They stay positional up to the claude call:
+  // a cd hook (chpwd) or the gate cannot change $8/$9, where a shell variable or array could be (Codex r27). Bash and
+  // zsh both drop an unquoted empty ${8:+...}, and the words are fixed flags or one quoted value.
+  const launch = phoning ? `${shellAllow('$8', PHONE_RESUME_MODES)} || set -- "$1" "$2" "$3" "$4" "$5" "$6" "$7" '' "$9"; __dobius_re='${PHONE_MODEL_RE.source}'; [[ $9 =~ $__dobius_re ]] || set -- "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" ''; [[ $1 == phone ]] && cd -- "$3" && ELECTRON_RUN_AS_NODE=1 "$6" "$7" gate "$4" "$2" && claude --resume "$2" \${8:+--permission-mode} \${8:+"$8"} \${9:+--model} \${9:+"$9"}; [[ $1 == phone ]] && ELECTRON_RUN_AS_NODE=1 "$6" "$7" done "$4" "$5";`
     : running ? '[[ $1 == run ]] && /bin/bash -p -- "$2";'
     : resuming ? `[[ $1 == resume ]] && cd -- "$3" && claude --resume "$2"; __dobius_on=; [[ $1 == resume-on ]] && cd -- "$3" && __dobius_on=1; [[ $__dobius_on == 1 && "${CARRY_ON_DIR}" != "$4" ]] && __dobius_on=0; [[ $__dobius_on == 1 ]] && ${CARRY_ON_TOKEN} && __dobius_on=0; [[ $__dobius_on == 1 ]] && claude --resume "$2" '${CARRY_ON_PROMPT}'; [[ $__dobius_on == 0 ]] && claude --resume "$2"; [[ $1 == fresh ]] && cd -- "$3" && claude;`
       // The flags are fixed words plus the allowlisted values in $2 and $3, built as an array, never eval'd.

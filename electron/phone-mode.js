@@ -518,15 +518,31 @@ export function createPhoneMode(d) {
     });
   }
 
+  // A send still waiting on the runner, by run and sendId: a retry of it (the phone reconnected and tapped Send again)
+  // gets that send's outcome, never an early "duplicate" for a message the runner may still refuse (Codex r27). Each
+  // entry lives at most COMMAND_MS.
+  const sending = new Map();
+
   async function send(tabId, runId, text, sendId) {
     const { run, conn, error } = liveRun(tabId, runId);
     if (error) return error;
+    const key = `${run.runId}:${sendId}`;
+    const first = sending.get(key);
+    if (first) {
+      const r = await first;
+      if (r.ok) return { ok: true, duplicate: true };
+      // Not taken: the id was forgotten, so this retry is the delivery. Anything else is not known, and says so.
+      return SEND_NOT_TAKEN.has(r.code) ? send(tabId, runId, text, sendId) : r;
+    }
     if (!reg.firstSend(run, sendId)) return { ok: true, duplicate: true };
-    const r = await command(run, conn, { t: 'send', text });
-    // Refused before the runner queued it (not connected, its queue full, empty): the same id may go again. A timeout
-    // is not known either way and keeps the id, so a retry of a message that did arrive is not delivered twice.
-    if (!r.ok && SEND_NOT_TAKEN.has(r.code)) reg.forgetSend(run, sendId);
-    return r;
+    const p = command(run, conn, { t: 'send', text }).then((r) => {
+      // Refused before the runner queued it (not connected, its queue full, empty): the same id may go again. A
+      // timeout is not known either way and keeps the id, so a retry of a message that did arrive is not sent twice.
+      if (!r.ok && SEND_NOT_TAKEN.has(r.code)) reg.forgetSend(run, sendId);
+      return r;
+    }).finally(() => { if (sending.get(key) === p) sending.delete(key); });
+    sending.set(key, p);
+    return p;
   }
 
   async function answer(tabId, runId, requestId, ans) {

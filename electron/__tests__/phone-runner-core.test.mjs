@@ -50,6 +50,10 @@ test('cards: question, plan and permission, with the SDK flags respected', () =>
   assert.equal(perm.mcpServer, '<b>srv</b>'); // carried as text; the phone never renders markup
   assert.equal(cardFor('Bash', {}, { toolUseID: 't', suggestions: [{}], suppressAlwaysAllowRule: true }).canAlways, false);
   assert.equal(cardFor('Bash', {}, { toolUseID: 't' }).canAlways, false);
+  assert.equal(cardFor('Bash', { command: 'mkdir x && ls' }, { toolUseID: 't' }).command, 'mkdir x && ls');
+  assert.equal(cardFor('Bash', { command: 'y'.repeat(9000) }, { toolUseID: 't' }).command.length, 4096 + 3, 'capped');
+  assert.equal(cardFor('Write', { file_path: '/a', content: 'b' }, { toolUseID: 't' }).command, '');
+  assert.equal(cardFor('Bash', { command: { not: 'text' } }, { toolUseID: 't' }).command, '');
   assert.equal(cardFor('Bash', {}, { toolUseID: 't', defaultToNo: true }).defaultToNo, true);
   assert.ok(cardFor('Write', { content: 'y'.repeat(10000) }, { toolUseID: 't' }).input.length <= 4096 + 3);
 });

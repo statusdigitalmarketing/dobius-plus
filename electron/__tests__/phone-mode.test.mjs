@@ -376,6 +376,30 @@ test('a send the runner refuses can go again with the same id; one that timed ou
   } finally { await ctx.cleanup(); }
 });
 
+test('a retry while the first send is still waiting gets its outcome, not an early duplicate (Codex r27)', async () => {
+  const ctx = setup();
+  try {
+    const { runId, runner } = await live(ctx);
+    // The first send is refused (queue full) only after the retry arrived: the retry is then the delivery.
+    const first = ctx.mode.send('T1', runId, 'hi', 'send-x');
+    const m1 = await runner.next();
+    const retry = ctx.mode.send('T1', runId, 'hi', 'send-x');
+    await sleep(30);
+    runner.send({ t: 'reply', reqId: m1.reqId, ok: false, code: 'busy', error: 'full' });
+    assert.equal((await first).code, 'busy');
+    const [r2] = await Promise.all([retry, serve(runner)]);
+    assert.deepEqual(r2, { ok: true }, 'delivered by the retry, never reported as a duplicate of a refused send');
+    // A first send that is taken makes a waiting retry a duplicate.
+    const f2 = ctx.mode.send('T1', runId, 'yo', 'send-y');
+    const m2 = await runner.next();
+    const again = ctx.mode.send('T1', runId, 'yo', 'send-y');
+    await sleep(30);
+    runner.send({ t: 'reply', reqId: m2.reqId, ok: true });
+    assert.deepEqual(await f2, { ok: true });
+    assert.deepEqual(await again, { ok: true, duplicate: true });
+  } finally { await ctx.cleanup(); }
+});
+
 test('done while the gate still runs: refused loudly and the session stays held', async () => {
   const ctx = setup();
   try {

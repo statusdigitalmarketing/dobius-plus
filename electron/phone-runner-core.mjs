@@ -126,6 +126,8 @@ export function cardFor(toolName, input, opts = {}) {
     reason: cap(opts.decisionReason, CAP_TEXT), blockedPath: cap(opts.blockedPath, CAP_TEXT),
     // An MCP server's name is untrusted text: the phone renders it as text, never markup.
     mcpServer: opts.mcpServer?.name ? cap(opts.mcpServer.name, 200) : '',
+    // A shell command is what the person decides on, so the card shows it whole rather than inside the input JSON.
+    command: typeof input?.command === 'string' ? cap(input.command, CAP_INPUT) : '',
     input: inputText(input), canAlways, defaultToNo: opts.defaultToNo === true,
   };
 }

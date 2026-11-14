@@ -3,7 +3,7 @@
 // Run: node --test electron/__tests__/mobile-phone-mode.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { phoneOffered, phoneKnown, sendOutcome, freshId, readPhoneState, questionAnswer, togglePick, permissionAnswer, planAnswer, refusalText } from '../../mobile/phone-mode.js';
+import { phoneOffered, phoneKnown, sendOutcome, echoArrived, ARRIVAL_SKEW_MS, freshId, readPhoneState, questionAnswer, togglePick, permissionAnswer, planAnswer, refusalText } from '../../mobile/phone-mode.js';
 import { validateAnswer, validatePhoneRequest } from '../phone-protocol.js';
 import { answerMisfit } from '../phone-runner-core.mjs';
 
@@ -96,4 +96,16 @@ test('refusal text: the Mac\'s sentence, capitalised and ended; a known code oth
   assert.equal(refusalText('off', ''), 'Phone mode is off on this Mac.');
   assert.equal(refusalText('weird'), 'It could not be moved right now.');
   assert.equal(refusalText('x', 'y'.repeat(400)), 'It could not be moved right now.', 'an overlong message is not shown');
+});
+
+test('a phone message arrives only by a row written since it was sent, never an older one with the same words (Codex r27)', () => {
+  const since = Date.parse('2026-11-14T16:00:00Z');
+  const echo = { content: 'continue', since };
+  const old = { role: 'user', content: 'continue', timestamp: '2026-11-14T15:00:00Z' };
+  assert.equal(echoArrived(echo, [old]), false);
+  assert.equal(echoArrived(echo, [old, { role: 'user', content: ' continue ', timestamp: '2026-11-14T16:00:05Z' }]), true);
+  assert.equal(echoArrived(echo, [{ role: 'user', content: 'continue', timestamp: new Date(since - ARRIVAL_SKEW_MS + 1).toISOString() }]), true, 'a Mac clock a little behind');
+  assert.equal(echoArrived(echo, [{ role: 'user', content: 'continue', queued: true }]), true);
+  assert.equal(echoArrived(echo, [{ role: 'assistant', content: 'continue', timestamp: '2026-11-14T16:00:05Z' }]), false);
+  assert.equal(echoArrived(echo, [{ role: 'user', content: 'continue' }]), false, 'no time, not queued: not proof');
 });

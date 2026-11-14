@@ -104,6 +104,21 @@ export function sendOutcome(msg) {
   return 'unconfirmed';
 }
 
+// How far a Mac's transcript time may sit before the phone's send time and still be that send (clock skew, a slow
+// write). An older row with the same words is an earlier message, not this one (Codex r27).
+export const ARRIVAL_SKEW_MS = 30_000;
+
+/**
+ * Whether the transcript shows this phone message: a user row with the same words (`norm`ed both sides) that is
+ * queued, or was written no earlier than the message was first sent (less the skew allowance).
+ */
+export function echoArrived(echo, rows, norm = (t) => String(t).trim()) {
+  const want = norm(echo.content);
+  const since = echo.since - ARRIVAL_SKEW_MS;
+  return (rows || []).some((m) => m && m.role === 'user' && norm(m.content) === want
+    && (m.queued === true || Date.parse(m.timestamp) >= since));
+}
+
 /** Why a move did not happen, in the words the sheet shows. The Mac's own sentence wins when it sent one. */
 export function refusalText(code, message) {
   if (typeof message === 'string' && message.trim() && message.length <= 300) {

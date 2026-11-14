@@ -58,6 +58,7 @@ function PermissionCard({ card, busy, onAnswer }) {
       {card.mcpServer && <p className="phone-detail">From the {card.mcpServer} server</p>}
       {card.blockedPath && <p className="phone-detail">Path: {card.blockedPath}</p>}
       {card.reason && <p className="phone-detail">{card.reason}</p>}
+      {typeof card.command === 'string' && card.command && <pre className="ask-context ask-code phone-command">{card.command}</pre>}
       {card.input && card.input !== '{}' && (
         showInput
           ? <pre className="ask-context ask-code">{card.input}</pre>

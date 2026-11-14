@@ -144,10 +144,12 @@ test('a mode or model that is not one of the fixed shapes never reaches claude',
     // The values are read again in the shell after the rc files: one an rc exported is checked there too.
     for (const shell of SHELLS) {
       const spawn = loginShellSpawn(shell, null, null, null, null, { ...t.phone, permissionMode: 'plan', model: 'opus' });
-      const env = { ...t.base, ...spawn.env, DOBIUS_NEW_TAB_TOOL_PERM: 'yolo', DOBIUS_NEW_TAB_TOOL_MODEL: '--dangerously-skip-permissions' };
       const script = spawn.args[3].replace(/exec '[^']*' -l$/, 'exit 0');
-      const r = spawnSync(shell, ['-c', script], { cwd: t.dir, env, encoding: 'utf8', timeout: 10000, input: '' });
-      assert.equal(lines(r)[1], `CLAUDE --resume ${SID} IN ${t.cwd}`, shell);
+      for (const [perm, model] of [['yolo', '--dangerously-skip-permissions'], ['plan x', 'a b'], ['', 'x'.repeat(80)], ['bypass', 'opus[2m]']]) {
+        const env = { ...t.base, ...spawn.env, DOBIUS_NEW_TAB_TOOL_PERM: perm, DOBIUS_NEW_TAB_TOOL_MODEL: model };
+        const r = spawnSync(shell, ['-c', script], { cwd: t.dir, env, encoding: 'utf8', timeout: 10000, input: '' });
+        assert.equal(lines(r)[1], `CLAUDE --resume ${SID} IN ${t.cwd}`, `${shell} ${perm} ${model}`);
+      }
     }
   } finally { fs.rmSync(t.dir, { recursive: true, force: true }); }
 });
@@ -156,4 +158,23 @@ test('the launch allows exactly the modes the runner carries over', async () => 
   const { CARRY_MODES } = await import('../phone-runner-core.mjs');
   const { PHONE_RESUME_MODES } = await import('../../shared/new-tab.js');
   assert.deepEqual([...PHONE_RESUME_MODES].sort(), [...CARRY_MODES].sort());
+});
+
+test('a cd hook cannot change the resume flags (Codex r27)', () => {
+  const t = setup();
+  try {
+    // Every way a hook run by `cd` could reach the flags: a function named cd (bash and zsh) and zsh's chpwd.
+    const evil = '__dobius_a=--dangerously-skip-permissions; __dobius_re=.; export __dobius_a; set -- phone x x x x x x bypassPermissions evil';
+    for (const [shell, prelude] of [
+      ['/bin/bash', `cd() { builtin cd "$@"; ${evil}; }; `],
+      ['/bin/zsh', `cd() { builtin cd "$@"; ${evil}; }; `],
+      ['/bin/zsh', `chpwd() { ${evil}; }; `],
+    ]) {
+      if (!fs.existsSync(shell)) continue;
+      const spawn = loginShellSpawn(shell, null, null, null, null, { ...t.phone, permissionMode: 'plan', model: 'opus' });
+      const script = prelude + spawn.args[3].replace(/exec '[^']*' -l$/, 'exit 0');
+      const r = spawnSync(shell, ['-c', script], { cwd: t.dir, env: { ...t.base, ...spawn.env }, encoding: 'utf8', timeout: 10000, input: '' });
+      assert.equal(lines(r)[1], `CLAUDE --resume ${SID} --permission-mode plan --model opus IN ${t.cwd}`, `${shell} ${prelude}`);
+    }
+  } finally { fs.rmSync(t.dir, { recursive: true, force: true }); }
 });
