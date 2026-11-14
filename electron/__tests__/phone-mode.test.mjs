@@ -11,6 +11,8 @@ import { socketPath, ticketPath, donePath } from '../phone-socket.js';
 
 const S = '0b5c2a6e-1111-4222-8333-444455556666';
 const T0 = 'Sat Nov 14 09:00:00 2026';
+// npm test points TMPDIR at a deep folder (scripts/test-tmp.mjs), too long for the run folder's socket; use /tmp then.
+const tmpBase = () => (Buffer.byteLength(os.tmpdir()) > 40 ? '/tmp' : os.tmpdir());
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function fakeSys(rows) {
@@ -19,8 +21,8 @@ function fakeSys(rows) {
   const err = (code) => Object.assign(new Error(code), { code });
   const sys = {
     table,
-    psAll: async () => [`1 1 0 ${T0} /sbin/launchd`, ...[...table.values()].map((p) => `${p.pid} ${p.pgid} ${p.ppid} ${T0} ${p.command || 'x'}`)].join('\n'),
-    psStart: async (pid) => (table.has(pid) ? T0 : null),
+    psAll: async () => [`1 1 0 ${T0} /sbin/launchd`, ...[...table.values()].map((p) => `${p.pid} ${p.pgid} ${p.ppid} ${p.lstart || T0} ${p.command || 'x'}`)].join('\n'),
+    psStart: async (pid) => (table.has(pid) ? table.get(pid).lstart || T0 : null),
     kill(pid, sig) {
       const targets = pid < 0 ? [...table.values()].filter((p) => p.pgid === -pid) : [table.get(pid)].filter(Boolean);
       if (!targets.length) throw err('ESRCH');
@@ -34,7 +36,7 @@ function fakeSys(rows) {
 }
 
 function setup(over = {}) {
-  const userData = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pm-')));
+  const userData = fs.realpathSync(fs.mkdtempSync(path.join(tmpBase(), 'pm-')));
   const sys = fakeSys([{ pid: 1000, pgid: 1000, ppid: 1 }, { pid: 900, pgid: 1000, ppid: 1000 }]);
   let clock = 5_000_000;
   let tuiAlive = true;
@@ -106,7 +108,7 @@ function client(file) {
 }
 
 /** take + gate hello + runner hello + Claude: a live run with the test clients holding the gate and runner sides. */
-async function live(ctx) {
+async function live(ctx, { runnerFirst = false } = {}) {
   const { mode, sys } = ctx;
   await mode.init();
   const r = await mode.take('T1', { sessionId: S, gen: mode.gen('T1') });
@@ -121,10 +123,17 @@ async function live(ctx) {
   const gok = await gate.next();
   assert.equal(gok.t, 'gate-ok');
   sys.table.set(2200, { pid: 2200, pgid: 2200, ppid: 2100, command: `/x/Dobius+ /x/phone-runner.mjs run ${r.runId}` });
-  gate.send({ t: 'runner-spawned', pid: 2200, lstart: T0 });
   const runner = client(socketPath(dir));
-  await sleep(30);
-  runner.send({ t: 'runner', token: gok.runnerToken, pid: 2200 });
+  if (runnerFirst) {
+    // The real gate starts the runner before its spawn report goes out, so the hello can win the race.
+    runner.send({ t: 'runner', token: gok.runnerToken, pid: 2200 });
+    await sleep(100);
+    gate.send({ t: 'runner-spawned', pid: 2200, lstart: T0 });
+  } else {
+    gate.send({ t: 'runner-spawned', pid: 2200, lstart: T0 });
+    await sleep(30);
+    runner.send({ t: 'runner', token: gok.runnerToken, pid: 2200 });
+  }
   const rok = await runner.next();
   sys.table.set(2300, { pid: 2300, pgid: 2200, ppid: 2200 });
   runner.send({ t: 'claude', pid: 2300, lstart: T0 });
@@ -311,5 +320,50 @@ test('init removes one-time files an earlier run left behind', async () => {
     for (const n of [`phone-${id}.ticket`, `phone-${id}.done`, `phone-${id}.ticket.taken-0123456789abcdef`, 'keep.txt']) fs.writeFileSync(path.join(dir, n), 'x', { mode: 0o600 });
     await ctx.mode.init();
     assert.deepEqual(fs.readdirSync(dir).sort(), ['keep.txt', 'phone.sock']);
+  } finally { await ctx.cleanup(); }
+});
+
+test('take: a Claude pid freed and reused before the stop is never signalled', async () => {
+  const ctx = setup();
+  try {
+    await ctx.mode.init();
+    ctx.d.processCwd = async () => {
+      // The TUI Claude exits during the reads and an unrelated process takes pid 900.
+      ctx.sys.table.set(900, { pid: 900, pgid: 900, ppid: 1, lstart: 'Sat Nov 14 09:05:00 2026' });
+      return ctx.userData;
+    };
+    const r = await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
+    assert.equal(r.code, 'stale_view', JSON.stringify(r));
+    assert.deepEqual(ctx.calls.stop, []);
+    assert.equal(ctx.mode.heldSessions().size, 0);
+  } finally { await ctx.cleanup(); }
+});
+
+test('a closed tab whose shell start time was never read keeps the session held until the pid is gone', async () => {
+  const ctx = setup();
+  try {
+    await ctx.mode.init();
+    const psStart = ctx.sys.psStart;
+    ctx.sys.psStart = async (pid) => (pid === 2000 ? null : psStart(pid)); // ps keeps failing for the new shell
+    await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
+    ctx.advance(HELLO_MS + 1);
+    await ctx.mode._tick();
+    ctx.mode.tabClosed('T1');
+    ctx.advance(SHELL_KILL_MS + 1);
+    await ctx.mode._tick();
+    assert.ok(ctx.sys.table.has(2000), 'an unidentified pid is never signalled');
+    assert.ok(ctx.mode.heldSessions().has(S), 'held while the shell may still run the fallback');
+    ctx.sys.table.delete(2000); // the shell exits
+    await ctx.mode._tick();
+    assert.equal(ctx.mode.heldSessions().size, 0);
+  } finally { await ctx.cleanup(); }
+});
+
+test('a runner hello that arrives before the gate\'s spawn report is accepted', async () => {
+  const ctx = setup();
+  try {
+    const { rok } = await live(ctx, { runnerFirst: true });
+    assert.equal(rok.t, 'runner-ok');
+    assert.ok(ctx.mode.isPhoneTab('T1'));
   } finally { await ctx.cleanup(); }
 });

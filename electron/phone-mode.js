@@ -27,6 +27,7 @@ export const SHELL_KILL_MS = 5_000; // a closed tab's shell still there after th
 export const ALIVE_MS = 60_000; // how often a live run's record has its aliveAt refreshed
 export const STOP_MS = 10_000; // the TUI Claude must exit within this of SIGHUP
 export const COMMAND_MS = 10_000; // a command to the runner must be answered within this
+export const SPAWN_WAIT_MS = 5_000; // a runner hello waits this long for its gate's spawn report
 const TICK_MS = 1_000;
 
 const REQUEST_ID = /^[\x21-\x7e]{1,200}$/;
@@ -55,6 +56,7 @@ export function createPhoneMode(d) {
   const store = createRunStore(path.join(d.userData, 'phone-runs.json'), log);
   const conns = new Map(); // runId -> runner connection
   const replies = new Map(); // reqId -> { resolve, timer }
+  const spawnWaits = new Map(); // runId -> wake: a runner hello waiting for its gate's spawn report (one per run)
   const blocked = new Set(); // sessions a launch sweep could not clean up: held until the next launch
   let runDir = null;
   let server = null;
@@ -132,6 +134,8 @@ export function createPhoneMode(d) {
     const info = await d.claudeInfo(tabId).catch(() => null);
     if (!info) return fail('no_claude', 'Claude is not running in that tab');
     if (info.soleChild === false) return fail('other', 'another program shares the tab with Claude');
+    const claudeStart = await sys.psStart(info.pid).catch(() => null);
+    if (!claudeStart) return fail('unreadable', 'Claude in that tab could not be identified');
     const rec = await d.presence(info).catch(() => null);
     if (!rec?.sessionId) return fail('unreadable', "Claude's own record of its conversation could not be read");
     if (rec.sessionId !== sessionId) return fail('stale_view', 'the tab is on a different conversation now; look again');
@@ -146,6 +150,8 @@ export function createPhoneMode(d) {
     const cwd = pcwd && d.isDir(pcwd) ? pcwd : null;
     if (!cwd) return fail('no_folder', "Claude's folder could not be read");
     const waitingOnPerson = rec.status === 'waiting' || act?.status === 'needs';
+    // The pid read at the start must still be that Claude (a pid freed and reused meanwhile is never stopped).
+    if (!sameStart(await sys.psStart(info.pid).catch(() => null), claudeStart)) return fail('stale_view', 'Claude in that tab changed; look again');
     // No await from here to the stop.
     if (reg.gen(tabId) !== gen) return fail('stale_view', 'the tab changed; look again');
     if (d.inputSeq(tabId) !== inputSeq || d.inputHeld(tabId)) return fail('typed', 'something was typed in the tab, so it was left alone');
@@ -186,7 +192,11 @@ export function createPhoneMode(d) {
     // cleanup confirms gone (by pid AND start time, never a bare pid).
     const fresh = d.tabs().find((t) => t.id === tabId);
     run.ptyPid = Number.isSafeInteger(fresh?.pid) ? fresh.pid : null;
-    run.ptyStart = run.ptyPid ? await sys.psStart(run.ptyPid) : null;
+    run.ptyStart = null;
+    for (let i = 0; run.ptyPid && !run.ptyStart && i < 3; i++) {
+      run.ptyStart = await sys.psStart(run.ptyPid).catch(() => null);
+      if (!run.ptyStart) await d.sleep(200);
+    }
     notify(run);
     schedule();
     return { ok: true, runId: run.runId, gen: reg.gen(tabId) };
@@ -206,6 +216,7 @@ export function createPhoneMode(d) {
     if (m.t === 'runner-spawned') {
       const run = runOf(conn, 'gate');
       if (run && reg.noteRunnerSpawned(run, m.pid, m.lstart)) record(run);
+      if (run) spawnWaits.get(run.runId)?.();
       return undefined;
     }
     const run = runOf(conn, 'runner');
@@ -267,6 +278,15 @@ export function createPhoneMode(d) {
       return;
     }
     const run = r.run;
+    // The gate starts the runner before it reports the spawn, so the hello can arrive first: wait for the report
+    // (one waiter per run, since the runner token is redeemed once; at most SPAWN_WAIT_MS).
+    if (run.runnerPid == null && run.status !== 'ending') {
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => { spawnWaits.delete(run.runId); resolve(); }, SPAWN_WAIT_MS);
+        timer.unref?.();
+        spawnWaits.set(run.runId, () => { clearTimeout(timer); spawnWaits.delete(run.runId); resolve(); });
+      });
+    }
     // One ps: the pid is the one the gate reported, started when it said, and runs under this tab's terminal.
     const rows = parsePsAll(await sys.psAll());
     const row = rows.find((x) => x.pid === m.pid);
@@ -343,6 +363,11 @@ export function createPhoneMode(d) {
     const t = now();
     if (run.status === 'starting' && t - run.startedAt > HELLO_MS) endRun(run, 'phone mode did not start in time');
     if (t - run.startedAt > TICKET_MS) dropTokenFile(ticketPath(runDir, run.runId), log);
+    // A shell whose start time could not be read at the restart: read it while the tab still owns that pid.
+    if (!run.ptyStart && Number.isSafeInteger(run.ptyPid) && !run.tabClosed
+      && d.tabs().some((x) => x.id === run.tabId && x.pid === run.ptyPid)) {
+      run.ptyStart = await sys.psStart(run.ptyPid).catch(() => null);
+    }
     if (run.status !== 'ending') {
       if (t - (run.aliveAt ?? 0) > ALIVE_MS) { run.aliveAt = t; record(run); }
       return;
@@ -375,8 +400,11 @@ export function createPhoneMode(d) {
       }
     }
     if (run.tabClosed && !run.shellGone) {
-      // No shell known (the restart's lookup failed): nothing of ours to wait for or signal.
-      const st = run.ptyPid && run.ptyStart ? await pidState(sys, run.ptyPid, run.ptyStart) : 'gone';
+      // Without the shell's start time only "no such pid" proves it gone: the claim stays held otherwise, and a pid
+      // that cannot be identified is never signalled. No pid at all (the restart's tab had none) holds it too.
+      let st = 'unknown';
+      if (Number.isSafeInteger(run.ptyPid) && run.ptyStart) st = await pidState(sys, run.ptyPid, run.ptyStart);
+      else if (Number.isSafeInteger(run.ptyPid)) { try { sys.kill(run.ptyPid, 0); } catch (e) { if (e?.code === 'ESRCH') st = 'gone'; } }
       if (st === 'gone' || st === 'other') reg.noteShellGone(run);
       else if (st === 'same' && t - run.closedAt > SHELL_KILL_MS) {
         if ((await endPid(sys, run.ptyPid, run.ptyStart, { maxMs: 2000 })) === 'gone') reg.noteShellGone(run);

@@ -28,7 +28,11 @@ export function ensureRunDir(userData) {
   let dir = path.join(userData, 'run');
   if (Buffer.byteLength(path.join(dir, SOCK_NAME)) > SUN_PATH_MAX) {
     const tag = crypto.createHash('sha256').update(userData).digest('hex').slice(0, 12);
-    dir = path.join(os.tmpdir(), `dobius-${process.getuid?.() ?? 'u'}-${tag}`);
+    const name = `dobius-${process.getuid?.() ?? 'u'}-${tag}`;
+    dir = path.join(os.tmpdir(), name);
+    // A long TMPDIR can be over the limit too: /tmp then. Another local user who made that folder first only gets it
+    // refused below (not ours), so the worst case is phone mode not starting, never a shared socket.
+    if (Buffer.byteLength(path.join(dir, SOCK_NAME)) > SUN_PATH_MAX) dir = path.join('/tmp', name);
   }
   try { fs.mkdirSync(dir, { mode: 0o700 }); } catch (e) { if (e.code !== 'EEXIST') throw e; }
   const st = fs.lstatSync(dir);

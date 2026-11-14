@@ -15,6 +15,8 @@ const RUNNER = path.join(HERE, '..', 'phone-runner.mjs');
 const RUN = 'a'.repeat(32);
 const GATE_TOKEN = 'g'.repeat(64);
 const RUNNER_TOKEN = 'r'.repeat(64);
+// npm test points TMPDIR at a deep folder (scripts/test-tmp.mjs), too long for the run folder's socket; use /tmp then.
+const tmpBase = () => (Buffer.byteLength(os.tmpdir()) > 40 ? '/tmp' : os.tmpdir());
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; } };
 
@@ -29,7 +31,7 @@ async function until(fn, ms = 8000, what = 'condition') {
 }
 
 function setup({ answerRunner = true, claudeOkDelay = 400, gateToken = GATE_TOKEN, stubborn = false } = {}) {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pr-')));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(tmpBase(), 'pr-')));
   const runDir = ensureRunDir(root);
   const bin = path.join(root, 'bin');
   fs.mkdirSync(bin);
@@ -231,7 +233,7 @@ test('done: reports its token once and consumes the file; a missing file is quie
 test('claudeEnv, findOnPath and plain', () => {
   assert.deepEqual(claudeEnv({ A: '1', ELECTRON_RUN_AS_NODE: '1', DOBIUS_PHONE_T: 'x', CLAUDE_CODE_ENTRYPOINT: 'cli' }), { A: '1', CLAUDE_CODE_ENTRYPOINT: 'cli' });
   assert.equal(claudeEnv({}).CLAUDE_CODE_ENTRYPOINT, 'remote_mobile');
-  const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pf-')));
+  const d = fs.realpathSync(fs.mkdtempSync(path.join(tmpBase(), 'pf-')));
   try {
     fs.writeFileSync(path.join(d, 'claude'), '', { mode: 0o644 }); // not executable
     assert.equal(findOnPath('claude', `rel:${d}`), null);

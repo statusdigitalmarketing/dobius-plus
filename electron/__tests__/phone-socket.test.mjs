@@ -10,7 +10,10 @@ import {
   ensureRunDir, socketPath, writeTokenFile, takeTokenFile, dropTokenFile, lineReader, startPhoneSocket, MAX_LINE, MAX_OUTBOUND,
 } from '../phone-socket.js';
 
-const tmp = () => fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ps-')));
+// npm test points TMPDIR at a deep folder (scripts/test-tmp.mjs), where a socket path is already over the limit and
+// ensureRunDir rightly falls back; these tests need a userData short enough to hold the socket, so they use /tmp then.
+const tmpBase = () => (Buffer.byteLength(os.tmpdir()) > 40 ? '/tmp' : os.tmpdir());
+const tmp = () => fs.realpathSync(fs.mkdtempSync(path.join(tmpBase(), 'ps-')));
 
 test('run folder: 0700 under userData, a short temp folder when the socket path is too long', () => {
   const ud = tmp();
