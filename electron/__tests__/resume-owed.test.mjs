@@ -66,6 +66,7 @@ assert.match(resume, /if \(now - t\.at < RESUME_SIGHT_MS && terminalInputSeq\(ta
 assert.match(resume, /export function forgetClosedTab\(tabId\) \{\s*handled\.add\(tabId\);\s*typed\.delete\(tabId\);/, 'closing the tab ends a typed resume');
 assert.match(main, /if \(mappedIdle && resumeOwedFor\(t\.id\) !== mappedIdle\) clearSessionTabRunning\(mappedIdle\);\s*continue;\s*\}\s*noteTabClaudeSeen\(t\.id\);/, 'the capture spares an owed stamp and notes a Claude it sees');
 assert.match(main, /if \(resumeOwedFor\(t\.id\) !== sid\) clearSessionTabRunning\(sid\);/, 'the quit check spares an owed stamp');
+assert.match(main, /if \(got === null && sidNow && getSessionTabMap\(\)\?\.\[sidNow\]\?\.tabId === t\.id && resumeOwedFor\(t\.id\) !== sidNow\) clearSessionTabRunning\(sidNow\);/, 'a definite no-Claude at quit is applied before the deadline can stop the pass');
 assert.match(main, /await mapLimit\(liveTabs, QUIT_PROBE_CONCURRENCY, async \(t\) => \{/, 'the quit check looks at tabs a few at a time');
 console.log('PASS  the capture and the quit check both spare an owed stamp');
 process.exit(0);

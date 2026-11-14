@@ -5938,6 +5938,10 @@ app.on('before-quit', (e) => {
             if (provenanceChanged(mapQ[sidNow]?.resolvedBy, 'argv')) setSessionTabLink(sidNow, t.id, t.cwd, 'argv');
             else touchSessionTabLink(sidNow, quitStampAt ?? Date.now());
           }
+          // Likewise a definite "no Claude at all" is applied at once, so the shared deadline cannot leave the stamp of a
+          // session stopped since its resume was typed (Codex P1, PR 13 round 7). Only `null`: a Claude that cannot be
+          // named yet (a bare `claude`) is left to the decisions below.
+          if (got === null && sidNow && getSessionTabMap()?.[sidNow]?.tabId === t.id && resumeOwedFor(t.id) !== sidNow) clearSessionTabRunning(sidNow);
         });
         if (reconcileAborted) return;
         const cwdByTab = new Map();
