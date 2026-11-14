@@ -266,6 +266,7 @@ export function noteTabClaudeSeen(tabId) {
   if (entry) {
     entry.cancelled = true;
     clearTimeout(entry.timer);
+    entry.releaseGate?.(); // an attempt holding the write gate frees it now (Codex P2, impl round 22)
     queue.delete(tabId);
     releaseSessionResume(entry.sessionId, tabId);
   }
@@ -572,7 +573,8 @@ async function queueResumeNow(e, delayMs) {
       // (Codex P1/P2, impl rounds 20 and 21): slow checks or slots never used do not let two writes start together.
       const slot = writeGate.take();
       if (slot.waitMs > 0) { entry.timer = setTimeout(fire, slot.waitMs); return; }
-      const release = slot.release;
+      const release = () => { entry.releaseGate = null; slot.release(); };
+      entry.releaseGate = release;
       const giveUpHere = (why) => { release(); giveUp(why); };
       const cmd = buildResumeCommand(e.projectPath, e.sessionId, e.tabId);
       if (!cmd) { giveUpHere('command build failed, skipping'); return; }
@@ -597,6 +599,17 @@ async function queueResumeNow(e, delayMs) {
         giveUpHere('tab was typed into, replaced or cancelled before the write, skipping');
         return;
       }
+      // Still this attempt's gate (not expired and taken by another while the checks awaited): else go round again,
+      // waiting for whoever holds it now; every check is made again (Codex P1, impl round 22).
+      // ponytail: three rounds at most (checks stuck past 30 s three times), then it gives up like any failed check.
+      if (!slot.held()) {
+        release(); // a no-op unless this attempt still owns it (expired, nobody took it)
+        entry.rounds = (entry.rounds || 0) + 1;
+        if (entry.rounds >= 3) { giveUpHere('its checks kept outlasting the write gate, skipping'); return; }
+        entry.timer = setTimeout(fire, 0);
+        return;
+      }
+      entry.releaseGate = null;
       queue.delete(e.tabId);
       try {
         // The room starts at the write (same tick), and stays even if anything after this throws: a write may have
@@ -636,8 +649,8 @@ export function writeGapMs(sizeMB, staggerMs) {
  * or the last write's room has not passed; else it takes the gate and answers `{ waitMs: 0, wrote, release }`.
  * `wrote(gapMs)` frees the gate and starts the room at the actual write; `release()` frees it with no room when no
  * write happened. Nothing is reserved ahead of time, so a cancelled resume holds up nobody (Codex impl rounds 20, 21).
- * ponytail: an attempt that never calls either (a throw) is treated as gone after `holdMaxMs`; a write after that is
- * the only way two can overlap, and it needs write-time checks stuck for 30 s.
+ * An attempt that never calls either (a throw, or checks stuck) is treated as gone after `holdMaxMs`; `held()` says
+ * whether this attempt still owns the gate, and the write is made only while it does (Codex P1, impl round 22).
  */
 export function createWriteGate(now = () => Date.now(), { holdMaxMs = 30_000, pollMs = 250 } = {}) {
   let freeAt = 0;
@@ -651,6 +664,7 @@ export function createWriteGate(now = () => Date.now(), { holdMaxMs = 30_000, po
       holder = me;
       return {
         waitMs: 0,
+        held: () => holder === me && now() - me.at < holdMaxMs,
         wrote: (gapMs) => { if (holder === me) holder = null; freeAt = Math.max(freeAt, now() + Math.max(0, gapMs || 0)); },
         release: () => { if (holder === me) holder = null; },
       };
@@ -730,6 +744,7 @@ export function cancelTabIfPending(tabId) {
   if (!entry) return false;
   entry.cancelled = true;
   clearTimeout(entry.timer);
+  entry.releaseGate?.(); // an attempt holding the write gate frees it now (Codex P2, impl round 22)
   queue.delete(tabId);
   releaseSessionResume(entry.sessionId, tabId);
   broadcastStatus(tabId, 'done');
@@ -765,6 +780,7 @@ export function cancelTabsForProject(projectPath) {
     {
       entry.cancelled = true;
       clearTimeout(entry.timer);
+      entry.releaseGate?.(); // an attempt holding the write gate frees it now (Codex P2, impl round 22)
       queue.delete(tabId);
       releaseSessionResume(entry.sessionId, tabId);
       broadcastStatus(tabId, 'done');
@@ -784,6 +800,7 @@ export function cancelAll() {
   for (const [tabId, entry] of queue) {
     entry.cancelled = true;
     clearTimeout(entry.timer);
+    entry.releaseGate?.(); // an attempt holding the write gate frees it now (Codex P2, impl round 22)
     releaseSessionResume(entry.sessionId, tabId);
     broadcastStatus(tabId, 'done');
     noteResume(tabId, 'pending resume cancelled (cancel all)');

@@ -1135,3 +1135,9 @@
 - **FIX**: process.cpuUsage(), fastest of three, a fixed bound only where the gap is wide (stripAnsi: 70 to 150ms now vs 450 to 500ms old), a ratio against a function measured in the same run where it is narrow (claudeTuiPresent under 1.5x stripAnsi), and a source check for the structural property (every stripAnsi call in mobile-server.js passes TUI_TAIL).
 - **CONTEXT**: Any perf guard that runs in the release preflight on this Mac must not use wall time. Sabotage-check each bound against the exact regression it guards, inside the real test run (the same bound measured 3.5x standalone and 1.8x in-test).
 - **DETECTION**: `grep -rn "Date.now() - t0\|performance.now() - " electron/__tests__ | grep -i "assert"`
+
+### Testing - 2026-11-14
+- **MISTAKE**: A source check in `electron/__tests__/held-settled.test.mjs` sliced `fire` from `indexOf('const release = slot.release;')`. Round 22 changed that line, `indexOf` returned -1, `slice(-1)` kept one character, and every assertion on the slice (no bare giveUp, every return releases the gate) passed on nothing. It surfaced only because a new regex on the same slice failed.
+- **FIX**: Assert the marker was found (`at > 0`) and that the slice has a plausible length before asserting anything about its contents. Sabotage the exact line each assertion guards, after every edit to the code under test, not only when the test is written.
+- **CONTEXT**: Source-pattern tests are only as good as their anchors. A `str.slice(str.indexOf(x))` with a missing `x` silently becomes the last character, and "no match of a forbidden pattern" checks then pass vacuously.
+- **DETECTION**: `grep -n "slice(.*indexOf(" electron/__tests__/*.mjs` (each should be followed by an assertion that the index is not -1)

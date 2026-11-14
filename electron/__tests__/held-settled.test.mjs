@@ -97,9 +97,18 @@ test('the write gate: one attempt from its checks to its write, room counted fro
   // A stale release (another attempt holds the gate now) changes nothing.
   t3.release();
   assert.equal(gate.take().waitMs, 250);
-  // An attempt that never answers (a throw) is treated as gone after holdMaxMs.
+  // An attempt that never answers (a throw) is treated as gone after holdMaxMs, and then no longer holds it, so its
+  // late callback cannot write (Codex impl r22).
+  const slow = t4; // t4 took the gate at 9,100
+  assert.equal(slow.held(), true);
   t += 30_000;
-  assert.equal(gate.take().waitMs, 0);
+  assert.equal(slow.held(), false, 'expired');
+  const fresh = gate.take();
+  assert.equal(fresh.waitMs, 0);
+  assert.equal(slow.held(), false, 'taken over');
+  assert.equal(fresh.held(), true);
+  fresh.release();
+  assert.equal(fresh.held(), false);
 });
 
 test('writeGapMs: size bounded, missing values are zero', async () => {
@@ -114,11 +123,22 @@ test('every resume write goes through the gate, and every path that gives up rel
   const src = fs.readFileSync(new URL('../auto-resume.js', import.meta.url), 'utf8');
   assert.ok(!/takeWriteSlot|nextWriteAt|nextRestoredAt/.test(src), 'no reservation clock left');
   const fire = src.slice(src.indexOf('const fire = async () => {'), src.indexOf('entry.timer = setTimeout(fire, delayMs);'));
+  assert.ok(fire.length > 2000, 'the fire slice is found');
   assert.match(fire, /const slot = writeGate\.take\(\);\s*if \(slot\.waitMs > 0\) \{ entry\.timer = setTimeout\(fire, slot\.waitMs\); return; \}/);
   assert.match(fire, /slot\.wrote\(writeGapMs\(e\.sizeMB, getAutoResume\(\)\.staggerMs\)\);\s*writeTerminal\(e\.tabId, cmd\);/, 'the room starts at the write');
   // After the gate is taken, every return releases it (directly or through giveUpHere), except a written resume.
-  const after = fire.slice(fire.indexOf('const release = slot.release;'));
+  const at = fire.indexOf('const release = () =>');
+  assert.ok(at > 0, 'the release marker is found (a missing marker made these checks vacuous once)');
+  const after = fire.slice(at);
+  assert.ok(after.length > 1500, 'the slice covers the checks and the write');
   assert.ok(!/\bgiveUp\(/.test(after.replace('giveUp(why)', '')), 'no bare giveUp after the gate');
+  // The write is made only while this attempt still owns the gate (Codex impl r22), checked right before it.
+  assert.match(after, /if \(!slot\.held\(\)\) \{[\s\S]{0,400}?entry\.timer = setTimeout\(fire, 0\);\s*return;\s*\}\s*entry\.releaseGate = null;\s*queue\.delete\(e\.tabId\);\s*try \{[\s\S]{0,300}?slot\.wrote\(/);
+  assert.match(after, /entry\.releaseGate = release;/);
+  // Every cancel path frees a gate the attempt holds (Codex impl r22).
+  const cancels = src.match(/clearTimeout\(entry\.timer\);\n\s*entry\.releaseGate\?\.\(\);/g) || [];
+  assert.equal(cancels.length, (src.match(/clearTimeout\(entry\.timer\);/g) || []).length);
+  assert.equal(cancels.length, 4);
   for (const line of after.split('\n').filter((l) => /\breturn;/.test(l))) assert.match(line, /release\(\)|giveUpHere\(|^\s*return;\s*$/, line);
   assert.equal((after.match(/if \(entry\.cancelled\) \{ release\(\); return; \}/g) || []).length, 2);
   assert.match(after, /catch \(err\) \{[\s\S]*?release\(\);\s*releaseSessionResume/);
