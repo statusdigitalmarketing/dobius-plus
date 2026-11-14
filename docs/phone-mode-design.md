@@ -205,9 +205,13 @@ Owns a small registry: tabId -> { sessionId, token, socket, status, pending (at 
   (`claimSessionResume`), restart the tab with the `phone` launch.
   - That claim is a **phone claim**: held in main's registry for as long as the run exists, with no 10 minute expiry
     (the tab-bound reservation in `terminal-manager.js` expires after 600 000 ms and is not enough for a phone session
-    of any length). `claimSessionResume` refuses every other caller while it is held. Wait up to 30 s for the runner's hello;
-  without it, the run is dropped and the phone is told the conversation is back on the Mac (the launch script resumes
-  it there anyway).
+    of any length). `claimSessionResume` refuses every other caller while it is held.
+  - **No hello in 30 s:** the run is NOT dropped (Codex P1, design round 4: dropping it released the claim while a
+    suspended runner could still wake, be refused, exit, and let the gate start a fallback Claude on a session another
+    tab had claimed meanwhile). The run moves to `ending` with its claim held, a later hello is refused, and the
+    release rules under End apply. The gate keeps its own deadline too: the runner must tell it over fd 3 that main
+    accepted its hello within 30 s, or the gate SIGKILLs the runner group (SIGKILL works on a stopped process),
+    confirms it gone and only then starts the fallback, which main then sees running S in the tab and releases to.
 - **Waiting on a person at the switch.** If the tab was showing a question or permission when it moved, that prompt is
   lost when the TUI stops (Claude Code records the tool call as interrupted). The runner then sends one message on the
   person's behalf: "This conversation just moved to my phone while your last question or permission request was
@@ -309,6 +313,19 @@ every `phone*` request answers `opError: off`.
 - **Secrets:** the run token lives only in main's memory, the ticket file (until the gate's first read) and the
   gate and runner's memory; never in env or argv, never logged, never sent to the phone.
 - **Memory pressure:** a start is refused when the Mac is under critical memory pressure (one more Claude process).
+- **Quit, restart and update** (Codex P1, design round 4: the quit path exits after a 1.5 s drain and the updater
+  path does not wait at all, so a five second SIGTERM-then-SIGKILL from main would never run, and a group frozen with
+  SIGSTOP would outlive Dobius holding the session). At every quit, update install and restart, before the windows
+  close, main sends SIGKILL straight to every phone run's group and reported Claude pid (no SIGTERM grace at quit:
+  the transcript is already written turn by turn, and SIGKILL ends a stopped process) and confirms ESRCH, bounded at
+  1 s and run inside the existing quit drain; the updater branch calls the same step in `performInstall` before
+  `quitAndInstall`. Each accepted hello is also written to `<userData>/run/phone-runs.json` (group id, leader pid and
+  start time, Claude pid and start time, session, tab), removed when the run is released. At the next launch, before
+  auto-resume and before any claim is answered, main reads that file: a recorded process still alive whose start
+  time matches is SIGKILLed and confirmed gone, and until that is done every claim for its session is refused. A
+  group whose leader is gone but which still has members is the old group (a group id is not reused while any member
+  exists), so it is killed too; a recorded leader pid alive with a different start time is a new process and is left
+  alone. Only then is the record deleted and the session free.
 
 ## Limits we accept in v1
 
