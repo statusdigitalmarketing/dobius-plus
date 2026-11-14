@@ -186,20 +186,33 @@ ok('empty/null input is not live');
     '\u001bP' + 'a'.repeat(245758) + '\n' + '\u001b[400G' + '\u001b[B'.repeat(5458),
     '\u001b[400C'.repeat(43000),
   ];
-  // CPU time of stripAnsi alone, fastest of three runs, not wall time: wall time on this Mac (load 20+ on 18 cores with
-  // dozens of sessions) failed two release preflights on 2026-11-14 with nothing wrong in the code, and a budget scaled
-  // by load average admits the regression once the load drops (Codex P2, PR #15). Measured 2026-11-14, 10 calls on the
-  // first input: 80 to 150ms now, 250 to 480ms for the code before 095453b, so 250ms separates them either way.
-  // claudeTuiPresent strips through the same scanner, so it is covered by this bound.
+  // CPU time, fastest of three runs, not wall time: wall time on this Mac (load 20+ on 18 cores with dozens of
+  // sessions) failed two release preflights on 2026-11-14 with nothing wrong in the code, and a budget scaled by load
+  // average admits the regression once the load drops (Codex P2, PR #15). Measured 2026-11-14, 10 calls on the first
+  // input: stripAnsi 70 to 150ms now and 450 to 500ms for the code before 095453b, so it gets a fixed 200ms.
+  // claudeTuiPresent is the production caller and costs what stripAnsi does on these inputs (70 to 100ms); a caller
+  // that drops the tail argument brings the expansion back while stripAnsi alone stays fast (Codex P2, PR #15 round 3)
+  // and costs 1.8 times as much in this run (each escape pads at most 400 characters and joining them is cheap, so that
+  // regression costs memory far more than CPU). So it is bounded against stripAnsi measured in the same run, which load
+  // moves together, at 1.5x with a 20ms floor for the input that costs almost nothing either way, and every stripAnsi
+  // call in mobile-server.js must pass the tail, which no load can move.
   const cpuMs = (f) => { const c0 = process.cpuUsage(); f(); const c = process.cpuUsage(c0); return (c.user + c.system) / 1000; };
+  const ten = (f) => cpuMs(() => { for (let n = 0; n < 10; n += 1) f(); });
   for (const r of amp) {
-    let best = Infinity;
-    for (let tries = 0; tries < 3 && best >= 250; tries += 1) {
-      best = Math.min(best, cpuMs(() => { for (let n = 0; n < 10; n += 1) stripAnsi(r, 4096); }));
+    let strip = Infinity;
+    let tui = Infinity;
+    const okNow = () => strip < 200 && tui < Math.max(20, 1.5 * strip);
+    for (let tries = 0; tries < 3 && !okNow(); tries += 1) {
+      strip = Math.min(strip, ten(() => stripAnsi(r, 4096)));
+      tui = Math.min(tui, ten(() => claudeTuiPresent(r)));
     }
-    assert.ok(best < 250, `10 stripAnsi calls took ${best.toFixed(0)}ms of CPU at best of 3 (budget 250ms)`);
-    claudeTuiPresent(r);
+    assert.ok(strip < 200, `10 stripAnsi calls took ${strip.toFixed(0)}ms of CPU at best of 3 (budget 200ms)`);
+    assert.ok(tui < Math.max(20, 1.5 * strip), `10 claudeTuiPresent calls took ${tui.toFixed(0)}ms of CPU, stripAnsi ${strip.toFixed(0)}ms`);
   }
+  const msSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mobile-server.js'), 'utf8');
+  const calls = msSrc.split('\n').filter((l) => !l.trim().startsWith('//') && l.includes('stripAnsi('));
+  assert.ok(calls.length >= 2, 'tuiVisibleTail strips through stripAnsi');
+  for (const l of calls) assert.match(l, /stripAnsi\((?:[^()]|\([^()]*\))*, TUI_TAIL\)/, `stripAnsi without the tail: ${l.trim()}`);
   ok('tail mode equals the full strip tail and stays fast on cursor-motion runs');
 }
 
