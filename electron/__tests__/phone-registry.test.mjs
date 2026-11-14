@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createPhoneRegistry, MAX_PENDING, MAX_SEND_IDS, MAX_GENS } from '../phone-registry.js';
+import { createPhoneRegistry, MAX_PENDING, MAX_SEND_IDS, MAX_GENS, GEN_RESERVE } from '../phone-registry.js';
 
 const S1 = '11111111-1111-1111-1111-111111111111';
 const S2 = '22222222-2222-2222-2222-222222222222';
@@ -108,6 +108,38 @@ test('a live tab dropped from a full map never gets back a generation it had (Co
   // The base moved once for the first drop, not once per drop.
   assert.equal(reg.gen('never-moved-a'), reg.gen('never-moved-b'));
   assert.equal(reg.gen('T1'), reg.gen('never-moved-a'));
+});
+
+test('a restart with the clock set back never reissues a generation (Codex impl r11)', () => {
+  let saved = 0;
+  const writes = [];
+  const highWater = { read: () => saved, reserve: (c) => { writes.push(c); saved = c; } };
+  const a = createPhoneRegistry({ now: () => 1_000_000, highWater });
+  const handed = new Set([a.gen('T')]);
+  const { run } = a.begin('T', S1);
+  handed.add(a.gen('T'));
+  a.end(run, 'ended');
+  handed.add(a.gen('T'));
+  const top = Math.max(...handed);
+  assert.ok(saved >= top, 'the ceiling is saved before any generation under it is used');
+  assert.equal(writes.length, 1, 'one write covers the reserve');
+  const b = createPhoneRegistry({ now: () => 1_000_002, highWater });
+  assert.ok(b.gen('T') > top, 'the new launch starts above everything the last one handed out');
+  assert.ok(!handed.has(b.gen('T')));
+});
+
+test('the ceiling is raised before a generation past it is used', () => {
+  let saved = 0;
+  const highWater = { read: () => saved, reserve: (c) => { saved = c; } };
+  let t = 5_000_000;
+  const reg = createPhoneRegistry({ now: () => t, highWater });
+  for (let i = 0; i < 3; i++) {
+    t += GEN_RESERVE * 2; // the clock runs past the reserve
+    const { run } = reg.begin(`T${i}`, `s-${i}`);
+    assert.ok(reg.gen(`T${i}`) <= saved, 'never above the saved ceiling');
+    reg.cancel(run);
+    assert.ok(reg.gen(`T${i}`) <= saved);
+  }
 });
 
 test('generations follow the clock, so a registry started later is above an earlier one', () => {

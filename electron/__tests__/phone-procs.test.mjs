@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  parsePsAll, groupState, pidState, endGroup, endPid, taggedRows, judgeMembers, createRunStore, sweepAtLaunch,
+  parsePsAll, groupState, pidState, endGroup, endPid, taggedRows, judgeMembers, createRunStore, createGenCeilingStore, sweepAtLaunch,
 } from '../phone-procs.js';
 
 const RUN = 'ab'.repeat(16);
@@ -259,4 +259,27 @@ test('sweep: a failed listing after the cleanup keeps the record (Codex impl r3)
     assert.deepEqual([...r.blocked], ['s1']);
     assert.equal(store.read().length, 1);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('generation ceiling store: missing is 0, a write reads back, a bad file is 0 and logged, a failed write is logged', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'phone-gen-'));
+  const file = path.join(dir, 'phone-gen.json');
+  const logs = [];
+  const st = createGenCeilingStore(file, (m) => logs.push(m));
+  assert.equal(st.read(), 0);
+  assert.deepEqual(logs, [], 'a first launch logs nothing');
+  st.reserve(1_234_567);
+  assert.equal(st.read(), 1_234_567);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.deepEqual(fs.readdirSync(dir), ['phone-gen.json'], 'no temporary file left behind');
+  fs.writeFileSync(file, '{"ceiling":');
+  assert.equal(st.read(), 0);
+  assert.match(logs.at(-1), /unreadable/);
+  fs.writeFileSync(file, '{"ceiling":-4}');
+  assert.equal(st.read(), 0);
+  assert.match(logs.at(-1), /no ceiling/);
+  const blocked = createGenCeilingStore(path.join(file, 'nested.json'), (m) => logs.push(m));
+  blocked.reserve(9);
+  assert.match(logs.at(-1), /could not be written/);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

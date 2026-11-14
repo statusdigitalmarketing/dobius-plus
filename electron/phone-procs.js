@@ -216,6 +216,38 @@ export function createRunStore(file, log = () => {}) {
 }
 
 /**
+ * The saved generation ceiling (phone-registry.js `highWater`): no generation ever handed out is above it, so the next
+ * launch starts above it whatever the clock says. Written to a temporary file, fsynced, renamed. A file that cannot be
+ * read gives 0 and the launch falls back to the clock (logged): it is only ever written whole by rename. A failed write
+ * is logged and the run goes on; only a crash before the next good write with the clock also set back would matter.
+ */
+export function createGenCeilingStore(file, log = () => {}) {
+  return {
+    read() {
+      try {
+        const v = JSON.parse(fs.readFileSync(file, 'utf8'))?.ceiling;
+        if (Number.isSafeInteger(v) && v > 0) return v;
+        log('phone-gen.json holds no ceiling; generations start from the clock');
+      } catch (e) {
+        if (e.code !== 'ENOENT') log(`phone-gen.json unreadable (${e.message}); generations start from the clock`);
+      }
+      return 0;
+    },
+    reserve(ceiling) {
+      try {
+        fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+        const tmp = `${file}.${process.pid}.tmp`;
+        const fd = fs.openSync(tmp, 'w', 0o600);
+        try { fs.writeSync(fd, JSON.stringify({ ceiling })); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+        fs.renameSync(tmp, file);
+      } catch (e) {
+        log(`phone-gen.json could not be written: ${e.message}`);
+      }
+    },
+  };
+}
+
+/**
  * At launch, before auto-resume and before any claim is answered: clean up after a crash. Returns
  * { blocked: Set<sessionId> still unsafe, log: string[] }. Records are removed only when nothing of the run is left.
  */

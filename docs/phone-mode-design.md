@@ -251,7 +251,9 @@ Owns a small registry: tabId -> { sessionId, token, socket, status, pending (at 
     right now (`opError: on_phone`): the App Store app bundles its own pages and updates only through a new build
     (RELEASING-IOS.md), so refusing it would break every phone on an older build. A tab that never moved has the
     launch's base generation; asking for a tab's generation never creates one, and a full table (2000) drops a closed
-    tab's entry before a live one's (Codex P1, implementation round 9).
+    tab's entry before a live one's (Codex P1, implementation round 9). Generations never repeat across launches, even
+    with the clock set back: `<userData>/phone-gen.json` holds a ceiling reserved before any generation past it is used,
+    and a launch starts above it (implementation round 11).
     The desktop window's own keystrokes are not gated: they are how Enter takes it back.
   - The phone's own `submitPrompt` for a
     phone-mode tab is answered `opError: on_phone` (the phone uses `phoneSend` instead).
