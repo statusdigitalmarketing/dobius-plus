@@ -241,9 +241,31 @@ export function resumeOwedFor(tabId, now = Date.now()) {
   return null;
 }
 
+// A typed resume has had this long to become a process. A definite "no Claude" after it is evidence the Claude was
+// stopped, even while the stamp is still protected.
+const SPAWN_GRACE_MS = 10_000;
+// tabId -> session: a definite "no Claude" was seen in the tab, past the spawn grace, while its typed resume protected
+// the stamp, and no Claude has been seen there since. Bounded by the number of tabs.
+const idleWhileOwed = new Map();
+
 /** The capture saw a Claude running in this tab: whatever resume was owed there is over. */
 export function noteTabClaudeSeen(tabId) {
   typed.delete(tabId);
+  idleWhileOwed.delete(tabId);
+}
+
+/** The capture saw no Claude in a tab whose stamp it spared: remember it if the typed resume should be up by now. */
+export function noteIdleWhileOwed(tabId, now = Date.now()) {
+  const t = typed.get(tabId);
+  if (t && now - t.at >= SPAWN_GRACE_MS) idleWhileOwed.set(tabId, t.sessionId);
+}
+
+/**
+ * The quit check could not tell for this tab, but a capture already saw it without Claude after its resume should have
+ * started, and nothing has seen a Claude there since: that session was stopped (Codex P1, PR 13 round 8).
+ */
+export function stoppedWhileOwed(tabId, sessionId) {
+  return idleWhileOwed.get(tabId) === sessionId;
 }
 
 /**
@@ -603,6 +625,7 @@ async function resumeRestoredDecided(tabId, info) {
 export function forgetClosedTab(tabId) {
   handled.add(tabId);
   typed.delete(tabId);
+  idleWhileOwed.delete(tabId);
   cancelTabIfPending(tabId);
 }
 

@@ -21,7 +21,7 @@ import { startErrorReporter, noteFault, isReportable } from './error-reporter.js
 const stallWatchdog = createStallWatchdog({ log: logLine });
 
 stallWatchdog.wrapIpc(ipcMain);
-import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab, resumeRestoredTab, forgetClosedTab, resumeOwedFor, noteTabClaudeSeen, endTypedResumes } from './auto-resume.js';
+import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab, resumeRestoredTab, forgetClosedTab, resumeOwedFor, noteTabClaudeSeen, endTypedResumes, noteIdleWhileOwed, stoppedWhileOwed } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
 import { accountIdentities, accountMetadata, loginState, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
 import { createHeadroomService } from './account-headroom-service.js';
@@ -3904,6 +3904,7 @@ function setupSessionTabCapture() {
           // re-stamps it if the checks then miss the Claude (bug report 2026-11-14: 28 tabs came back as shells).
           const mappedIdle = tabToSessionId.get(t.id);
           if (mappedIdle && resumeOwedFor(t.id) !== mappedIdle) clearSessionTabRunning(mappedIdle);
+          else if (mappedIdle) noteIdleWhileOwed(t.id);
           continue;
         }
         noteTabClaudeSeen(t.id);
@@ -5964,6 +5965,8 @@ app.on('before-quit', (e) => {
           if (reconcileAborted) return;
           if (unknownTabs.has(t.id)) {
             const sidUnknown = tabToSid.get(t.id);
+            // Seen without Claude by a capture after its resume should have started: stopped, whatever this check says.
+            if (sidUnknown && stoppedWhileOwed(t.id, sidUnknown) && resumeOwedFor(t.id) !== sidUnknown) { clearSessionTabRunning(sidUnknown); continue; }
             // Dated at the quit stamp: a stamp confirmed until the quit is not long uncertain however long the app then
             // stays closed (auto-resume measures doubt up to lastQuitAt). Codex, PR 7.
             if (sidUnknown) markSessionTabUncertain(sidUnknown, quitStampAt ?? Date.now());
