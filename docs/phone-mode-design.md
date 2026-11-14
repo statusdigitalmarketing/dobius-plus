@@ -82,10 +82,20 @@ Two processes, one supervising the other:
   `child_process.spawn`, never detached; checked in 0.3.325, where the SDK's own `query()` spawn is not detached
   either), so Claude is in the runner's group, and it reports Claude's pid and start time to the gate over fd 3 and
   to main over the socket **before** the SDK sends Claude anything.
-- **Order:** the runner says hello to main (with its own pid, which is its group id) and spawns Claude only after
-  main has accepted that hello. Main accepts a hello only for a run that is still `starting` in a tab that is still
-  open, and only after one `ps` shows that pid's group leader descends from the tab's PTY process. So a Claude can
-  exist only for a run whose runner group main already knows.
+- **Order** (Codex P2, design round 6: a runner orphaned before its hello had no cleanup owner):
+  1. The gate connects first, with the ticket's token, and says hello with its own pid. Main records the run in
+     `phone-runs.json` at once (before any runner exists) and answers with a second one-time token for the runner.
+  2. The gate spawns the runner with a non-secret tag in its argv, `phone-runner.mjs run <runId>` (the run id is
+     128 random bits and is not a credential), passes the runner token over fd 3, and reports the runner's pid and
+     start time to main; main adds them to the record.
+  3. The runner says hello with that token and spawns Claude only after main has accepted it. Main accepts it only
+     for a run that is still `starting` in a tab that is still open, and only after one `ps` shows that pid is the
+     one the gate reported and descends from the tab's PTY process. So a Claude can exist only for a run whose
+     runner group main already knows.
+  - Main never depends on a report arriving. For any run it has recorded, its cleanup (tab close, `ending`, quit,
+    next launch) also finds the runner by its tag: one `ps`, processes running the Dobius binary with
+    `phone-runner.mjs run <runId>`, which it SIGKILLs along with their group. A runner stopped and orphaned between
+    spawn and its report is therefore still found.
 
 The `&& claude --resume` is the take-back: whenever the runner exits, for any reason (Enter at the Mac, Give back on
 the phone, an error starting the SDK, a crash, a SIGKILL), the tab resumes the conversation in the normal Claude TUI,
@@ -184,10 +194,11 @@ Owns a small registry: tabId -> { sessionId, token, socket, status, pending (at 
   reads it, deletes it, and the runner connects with it. The SDK gets an explicit `env`: the runner's own environment minus every
   `DOBIUS_PHONE_*` name. A ticket not redeemed within 60 s is deleted by main. The token is never logged and dies with
   the run.
-  - The gate opens the ticket (O_NOFOLLOW, must be a regular 0600 file owned by this uid), reads and unlinks it before
-    it starts the runner, and hands the token to the runner over fd 3, so the file lives only between main writing it
-    and the gate's first read. A token is redeemable once; a second hello with it ends the run at once, and if the
-    legitimate runner's hello is the one refused, the run fails loudly ("phone mode stopped: another program used its
+  - The gate opens the ticket (O_NOFOLLOW, must be a regular 0600 file owned by this uid), reads and unlinks it, and
+    redeems it with its own hello (see Order); the runner gets a second one-time token from main through the gate
+    over fd 3. So the file lives only between main writing it and the gate's first read. Each token is redeemable
+    once; a second hello with either ends the run at once, and if the legitimate gate's or runner's hello is the one
+    refused, the run fails loudly ("phone mode stopped: another program used its
     start ticket") and the tab resumes on the Mac. A hijack is therefore never silent.
   - Accepted residual (Codex P2, design round 2): a process running as the same macOS user that reads the ticket in
     that window can redeem it first. Node has no peer-credential check on a unix socket to bind the token to the
@@ -333,11 +344,19 @@ every `phone*` request answers `opError: off`.
     earlier boot is dropped without signalling anything: every process in it died with that boot, and its ids may now
     belong to anyone (Codex P2, design round 5). For a record from this boot, a recorded process still alive whose
     pid and start time match is SIGKILLed and confirmed gone, and until that is done every claim for its session is
-    refused. A group whose recorded leader is gone but which still has members is signalled member by member, and
-    only members that are this run's own: the Dobius binary running `phone-runner.mjs`, or a `claude` process, each
-    started after the recorded leader start time. Any other member is left alone and logged. A recorded leader pid
-    alive with a different start time is a new process and is left alone. Only then is the record deleted and the
-    session free.
+    refused. A group whose recorded leader is gone but which still has members is signalled member by member. While
+    a run lives, main refreshes the record's `aliveAt` (when it last confirmed the group was this run's) every 60 s
+    and at `ending`. A member is this run's own, and is killed whatever its program (Claude's Bash tools and their
+    children included: Codex P2, design round 6), when it started no later than `aliveAt`, since a group id is not
+    reused while the original group has a member; a member tagged `phone-runner.mjs run <runId>` or running `claude`
+    is killed whatever its start time. A member started after `aliveAt` with neither mark may belong to a reused id:
+    it is left alone and logged, and the record is KEPT and checked again at the next launch, until the group is
+    empty or the boot changes. A recorded leader pid alive with a different start time is a new process and is left
+    alone. Only when nothing of the run's is left is the record deleted and the session free.
+  - This startup path only matters after two failures at once: main dying without its quit step AND the gate dying
+    without its own cleanup (a gate that outlives main gets SIGHUP when the PTY closes and kills its group). The one
+    accepted gap: a tool process started in the last 60 s before such a double failure, with no tag, is left running
+    and logged.
 
 ## Limits we accept in v1
 
