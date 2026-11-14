@@ -500,7 +500,8 @@ async function queueResumeNow(e, delayMs) {
   // (and maybe stopped there), its link names that tab now (Codex, restore
   // round 7). The running stamp is NOT asked here: the 15s capture zeroes it
   // for a fresh shell that is only waiting for this very resume.
-  const untouched = () => cancelGen === e.gen
+  // Not retired since: a Claude seen in the tab while this was being prepared ends it (Codex P1, PR 13 round 12).
+  const untouched = () => cancelGen === e.gen && !retiredBySight.has(e.tabId)
     && (listTerminals().find((t) => t.id === e.tabId)?.pid ?? null) === e.pidAt && e.pidAt !== null
     && terminalInputSeq(e.tabId) === 0
     && (getSessionTabMap() || {})[e.sessionId]?.tabId === e.tabId;

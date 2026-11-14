@@ -69,12 +69,15 @@ assert.match(resume, /const RESUME_SIGHT_MS = 30_000;/, 'typed protection covers
 assert.match(resume, /if \(pidNow\(\) !== t\.pid\) \{ typed\.delete\(tabId\); return null; \}/, 'a typed resume is owed only in the shell it was typed into');
 assert.match(resume, /if \(now - t\.at < RESUME_SIGHT_MS && terminalInputSeq\(tabId\) === t\.seq\) return t\.sessionId;/, 'a typed resume is owed for a bounded time, and only until anything else is typed into the tab');
 assert.match(resume, /export function forgetClosedTab\(tabId\) \{\s*handled\.add\(tabId\);\s*typed\.delete\(tabId\);/, 'closing the tab ends a typed resume');
-assert.match(main, /if \(mappedIdle && resumeOwedFor\(t\.id\) !== mappedIdle\) clearSessionTabRunning\(mappedIdle\);\s*else if \(mappedIdle\) noteIdleWhileOwed\(t\.id, probedAt\.get\(t\.id\)\);\s*continue;\s*\}\s*noteTabClaudeSeen\(t\.id\);/, 'the capture spares an owed stamp and notes a Claude it sees');
+assert.match(main, /if \(mappedIdle && resumeOwedFor\(t\.id\) !== mappedIdle\) clearSessionTabRunning\(mappedIdle\);\s*else if \(mappedIdle\) noteIdleWhileOwed\(t\.id, probedAt\.get\(t\.id\)\);\s*continue;/, 'the capture spares an owed stamp and notes a Claude it sees');
 assert.match(main, /if \(resumeOwedFor\(t\.id\) !== sid\) clearSessionTabRunning\(sid\);/, 'the quit check spares an owed stamp');
 assert.match(main, /if \(got === null && sidNow && getSessionTabMap\(\)\?\.\[sidNow\]\?\.tabId === t\.id && resumeOwedFor\(t\.id\) !== sidNow\) clearSessionTabRunning\(sidNow\);/, 'a definite no-Claude at quit is applied before the deadline can stop the pass');
 assert.match(main, /await mapLimit\(liveTabs, QUIT_PROBE_CONCURRENCY, async \(t\) => \{/, 'the quit check looks at tabs a few at a time');
 assert.match(main, /else if \(mappedIdle\) noteIdleWhileOwed\(t\.id, probedAt\.get\(t\.id\)\);/, 'a capture that spares a stamp remembers it saw no Claude');
 assert.match(main, /if \(got === CLAUDE_UNKNOWN && sidNow && stoppedWhileOwed\(t\.id, sidNow\) && resumeOwedFor\(t\.id\) !== sidNow\) clearSessionTabRunning\(sidNow\);/, 'a quit check that cannot tell clears a session seen stopped as soon as it returns');
 assert.match(main, /if \(sidUnknown && stoppedWhileOwed\(t\.id, sidUnknown\) && resumeOwedFor\(t\.id\) !== sidUnknown\) \{ clearSessionTabRunning\(sidUnknown\); continue; \}/, 'a quit check that cannot tell still clears a session seen stopped');
+assert.match(main, /if \(claudeInfo\) noteTabClaudeSeen\(t\.id\);\s*if \(!runningSessionId\)/, 'any Claude seen, named or not, retires the launch resume');
+assert.match(resume, /const untouched = \(\) => cancelGen === e\.gen && !retiredBySight\.has\(e\.tabId\)/, 'a retired resume is never queued or written after its preparation');
+assert.match(main, /if \(got && got !== CLAUDE_UNKNOWN\) noteTabClaudeSeen\(t\.id\);/, 'the quit check retires a launch resume for any Claude it sees');
 console.log('PASS  the capture and the quit check both spare an owed stamp');
 process.exit(0);

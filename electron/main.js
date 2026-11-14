@@ -3894,6 +3894,8 @@ function setupSessionTabCapture() {
         }
         const claudeInfo = infoByTab.get(t.id);
         const runningSessionId = claudeInfo?.sessionId || freshByTab.get(t.id) || null;
+        // Any Claude seen in the tab, named or not, ends what a launch resume owed there (Codex P1, PR 13 round 12).
+        if (claudeInfo) noteTabClaudeSeen(t.id);
         if (!runningSessionId) {
           // Tab is open but no Claude session is running in it. If the map
           // still links a session here, zero its freshness stamp so quitting
@@ -3907,7 +3909,6 @@ function setupSessionTabCapture() {
           else if (mappedIdle) noteIdleWhileOwed(t.id, probedAt.get(t.id));
           continue;
         }
-        noteTabClaudeSeen(t.id);
         claimedIds.add(runningSessionId);
         // Tag how we know: an id read out of `claude --resume <id>` or out of
         // the process's own record is certain, one inferred from start/birth
@@ -5931,6 +5932,8 @@ app.on('before-quit', (e) => {
           probedTabs += 1;
           if (got === CLAUDE_UNKNOWN) unknownTabs.add(t.id);
           infoByTab.set(t.id, got === CLAUDE_UNKNOWN ? null : got);
+          // A Claude seen here, named or not, retires a launch resume still owed to the tab (as in the capture).
+          if (got && got !== CLAUDE_UNKNOWN) noteTabClaudeSeen(t.id);
           // Proof by argv (`claude --resume <the mapped id>`, how every auto-resumed tab runs) is recorded at once: the
           // shared 2 s deadline can stop this pass before the decisions below, and that must not leave a session seen
           // running with the doubt of earlier failed checks (Codex, PR 7). Same touch as the confirmed branch below.
