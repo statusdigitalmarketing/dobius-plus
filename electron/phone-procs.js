@@ -8,14 +8,24 @@
  *   after that it is never signalled again.
  * - A record from an earlier boot is dropped without signalling anything.
  * - A leaderless group's member is killed only when it is provably the run's: started no later than the record's
- *   `aliveAt`, or tagged `phone-runner.mjs run <runId>`, or running Claude. Anything else keeps the record.
+ *   `aliveAt`, or tagged `phone-runner.mjs run <runId>`. Anything else keeps the record. A command line that runs
+ *   Claude proves nothing (Codex P1, impl round 2: a recycled group id can hold someone else's Claude); the run's
+ *   own Claude is ended by its recorded pid and start time instead.
+ * - Every decision about a record is made from a process listing taken for that record, never one taken before an
+ *   earlier record's cleanup awaited (Codex P1, impl round 2), and a leaderless group counts as cleaned only once
+ *   `kill(-pgid, 0)` answers ESRCH after its members were ended (Codex P2, impl round 2: a member can fork while it
+ *   is being killed).
+ *
+ * Accepted (Codex P1, impl round 2): a pid or group id checked and then signalled a few milliseconds later could in
+ * principle belong to a new process by then. macOS has no pidfd to bind the two. XNU hands out pids by counting up
+ * and wraps only after 99999, so the same number comes back only after tens of thousands of other processes have
+ * started, which takes minutes even on a busy Mac, never the milliseconds between a check and its signal.
  *
  * Every system call goes through `sys`, so the rules are tested without touching real processes.
  */
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { classifyClaudeProcess } from './claude-argv.js';
 
 export const RECORDS_MAX = 32; // records kept on disk; each run writes one, so this only bounds a pathological pile
 export const TAG_RE = /(?:^|[\s/])phone-runner\.mjs run ([0-9a-f]{32})(?=\s|$)/;
@@ -125,10 +135,31 @@ export function judgeMembers(rows, pgid, runId, aliveAtMs) {
     const started = Date.parse(r.lstart);
     const early = Number.isFinite(started) && Number.isFinite(aliveAtMs) && started <= aliveAtMs;
     const tagged = r.command.match(TAG_RE)?.[1] === runId;
-    const claude = classifyClaudeProcess(r.command).kind === 'claude';
-    (early || tagged || claude ? kill : keep).push(r);
+    (early || tagged ? kill : keep).push(r);
   }
   return { kill, keep };
+}
+
+const MEMBER_ROUNDS = 3; // ponytail: a group that keeps forking past 3 list-and-kill rounds keeps its record for next launch
+
+/** End a leaderless group's provable members until the group is empty. 'gone' | 'left' (something remains). */
+async function endLeaderless(sys, rec, endOpts, log) {
+  for (let round = 0; round < MEMBER_ROUNDS; round++) {
+    const rows = parsePsAll(await sys.psAll());
+    if (rows.length === 0) return 'left'; // ps failed: cannot judge
+    const { kill, keep } = judgeMembers(rows, rec.pgid, rec.runId, rec.aliveAt);
+    let left = false;
+    for (const r of kill) if ((await endPid(sys, r.pid, r.lstart, endOpts)) !== 'gone') left = true;
+    if (keep.length) {
+      log.push(`run ${rec.runId.slice(0, 8)}: ${keep.length} later process(es) in its old group left running`);
+      return 'left';
+    }
+    if (left) return 'left';
+    const st = groupState(sys, rec.pgid);
+    if (st === 'gone') return 'gone';
+    if (st === 'unknown') return 'left';
+  }
+  return 'left';
 }
 
 // ---- the record on disk ----
@@ -176,24 +207,22 @@ export async function sweepAtLaunch(sys, store, { endOpts } = {}) {
   const records = store.read();
   if (records.length === 0) return { blocked, log };
   const boot = await sys.bootSec();
-  const rows = parsePsAll(await sys.psAll());
-  const psOk = rows.length > 0;
   for (const rec of records) {
     if (boot != null && rec.boot !== boot) { store.remove(rec.runId); log.push(`run ${rec.runId.slice(0, 8)}: earlier boot, dropped`); continue; }
-    if (boot == null || !psOk) { blocked.add(rec.sessionId); log.push(`run ${rec.runId.slice(0, 8)}: cannot check this boot, kept`); continue; }
+    // A listing taken for THIS record, after any earlier record's cleanup finished awaiting.
+    const rows = boot == null ? [] : parsePsAll(await sys.psAll());
+    if (boot == null || rows.length === 0) { blocked.add(rec.sessionId); log.push(`run ${rec.runId.slice(0, 8)}: cannot check this boot, kept`); continue; }
     let left = false;
     if (rec.pgid != null) {
       const leader = rows.find((r) => r.pid === rec.pgid);
       if (leader && sameStart(leader.lstart, rec.leaderStart)) {
         if ((await endGroup(sys, rec.pgid, { graceMs: 0, ...endOpts })) !== 'gone') left = true;
       } else if (!leader) {
-        const { kill, keep } = judgeMembers(rows, rec.pgid, rec.runId, rec.aliveAt);
-        for (const r of kill) if ((await endPid(sys, r.pid, r.lstart, endOpts)) !== 'gone') left = true;
-        if (keep.length) { left = true; log.push(`run ${rec.runId.slice(0, 8)}: ${keep.length} later process(es) in its old group left running`); }
+        if ((await endLeaderless(sys, rec, endOpts, log)) !== 'gone') left = true;
       }
       // A leader alive with a different start is a new process: the old group cannot still exist under its id.
     }
-    for (const r of taggedRows(rows, rec.runId)) if ((await endPid(sys, r.pid, r.lstart, endOpts)) !== 'gone') left = true;
+    for (const r of taggedRows(parsePsAll(await sys.psAll()), rec.runId)) if ((await endPid(sys, r.pid, r.lstart, endOpts)) !== 'gone') left = true;
     if (rec.claudePid != null && rec.claudeStart) {
       if ((await endPid(sys, rec.claudePid, rec.claudeStart, endOpts)) !== 'gone') left = true;
     }

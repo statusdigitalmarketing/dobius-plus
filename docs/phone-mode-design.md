@@ -357,8 +357,11 @@ every `phone*` request answers `opError: off`.
     a run lives, main refreshes the record's `aliveAt` (when it last confirmed the group was this run's) every 60 s
     and at `ending`. A member is this run's own, and is killed whatever its program (Claude's Bash tools and their
     children included: Codex P2, design round 6), when it started no later than `aliveAt`, since a group id is not
-    reused while the original group has a member; a member tagged `phone-runner.mjs run <runId>` or running `claude`
-    is killed whatever its start time. A member started after `aliveAt` with neither mark may belong to a reused id:
+    reused while the original group has a member; a member tagged `phone-runner.mjs run <runId>` is killed whatever
+    its start time. A command line that runs `claude` proves nothing (a recycled group id can hold someone else's
+    Claude: Codex P1, implementation round 2); the run's own Claude is ended by its recorded pid and start time.
+    After its members are ended, the group counts as gone only when `kill(-pgid, 0)` answers ESRCH (a member can
+    fork while being killed). A member started after `aliveAt` with neither mark may belong to a reused id:
     it is left alone and logged, and the record is KEPT and checked again at the next launch, until the group is
     empty or the boot changes. A recorded leader pid alive with a different start time is a new process and is left
     alone. Only when nothing of the run's is left is the record deleted and the session free.

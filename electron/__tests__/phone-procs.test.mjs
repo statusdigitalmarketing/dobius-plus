@@ -20,7 +20,7 @@ function fakeSys(procs, { boot = 1000 } = {}) {
   const sent = [];
   const err = (code) => Object.assign(new Error(code), { code });
   const sys = {
-    table, sent,
+    table, sent, onKill: null,
     psAll: async () => [...table.values()].map((p) => `${p.pid} ${p.pgid} ${p.ppid ?? 1} ${p.lstart} ${p.command}`).join('\n'),
     psStart: async (pid) => table.get(pid)?.lstart ?? null,
     kill(pid, sig) {
@@ -31,6 +31,7 @@ function fakeSys(procs, { boot = 1000 } = {}) {
       for (const p of targets) {
         if (sig === 'SIGKILL' || (sig === 'SIGTERM' && !p.stubborn && !p.frozen)) table.delete(p.pid);
       }
+      if (sig !== 0) sys.onKill?.(pid, sig, table);
     },
     bootSec: async () => boot,
     sleep: async (ms) => { clock += ms; },
@@ -97,7 +98,7 @@ test('endPid: the matching pid is SIGKILLed and confirmed', async () => {
   assert.deepEqual(sys.sent, [[700, 'SIGKILL']]);
 });
 
-test('judgeMembers: early, tagged or Claude members are killed; a later untagged one is kept', () => {
+test('judgeMembers: early or tagged members are killed; a later one is kept, even a Claude (Codex impl r2)', () => {
   const aliveAt = Date.parse(T0) + 30_000;
   const rows = parsePsAll([
     `701 600 1 ${T0} /bin/zsh -c make test`,
@@ -107,8 +108,8 @@ test('judgeMembers: early, tagged or Claude members are killed; a later untagged
     `705 999 1 ${T0} /bin/zsh`,
   ].join('\n'));
   const { kill, keep } = judgeMembers(rows, 600, RUN, aliveAt);
-  assert.deepEqual(kill.map((r) => r.pid), [701, 703, 704]);
-  assert.deepEqual(keep.map((r) => r.pid), [702]);
+  assert.deepEqual(kill.map((r) => r.pid), [701, 704]);
+  assert.deepEqual(keep.map((r) => r.pid), [702, 703]);
 });
 
 function tmpStore() {
@@ -194,5 +195,46 @@ test('sweep: when ps or the boot time cannot be read, nothing is signalled and t
     assert.deepEqual([...r.blocked], ['s1']);
     assert.deepEqual(sys.sent, []);
     assert.equal(store.read().length, 1);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('sweep: a member that forks while being killed keeps the record (Codex impl r2)', async () => {
+  const { dir, store } = tmpStore();
+  try {
+    store.upsert({ runId: RUN, sessionId: 's1', boot: 1000, pgid: 600, leaderStart: T0, claudePid: null, aliveAt: Date.parse(T0) });
+    const sys = fakeSys([{ pid: 701, pgid: 600, lstart: T0, command: 'make test' }]);
+    sys.onKill = (pid, sig, table) => { if (pid === 701) table.set(702, { pid: 702, pgid: 600, lstart: T_LATE, command: 'cc -c x.c' }); };
+    const r = await sweepAtLaunch(sys, store);
+    assert.deepEqual([...r.blocked], ['s1']);
+    assert.equal(sys.table.has(702), true);
+    assert.equal(store.read().length, 1);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('sweep: a provable member that forks a provable child is cleaned up over rounds', async () => {
+  const { dir, store } = tmpStore();
+  try {
+    store.upsert({ runId: RUN, sessionId: 's1', boot: 1000, pgid: 600, leaderStart: T0, claudePid: null, aliveAt: Date.parse(T_LATE) });
+    const sys = fakeSys([{ pid: 701, pgid: 600, lstart: T0, command: 'make test' }]);
+    sys.onKill = (pid, sig, table) => { if (pid === 701) table.set(702, { pid: 702, pgid: 600, lstart: T0, command: 'cc -c x.c' }); };
+    const r = await sweepAtLaunch(sys, store);
+    assert.equal(r.blocked.size, 0);
+    assert.equal(sys.table.size, 0);
+    assert.deepEqual(store.read(), []);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('sweep: each record is judged from its own listing, not one taken before an earlier cleanup (Codex impl r2)', async () => {
+  const { dir, store } = tmpStore();
+  const RUN_B = 'ef'.repeat(16);
+  try {
+    store.upsert({ runId: RUN, sessionId: 'sA', boot: 1000, pgid: null, claudePid: 800, claudeStart: T0, aliveAt: 0 });
+    store.upsert({ runId: RUN_B, sessionId: 'sB', boot: 1000, pgid: 600, leaderStart: T0, claudePid: null, aliveAt: 0 });
+    const sys = fakeSys([{ pid: 800, pgid: 800, lstart: T0, command: 'claude', frozen: true }, { pid: 600, pgid: 600, lstart: T0, command: 'runner B' }]);
+    // While A's Claude is being ended, B's group empties and its id is taken by an unrelated process.
+    sys.onKill = (pid, sig, table) => { if (pid === 800) table.set(600, { pid: 600, pgid: 600, lstart: T_LATE, command: 'unrelated' }); };
+    await sweepAtLaunch(sys, store);
+    assert.equal(sys.table.has(600), true);
+    assert.equal(sys.sent.some(([p]) => p === -600 || p === 600), false);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
