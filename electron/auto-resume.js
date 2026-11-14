@@ -467,11 +467,12 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   // 10s), a flat 50ms would fire two dozen heavy `claude --resume` processes
   // inside about a second (Codex Medium). Tiny sessions still go at full
   // speed; only the expensive ones buy extra room.
-  // Every write takes the next slot on one clock shared with later-restored tabs and with tabs released by phone
-  // mode's sweep (takeWriteSlot), so two heavy resumes never start together whichever path queued them.
+  // These delays only spread the timers out; the spacing itself is enforced when each write happens (writeGate), so
+  // a slow claim, a tab released by phone mode's sweep or a window opened later never starts together with another.
   // A tab whose session waits for phone mode's launch sweep (queueResumeNow) is queued on its own, so the tabs after
-  // it keep their stagger instead of waiting up to a minute behind it (Codex P2, impl round 18); it takes its slot
-  // when the wait ends (round 19) and clears its own `preparing` entry when it settles.
+  // it keep their stagger instead of waiting up to a minute behind it (Codex P2, impl round 18). It clears its own
+  // `preparing` entry when it settles.
+  let cumulativeMs = 0;
   const sweepWaits = new Set();
   for (const e of eligible) {
     if (heldSettlePending(e.sessionId)) {
@@ -479,8 +480,9 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
       void queueResume(e, 0).catch((err) => console.warn(`[auto-resume] ${e.tabId}: ${err?.message || err}`));
       continue;
     }
-    const now = Date.now();
-    await queueResume(e, takeWriteSlot(now, e.sizeMB, cfg.staggerMs) - now);
+    const delayMs = cumulativeMs;
+    cumulativeMs += writeGapMs(e.sizeMB, cfg.staggerMs);
+    await queueResume(e, delayMs);
   }
   // Every other one is queued or dropped by now (queueResume clears its own; this covers a throw).
   for (const c of candidates) if (!sweepWaits.has(c.tabId)) preparing.delete(c.tabId);
@@ -528,12 +530,10 @@ async function queueResumeNow(e, delayMs) {
     // booting (Codex Critical, round 9). A claim does neither.
     // A session phone mode holds only until its launch sweep decides: wait for that (bounded) rather than be refused
     // once and never retried (Codex P1, impl round 17). untouched() is asked again right after the claim.
-    // A resume that waited takes a fresh write slot when the wait ends: the one it was given may have passed while
-    // other resumes were scheduled (Codex P2, impl round 19).
     if (heldSettlePending(e.sessionId)) {
+      const t0 = Date.now();
       try { await waitHeldSettled(e.sessionId); } catch { /* claim anyway: refused is the safe side */ }
-      const now = Date.now();
-      delayMs = takeWriteSlot(now + Math.max(0, delayMs), e.sizeMB, getAutoResume().staggerMs) - now;
+      delayMs = Math.max(0, delayMs - (Date.now() - t0));
     }
     let claimed = true;
     try { claimed = await claimSessionResume(e.sessionId, e.tabId); } catch { /* proceed */ }
@@ -566,9 +566,16 @@ async function queueResumeNow(e, delayMs) {
       if (why) { noteResume(e.tabId, 'not resumed when its time came'); console.log(`[auto-resume] ${e.tabId}: ${why}`); }
       broadcastStatus(e.tabId, 'done');
     };
-    entry.timer = setTimeout(async () => {
+    const fire = async () => {
+      if (entry.cancelled) return;
+      // One write at a time, spaced by the size of the one before it (Codex P1/P2, impl round 20): the gate is taken
+      // here, at the write, not when the timer was set, so the time a claim took and slots never used do not count.
+      const slot = writeGate.take(writeGapMs(e.sizeMB, getAutoResume().staggerMs));
+      if (slot.waitMs > 0) { entry.timer = setTimeout(fire, slot.waitMs); return; }
+      const release = slot.release;
+      const giveUpHere = (why) => { release(); giveUp(why); };
       const cmd = buildResumeCommand(e.projectPath, e.sessionId, e.tabId);
-      if (!cmd) { giveUp('command build failed, skipping'); return; }
+      if (!cmd) { giveUpHere('command build failed, skipping'); return; }
       // Re-check at the moment of writing. Ownership makes this a no-op for
       // our own reservation; it only refuses if something else took the
       // session in the meantime (a real claude actually started it).
@@ -576,18 +583,18 @@ async function queueResumeNow(e, delayMs) {
       try { ok = await claimSessionResume(e.sessionId, e.tabId); } catch { /* proceed */ }
       // Cancelled while we were awaiting: the cancel path already released and
       // dequeued, so just do not write.
-      if (entry.cancelled) return;
-      if (!ok) { giveUp(`${e.sessionId} is already running elsewhere, skipping`); return; }
+      if (entry.cancelled) { release(); return; }
+      if (!ok) { giveUpHere(`${e.sessionId} is already running elsewhere, skipping`); return; }
       // Nothing but the shell running in the tab: a shell profile that starts
       // Claude (or anything) on its own, even by exec, would get the resume
       // typed into it (Codex, restore round 8).
       let busy = null;
       try { busy = await terminalBusy(e.tabId); } catch (err) { busy = 'unknown'; console.warn(`[auto-resume] ${e.tabId}: could not check the tab's program: ${err?.message || err}`); }
-      if (entry.cancelled) return;
-      if (busy) { giveUp(`${busy} is already running in the tab, skipping`); return; }
+      if (entry.cancelled) { release(); return; }
+      if (busy) { giveUpHere(`${busy} is already running in the tab, skipping`); return; }
       // The same shell, untouched, and no cancel-all since it was decided.
       if (!untouched()) {
-        giveUp('tab was typed into, replaced or cancelled before the write, skipping');
+        giveUpHere('tab was typed into, replaced or cancelled before the write, skipping');
         return;
       }
       queue.delete(e.tabId);
@@ -603,26 +610,45 @@ async function queueResumeNow(e, delayMs) {
         // A priority line (diag.resume is never throttled) with the short tab name, never the full path (Codex, PR 7).
         noteResume(e.tabId, `not resumed: typing the resume failed (${err?.code || 'error'})`);
         console.warn(`[auto-resume] ${shortTab(e.tabId)}: write failed: ${err.message}`);
+        release();
         releaseSessionResume(e.sessionId, e.tabId);
         broadcastStatus(e.tabId, 'done');
       }
-    }, delayMs);
+    };
+    entry.timer = setTimeout(fire, delayMs);
     queue.set(e.tabId, entry);
   }
 }
 
 // A restored shell needs a moment before it reads what is typed into it.
 const RESTORED_TAB_DELAY_MS = 1500;
-// When the next resume write may fire, on one clock for the launch pass, a window opened later and a tab released by
-// phone mode's sweep: they are spaced by transcript size rather than starting every heavy `claude --resume` at once
-// (Codex; impl round 19 for the shared clock).
-let nextWriteAt = 0;
-/** The absolute time of the next write slot at or after `earliest`, and reserve it. */
-export function takeWriteSlot(earliest, sizeMB, staggerMs) {
-  const at = Math.max(earliest, nextWriteAt);
-  nextWriteAt = at + (Number.isFinite(staggerMs) ? staggerMs : 0) + Math.round(Math.min(sizeMB || 0, 2000) * 2);
-  return at;
+// The room a resume of this size needs before the next one starts: heavy transcripts buy more (Codex Medium).
+export function writeGapMs(sizeMB, staggerMs) {
+  const size = Number.isFinite(sizeMB) && sizeMB > 0 ? Math.min(sizeMB, 2000) : 0;
+  return (Number.isFinite(staggerMs) && staggerMs > 0 ? staggerMs : 0) + Math.round(size * 2);
 }
+/**
+ * One resume write at a time, for every path (the launch pass, a window opened later, a tab released by phone mode's
+ * sweep). `take(gapMs)` answers `{ waitMs }` while the last write's room has not passed, else takes the gate and
+ * answers `{ waitMs: 0, release }`; `release()` gives the room back when that write did not happen (only while no
+ * later write has taken the gate). Nothing is reserved ahead of time, so a cancelled resume holds up nobody.
+ */
+export function createWriteGate(now = () => Date.now()) {
+  let freeAt = 0;
+  let holder = null;
+  return {
+    take(gapMs) {
+      const t = now();
+      if (freeAt > t) return { waitMs: freeAt - t };
+      const before = freeAt;
+      const me = {};
+      holder = me;
+      freeAt = t + Math.max(0, gapMs || 0);
+      return { waitMs: 0, release: () => { if (holder === me) { holder = null; freeAt = before; } } };
+    },
+  };
+}
+const writeGate = createWriteGate();
 
 /**
  * A tab restored with its saved scrollback AFTER the launch pass (its window
@@ -667,7 +693,7 @@ async function resumeRestoredDecided(tabId, info) {
   if (sizeMB == null) { noteResume(tabId, 'window opened later: transcript not found'); console.log(`[auto-resume] skip ${tabId}: transcript not found for ${info.sessionId}`); return; }
   if (sizeMB > cfg.skipOversizedMB) { noteResume(tabId, 'window opened later: transcript over the size cap'); console.log(`[auto-resume] skip ${tabId}: transcript ${sizeMB.toFixed(0)}MB > ${cfg.skipOversizedMB}MB cap`); return; }
   const now = Date.now();
-  const at = takeWriteSlot(now + RESTORED_TAB_DELAY_MS, sizeMB, cfg.staggerMs);
+  const at = now + RESTORED_TAB_DELAY_MS; // the write gate spaces it from any other resume
   noteResume(tabId, 'window opened later: queued to resume');
   console.log(`[auto-resume] ${tabId}: window opened later, resuming ${info.sessionId} in ${at - now}ms`);
   await queueResume({ tabId, ...info, sizeMB, pidAt, gen }, at - now);

@@ -69,27 +69,53 @@ test('heldSettlePending answers what the owner says, and false on a throw', () =
 test('the launch pass does not wait behind a held tab: it is queued on its own (Codex impl r18)', () => {
   const src = fs.readFileSync(new URL('../auto-resume.js', import.meta.url), 'utf8');
   const loop = src.slice(src.indexOf('const sweepWaits = new Set();'), src.indexOf('async function queueResume('));
-  assert.match(loop, /if \(heldSettlePending\(e\.sessionId\)\) \{\s*sweepWaits\.add\(e\.tabId\);\s*void queueResume\(e, 0\)\.catch\([^\n]*\n\s*continue;\s*\}\s*const now = Date\.now\(\);\s*await queueResume\(e, takeWriteSlot\(/);
+  assert.match(loop, /if \(heldSettlePending\(e\.sessionId\)\) \{\s*sweepWaits\.add\(e\.tabId\);\s*void queueResume\(e, 0\)\.catch\([^\n]*\n\s*continue;\s*\}\s*const delayMs = cumulativeMs;\s*cumulativeMs \+= writeGapMs\(e\.sizeMB, cfg\.staggerMs\);\s*await queueResume\(e, delayMs\);/);
   assert.match(loop, /for \(const c of candidates\) if \(!sweepWaits\.has\(c\.tabId\)\) preparing\.delete\(c\.tabId\);/, 'a waiting tab keeps its preparing entry');
 });
 
-test('one write clock: a slot taken later never lands on one already given out (Codex impl r19)', async () => {
+test('the write gate: one write at a time, spaced at the write, and an unused slot holds up nobody (Codex impl r20)', async () => {
   const ar = await import('../auto-resume.js');
-  const base = Date.now() + 1e9; // far past anything an earlier slot reserved
-  const t2 = ar.takeWriteSlot(base, 2000, 50);
-  assert.equal(t2, base);
-  // The held tab released at T2's deadline: it goes after T2's gap, not at the same moment.
-  const t1 = ar.takeWriteSlot(base, 2000, 50);
-  assert.equal(t1, base + 4050);
-  assert.equal(ar.takeWriteSlot(base + 1e6, 0, 50), base + 1e6, 'a later earliest wins over the clock');
+  let t = 1000;
+  const gate = ar.createWriteGate(() => t);
+  const gap = ar.writeGapMs(2000, 50);
+  assert.equal(gap, 4050);
+  // A claim that took 4,050 ms does not matter: the second write is spaced from the first WRITE.
+  t = 5050;
+  const first = gate.take(gap);
+  assert.equal(first.waitMs, 0);
+  const second = gate.take(gap);
+  assert.equal(second.waitMs, 4050, 'two heavy writes never start together');
+  t = 9100;
+  const third = gate.take(gap);
+  assert.equal(third.waitMs, 0);
+  // That write was given up (a cancel, a refused claim): the room goes back and the next waiter is not held.
+  third.release();
+  const fourth = gate.take(gap);
+  assert.equal(fourth.waitMs, 0, 'a released slot holds up nobody');
+  // A stale release (after a later write took the gate) changes nothing.
+  third.release();
+  assert.equal(gate.take(gap).waitMs, 4050);
 });
 
-test('every resume path takes its slot from the shared clock', () => {
+test('writeGapMs: size bounded, missing values are zero', async () => {
+  const ar = await import('../auto-resume.js');
+  assert.equal(ar.writeGapMs(5000, 50), 4050);
+  assert.equal(ar.writeGapMs(undefined, undefined), 0);
+  assert.equal(ar.writeGapMs(NaN, -5), 0);
+  assert.equal(ar.writeGapMs(10, 50), 70);
+});
+
+test('every resume write goes through the gate, and every path that gives up releases it', () => {
   const src = fs.readFileSync(new URL('../auto-resume.js', import.meta.url), 'utf8');
-  assert.equal((src.match(/takeWriteSlot\(/g) || []).length, 4, 'definition, launch pass, released hold, restored tab');
-  assert.ok(!/cumulativeMs|nextRestoredAt/.test(src), 'no second clock left');
-  const now = src.slice(src.indexOf('async function queueResumeNow('));
-  assert.match(now, /if \(heldSettlePending\(e\.sessionId\)\) \{\s*try \{ await waitHeldSettled\(e\.sessionId\); \}[^\n]*\n\s*const now = Date\.now\(\);\s*delayMs = takeWriteSlot\(/);
+  assert.ok(!/takeWriteSlot|nextWriteAt|nextRestoredAt/.test(src), 'no reservation clock left');
+  const fire = src.slice(src.indexOf('const fire = async () => {'), src.indexOf('entry.timer = setTimeout(fire, delayMs);'));
+  assert.match(fire, /const slot = writeGate\.take\(writeGapMs\(e\.sizeMB, getAutoResume\(\)\.staggerMs\)\);\s*if \(slot\.waitMs > 0\) \{ entry\.timer = setTimeout\(fire, slot\.waitMs\); return; \}/);
+  // After the gate is taken, every return releases it (directly or through giveUpHere), except a written resume.
+  const after = fire.slice(fire.indexOf('const release = slot.release;'));
+  assert.ok(!/\bgiveUp\(/.test(after.replace('giveUp(why)', '')), 'no bare giveUp after the gate');
+  for (const line of after.split('\n').filter((l) => /\breturn;/.test(l))) assert.match(line, /release\(\)|giveUpHere\(|^\s*return;\s*$/, line);
+  assert.equal((after.match(/if \(entry\.cancelled\) \{ release\(\); return; \}/g) || []).length, 2);
+  assert.match(after, /catch \(err\) \{[\s\S]*?release\(\);\s*releaseSessionResume/);
 });
 
 test.after(() => { tm.setHeldSessions(() => new Set()); fs.rmSync(process.env.DOBIUS_TEST_USERDATA, { recursive: true, force: true }); });
