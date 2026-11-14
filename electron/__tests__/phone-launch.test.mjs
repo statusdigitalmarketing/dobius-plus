@@ -178,3 +178,20 @@ test('a cd hook cannot change the resume flags (Codex r27)', () => {
     }
   } finally { fs.rmSync(t.dir, { recursive: true, force: true }); }
 });
+
+test('rc options cannot loosen the checks or split the flags: nocasematch, PCRE, IFS (Codex r28 lens)', () => {
+  const t = setup();
+  try {
+    for (const [shell, prelude] of [
+      ['/bin/bash', 'shopt -s nocasematch; IFS=-; '],
+      ['/bin/zsh', 'setopt rematch_pcre no_case_match sh_word_split 2>/dev/null; IFS=-; '],
+    ]) {
+      if (!fs.existsSync(shell)) continue;
+      const spawn = loginShellSpawn(shell, null, null, null, null, { ...t.phone, permissionMode: 'plan', model: 'opus' });
+      const script = prelude + spawn.args[3].replace(/exec '[^']*' -l$/, 'exit 0');
+      const run = (env) => lines(spawnSync(shell, ['-c', script], { cwd: t.dir, env: { ...t.base, ...spawn.env, ...env }, encoding: 'utf8', timeout: 10000, input: '' }))[1];
+      assert.equal(run({}), `CLAUDE --resume ${SID} --permission-mode plan --model opus IN ${t.cwd}`, `${shell}: valid values pass whole`);
+      assert.equal(run({ DOBIUS_NEW_TAB_TOOL_PERM: 'PLAN', DOBIUS_NEW_TAB_TOOL_MODEL: 'opus\n' }), `CLAUDE --resume ${SID} IN ${t.cwd}`, `${shell}: case and a trailing newline are refused`);
+    }
+  } finally { fs.rmSync(t.dir, { recursive: true, force: true }); }
+});
