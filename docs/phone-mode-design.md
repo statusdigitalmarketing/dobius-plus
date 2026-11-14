@@ -244,8 +244,11 @@ Owns a small registry: tabId -> { sessionId, token, socket, status, pending (at 
   when one of these is true:
   - the tab's own Claude is seen running session S (`processSessionIds` for this tab), which then holds it as any
     running Claude does; or
-  - the Claude pid the runner reported is confirmed gone (by pid and start time) AND the tab's foreground program
-    has been the shell for 10 s (the gate refused, or the person stopped the resume): nothing holds S; or
+  - the tab's foreground program has been the shell for 10 s (the gate refused, the fallback failed to start, or the
+    person stopped the resume) AND every process main knows of for the run is confirmed gone: the runner group and
+    the reported Claude pid when a hello was accepted, nothing more when none was (no hello means no Claude was ever
+    started for the run, and a later hello is refused, so that runner can never start one: Codex P2, design round
+    5, an open tab whose fallback failed held the claim forever); or
   - the tab closed AND main has confirmed the runner group and the reported Claude pid are gone; or
   - the tab closed before main accepted a hello. The run is marked dead first, so a hello arriving later is refused
     and that runner exits without starting Claude (Codex P2, design round 3: with no Claude pid, none of the other
@@ -320,12 +323,21 @@ every `phone*` request answers `opError: off`.
   the transcript is already written turn by turn, and SIGKILL ends a stopped process) and confirms ESRCH, bounded at
   1 s and run inside the existing quit drain; the updater branch calls the same step in `performInstall` before
   `quitAndInstall`. Each accepted hello is also written to `<userData>/run/phone-runs.json` (group id, leader pid and
-  start time, Claude pid and start time, session, tab), removed when the run is released. At the next launch, before
-  auto-resume and before any claim is answered, main reads that file: a recorded process still alive whose start
-  time matches is SIGKILLed and confirmed gone, and until that is done every claim for its session is refused. A
-  group whose leader is gone but which still has members is the old group (a group id is not reused while any member
-  exists), so it is killed too; a recorded leader pid alive with a different start time is a new process and is left
-  alone. Only then is the record deleted and the session free.
+  start time, Claude pid and start time, session, tab, and the boot time from `sysctl kern.boottime`).
+  - **Cleanup tracking is separate from the claim** (Codex P2, design round 5: a run released on the shell rule
+    while its stopped runner group survived dropped out of both the quit sweep and the file). A record and its place
+    in the quit sweep are removed only when main has confirmed ESRCH for the group and the Claude pid, never when the
+    claim is released. Main starts that cleanup as soon as the run ends (SIGKILL 20 s after `ending` if the group is
+    still there), independently of the claim.
+  - At the next launch, before auto-resume and before any claim is answered, main reads that file. A record from an
+    earlier boot is dropped without signalling anything: every process in it died with that boot, and its ids may now
+    belong to anyone (Codex P2, design round 5). For a record from this boot, a recorded process still alive whose
+    pid and start time match is SIGKILLed and confirmed gone, and until that is done every claim for its session is
+    refused. A group whose recorded leader is gone but which still has members is signalled member by member, and
+    only members that are this run's own: the Dobius binary running `phone-runner.mjs`, or a `claude` process, each
+    started after the recorded leader start time. Any other member is left alone and logged. A recorded leader pid
+    alive with a different start time is a new process and is left alone. Only then is the record deleted and the
+    session free.
 
 ## Limits we accept in v1
 
