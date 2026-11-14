@@ -29,6 +29,7 @@ const REASON_CODES = {
   stranded: 'stranded',
   empty: 'empty_text',
   write_failed: 'write_failed',
+  on_phone: 'on_phone',
 };
 
 const MESSAGES = {

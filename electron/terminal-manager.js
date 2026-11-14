@@ -1095,8 +1095,21 @@ async function processSessionIds() {
 export async function liveClaudeSessionIds() {
   const ids = await processSessionIds();
   for (const sid of activeReservations()) ids.add(sid);
+  for (const sid of heldElsewhere()) ids.add(sid);
   return [...ids];
 }
+
+// Sessions another owner holds for as long as it runs them: phone mode's claims, which have no expiry
+// (docs/phone-mode-design.md "While on the phone"). A failed read holds nothing new; the process table still counts.
+let heldSessionsFn = () => new Set();
+const heldElsewhere = () => { try { const s = heldSessionsFn(); return s instanceof Set ? s : new Set(); } catch { return new Set(); } };
+export function setHeldSessions(fn) { heldSessionsFn = typeof fn === 'function' ? fn : () => new Set(); }
+
+// The signal closing a tab's PTY sends: SIGHUP unless the owner names another (phone mode: SIGKILL, so a shell stopped
+// with SIGSTOP still ends and cannot carry a pending fallback past the release).
+let killSignalFn = () => undefined;
+export function setKillSignal(fn) { killSignalFn = typeof fn === 'function' ? fn : () => undefined; }
+const killSignalOf = (id) => { try { const s = killSignalFn(id); return s === 'SIGKILL' ? s : undefined; } catch { return undefined; } };
 
 // A resume is not visible in the process table for a second or two: the shell
 // has to print a prompt, the command has to be typed in, and claude has to
@@ -1203,6 +1216,8 @@ export async function claimSessionResume(sessionId, tabId = null) {
   // claude is genuinely running it, nobody may start a second one, not even
   // the tab that reserved it.
   if ((await processSessionIds()).has(sessionId)) return false;
+  // Held by phone mode: refused for every caller, the tab that ran it included, until phone mode lets go.
+  if (heldElsewhere().has(sessionId)) return false;
   // Prune FIRST, then read: everything from here down is synchronous, so a
   // concurrent claim that is still inside the await above cannot interleave,
   // and whichever caller reaches this line first takes the slot.
@@ -1282,7 +1297,8 @@ export function killTerminal(id, { respawn = false } = {}) {
       // once the entry is gone) but it frees the ThreadSafeFunction now instead
       // of leaving a late callback that could land during a quit.
       disposeListeners(entry);
-      entry.pty.kill();
+      const sig = respawn ? undefined : killSignalOf(id);
+      if (sig) entry.pty.kill(sig); else entry.pty.kill();
     } catch (err) {
       console.error(`[terminal-manager] kill error for ${id}:`, err.message);
     }
@@ -1371,7 +1387,8 @@ export function killAll() {
       // Unregister FIRST, then kill: the reverse order is what crashed the
       // app on the update-Restart path (SIGABRT in CleanupHandles).
       disposeListeners(entry);
-      entry.pty.kill();
+      const sig = killSignalOf(id);
+      if (sig) entry.pty.kill(sig); else entry.pty.kill();
     } catch (err) {
       console.error(`[terminal-manager] killAll error for ${id}:`, err.message);
     }

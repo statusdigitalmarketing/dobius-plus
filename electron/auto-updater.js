@@ -205,6 +205,10 @@ async function safeCheck() {
 // The default (false, false) on macOS means "install but do NOT relaunch",
 // which is the second half of the bug Sam reported: even when the quit
 // worked, his app stayed dead.
+// Steps that must run before the update quit (phone mode's quit sweep): the update path skips the graceful quit.
+const beforeInstall = [];
+export function onBeforeInstall(fn) { if (typeof fn === 'function') beforeInstall.push(fn); }
+
 async function performInstall() {
   if (!updatesEnabled()) {
     broadcast('updater:status', { state: 'error', message: 'Updates only run in packaged builds.' });
@@ -255,6 +259,7 @@ async function performInstall() {
   // of this function left ~5s of prep (save wait + config drain) during which
   // an unrelated crash was suppressed and a user-initiated quit would take the
   // updater bypass path even though no install had started (Codex, Medium).
+  for (const fn of beforeInstall) { try { fn(); } catch (err) { console.warn('[updater] a before-install step failed:', err?.message || err); } }
   setQuittingForUpdate(true);
   markInstallAttempted();
   try {

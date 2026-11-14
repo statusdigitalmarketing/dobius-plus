@@ -141,6 +141,9 @@ export function createPhoneMode(d) {
     if (!claudeStart) return fail('unreadable', 'Claude in that tab could not be identified');
     const rec = await d.presence(info, tabId).catch(() => null);
     if (!rec?.sessionId) return fail('unreadable', "Claude's own record of its conversation could not be read");
+    // The account it runs on must be the tab's own, or the restart would bring it back on another login.
+    const acct = d.accountProblem ? d.accountProblem(tabId, info.pid) : null;
+    if (acct) return fail('cannot', acct);
     if (rec.sessionId !== sessionId) return fail('stale_view', 'the tab is on a different conversation now; look again');
     if (!(await d.hasTranscript(sessionId).catch(() => false))) return fail('no_transcript', 'that conversation has nothing to resume yet');
     const act = d.activity(tabId);
@@ -190,7 +193,7 @@ export function createPhoneMode(d) {
     try {
       restarted = d.restart(tabId, cwd, {
         sessionId, cwd, ticket: ticketPath(runDir, run.runId), runId: run.runId, exe: d.exe, runner: d.runnerPath,
-      });
+      }, info.pid);
     } catch (e) { return cancel('failed', `Claude stopped, but the tab could not restart: ${e.message}. ${manual}`); }
     if (!restarted) return cancel('failed', `Claude stopped, but the tab could not restart. ${manual}`);
     // The restart made a new terminal: its shell is what the runner must descend from, and what a closed tab's
