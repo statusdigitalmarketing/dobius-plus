@@ -60,6 +60,7 @@ assert.match(resume, /if \(!handled\.has\(tabId\)\) return !seenPid\.has\(tabId\
 assert.match(resume, /seenPid\.set\(tabId, firstSeen\.get\(tabId\)\.pidAt\);/, 'the launch pass records the shell it saw');
 assert.match(resume, /if \(preparing\.has\(tabId\)\) return pidNow\(\) === preparing\.get\(tabId\) \? e\.sessionId : null;/, 'a prepared resume is owed only in the shell it was decided for');
 assert.equal((resume.match(/preparing\.add\(/g) || []).length, 0, 'every preparing entry carries its shell pid');
+assert.match(resume, /const RESUME_SIGHT_MS = 30_000;/, 'typed protection covers only the moment before the shell starts Claude');
 assert.match(resume, /if \(pidNow\(\) !== t\.pid\) \{ typed\.delete\(tabId\); return null; \}/, 'a typed resume is owed only in the shell it was typed into');
 assert.match(resume, /if \(now - t\.at < RESUME_SIGHT_MS && terminalInputSeq\(tabId\) === t\.seq\) return t\.sessionId;/, 'a typed resume is owed for a bounded time, and only until anything else is typed into the tab');
 assert.match(resume, /export function forgetClosedTab\(tabId\) \{\s*handled\.add\(tabId\);\s*typed\.delete\(tabId\);/, 'closing the tab ends a typed resume');

@@ -72,9 +72,12 @@ const preparing = new Map(); // tabId -> the shell pid it was decided for
 // tabId -> the shell pid the launch pass first saw it with, so an undecided tab is owed only in that shell.
 const seenPid = new Map();
 const typed = new Map(); // tabId -> { sessionId, at, seq, pid }
-// Bounded: a resume whose Claude never shows up (the shell failed it) stops protecting the stamp after this. A typed
-// `claude --resume` is a process within seconds even under load, so this only has to outlast a few slow checks.
-const RESUME_SIGHT_MS = 2 * 60_000;
+// Bounded. Typed protection only has to cover the moment between writing `claude --resume` into a shell that was
+// checked idle and that shell starting it: from then on the process exists and every check sees it (or answers
+// unknown, which never clears a stamp). Kept short because nothing can see Claude stopped from outside Dobius before
+// the capture first saw it (Codex P1, PR 13 round 6); the accepted residual is a stop from another shell within these
+// 30 s followed by a quit within the same 30 s.
+const RESUME_SIGHT_MS = 30_000;
 function finishStartup() {
   startupDone = true;
   for (const tabId of restoredDuringStartup) {
