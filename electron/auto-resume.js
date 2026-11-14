@@ -69,7 +69,7 @@ const restoredDuringStartup = new Set();
 // from the launch decision until its Claude is first seen running in the tab, it is dropped, or RESUME_SIGHT_MS passes.
 // preparing: decided, not yet queued (a transcript size lookup, a claim). typed: written, its Claude not yet seen.
 const preparing = new Set();
-const typed = new Map(); // tabId -> { sessionId, at, seq }
+const typed = new Map(); // tabId -> { sessionId, at, seq, pid }
 // Bounded: a resume whose Claude never shows up (the shell failed it) stops protecting the stamp after this. A typed
 // `claude --resume` is a process within seconds even under load, so this only has to outlast a few slow checks.
 const RESUME_SIGHT_MS = 2 * 60_000;
@@ -213,8 +213,12 @@ export function pickLaunchSessions(tabMap, lastQuitAt, now, prevLaunchAt = 0) {
 export function resumeOwedFor(tabId, now = Date.now()) {
   const e = launchEligible.get(tabId);
   if (!e) return null;
+  // Only for the shell the resume was decided for: a Reload or respawn gives the tab a new shell under the same id,
+  // whose input count starts again at 0 (Codex P1, PR 13 round 3).
+  const pidNow = () => listTerminals().find((x) => x.id === tabId)?.pid ?? null;
   const t = typed.get(tabId);
   if (t) {
+    if (pidNow() !== t.pid) { typed.delete(tabId); return null; }
     // Anything typed into the tab after the resume (a Ctrl+C, another command, from the window or the phone) ends it:
     // the person may have stopped that Claude before the capture ever saw it (Codex P1, PR 13).
     if (now - t.at < RESUME_SIGHT_MS && terminalInputSeq(tabId) === t.seq) return t.sessionId;
@@ -224,7 +228,7 @@ export function resumeOwedFor(tabId, now = Date.now()) {
   // Not typed yet: owed only under the guards the write itself will check. A cancel all, or anything typed into the
   // tab from any source, means the write will be refused, so the stamp is not protected meanwhile (Codex P2, PR 13).
   if (cancelGen !== 0 || terminalInputSeq(tabId) !== 0) return null;
-  if (queue.has(tabId)) return queue.get(tabId).sessionId;
+  if (queue.has(tabId)) return pidNow() === queue.get(tabId).pidAt ? queue.get(tabId).sessionId : null;
   if (preparing.has(tabId)) return e.sessionId;
   // Not decided yet: the launch pass is still looking for its terminal, or its window has not been opened.
   if (!handled.has(tabId)) return e.sessionId;
@@ -471,7 +475,7 @@ async function queueResumeNow(e, delayMs) {
     // await used to be a no-op (the entry had already been removed from the
     // queue), so the user typing at exactly the wrong moment got the resume
     // typed at them anyway. The flag closes that window.
-    const entry = { sessionId: e.sessionId, projectPath: e.projectPath, timer: null, cancelled: false };
+    const entry = { sessionId: e.sessionId, projectPath: e.projectPath, pidAt: e.pidAt, timer: null, cancelled: false };
     const giveUp = (why) => {
       queue.delete(e.tabId);
       releaseSessionResume(e.sessionId, e.tabId);
@@ -505,7 +509,7 @@ async function queueResumeNow(e, delayMs) {
       queue.delete(e.tabId);
       try {
         writeTerminal(e.tabId, cmd);
-        typed.set(e.tabId, { sessionId: e.sessionId, at: Date.now(), seq: terminalInputSeq(e.tabId) });
+        typed.set(e.tabId, { sessionId: e.sessionId, at: Date.now(), seq: terminalInputSeq(e.tabId), pid: e.pidAt });
         // A new run: doubt carried from before the quit ends here, or a crash after this launch would still measure
         // it only up to that older quit and resume a session stopped since (Codex, PR 7).
         clearSessionTabUncertain(e.sessionId);
