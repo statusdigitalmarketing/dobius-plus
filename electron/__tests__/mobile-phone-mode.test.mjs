@@ -240,3 +240,14 @@ test('a waiting message is rewritten only when it changed', () => {
   assert.equal(writes, 2);
 });
 
+
+test('expired entries of tabs never opened again are removed by the next scan (Codex r33)', () => {
+  const now = Date.parse('2026-11-14T16:00:00Z');
+  const st = fakeStorage();
+  const old = (i) => ({ content: `m${i}`, sendId: `s${i}`, runId: RUN, since: now - 8 * 86_400_000, known: [], knownQueued: 0 });
+  for (let i = 0; i < 100; i++) st.setItem(`${BASE}|T${i}|s${i}`, JSON.stringify(old(i)));
+  st.setItem(`${BASE}|Tx|bad`, '{nope');
+  st.setItem('unrelated', 'kept');
+  assert.equal(outboxFull(st, BASE, 'new', now), false);
+  assert.deepEqual(st.keys(), ['unrelated'], 'only what is not ours stays');
+});

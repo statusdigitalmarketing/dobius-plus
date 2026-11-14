@@ -262,15 +262,20 @@ export function saveOutbox(storage, base, tabId, echoes, owned) {
   }
 }
 
-/** True when this tab may not start keeping messages: OUTBOX_TABS other tabs already have some waiting. */
+/**
+ * True when this tab may not start keeping messages: OUTBOX_TABS other tabs already have some waiting. It reads every
+ * key, so it also removes expired or unreadable ones, whichever tab they belong to: a tab never opened again cannot
+ * leave its entries behind for good (Codex r33).
+ */
 export function outboxFull(storage, base, tabId, now = Date.now()) {
   const tabs = new Set();
-  for (const { key, tab } of outboxKeys(storage, base)) {
-    if (tabs.has(tab) || !readEntry(storage, key, now)) continue;
-    if (tab === tabId) return false;
-    tabs.add(tab);
+  let mine = false;
+  for (const { key, tab, sendId } of outboxKeys(storage, base)) {
+    const e = readEntry(storage, key, now);
+    if (!e || e.sendId !== sendId) { storage.removeItem(key); continue; }
+    if (tab === tabId) mine = true; else tabs.add(tab);
   }
-  return tabs.size >= OUTBOX_TABS;
+  return !mine && tabs.size >= OUTBOX_TABS;
 }
 
 /** Why a move did not happen, in the words the sheet shows. The Mac's own sentence wins when it sent one. */

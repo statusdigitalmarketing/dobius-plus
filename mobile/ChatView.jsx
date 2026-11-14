@@ -1330,16 +1330,30 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         return;
       }
       const sendId = freshId('s');
+      if (!phone.runId || connection.status !== 'authed') {
+        showSendNote('Not sent: not connected to the Mac right now. Send it again in a moment.');
+        return;
+      }
+      // runId: Send again goes to the run it was written for, never to a later one on the same tab (Codex r27).
+      const base = echoBaseline(text, messagesRef.current || [], normEcho);
+      const echo = { content: text, at: Date.now(), since: Date.now(), sendId, runId: phone.runId, ...base };
+      // Kept in storage BEFORE it goes, so leaving the screen cannot lose it; if storage refuses, it stays in the box
+      // (Codex r33).
+      try { saveOutbox(localStorage, outboxKey, tabId, [echo], null); } catch (err) {
+        console.warn('[phone] outbox not saved:', err?.message || err);
+        showSendNote('Not sent: this phone could not save the message (its storage may be full). Remove some waiting messages, then send it again.');
+        return;
+      }
       ownedRef.current.add(sendId);
-      if (!phone.runId || !phoneRequest('phoneSend', { runId: phone.runId, text, sendId }, { text, sendId })) {
+      if (!phoneRequest('phoneSend', { runId: phone.runId, text, sendId }, { text, sendId })) {
+        try { saveOutbox(localStorage, outboxKey, tabId, [], new Set([sendId])); } catch (err) { console.warn('[phone] outbox not cleaned:', err?.message || err); }
+        ownedRef.current.delete(sendId);
         showSendNote('Not sent: not connected to the Mac right now. Send it again in a moment.');
         return;
       }
       setSendNote('');
       sentAtRef.current = Date.now();
-      // runId: Send again goes to the run it was written for, never to a later one on the same tab (Codex r27).
-      const base = echoBaseline(text, messagesRef.current || [], normEcho);
-      setEchoes((cur) => [...cur, { content: text, at: Date.now(), since: Date.now(), sendId, runId: phone.runId, ...base }]);
+      setEchoes((cur) => [...cur, echo]);
       setDraft('');
       atBottomRef.current = true;
       return;
