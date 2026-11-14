@@ -186,10 +186,23 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS, now = Date.now } = {})
     /** The run is over from main's side: runner said ended, its socket closed, or no hello in time. */
     end(run, reason) { return toEnding(run, reason); },
 
-    /** `phone-runner.mjs done` for this run (after `redeem(token, 'done')`): the launch command is over. */
-    noteDone(run) {
+    /**
+     * `phone-runner.mjs done` for this run (after `redeem(token, 'done')`): the launch command is over.
+     * `gateGone` is the caller's check, made when `done` arrived, that the accepted gate's pid has exited. The real
+     * `done` runs only after the gate line finished, so a `done` while that gate still runs came from another
+     * program: it ends the run loudly and is NOT counted, because the gate could still start its fallback
+     * `claude --resume` after the claim was released. Returns { ok } or { ok: false, code: 'gate_alive' }.
+     */
+    noteDone(run, gateGone) {
+      if (run.gateAccepted && gateGone !== true) {
+        run.error = "phone mode stopped: another program reported the tab's launch as finished";
+        toEnding(run, 'done-forged');
+        return { ok: false, code: 'gate_alive' };
+      }
+      if (run.gateAccepted) run.gateGone = true;
       run.doneReceived = true;
       toEnding(run, run.endReason || 'done');
+      return { ok: true };
     },
 
     tabClosed(tabId) {

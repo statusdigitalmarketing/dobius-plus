@@ -44,7 +44,7 @@ test('run ids are 128-bit hex and the generation moves on start, on end and when
   reg.end(run, 'test');
   const g2 = reg.gen('T1');
   assert.ok(g2 > g1);
-  reg.noteDone(run);
+  reg.noteDone(run, true); // main confirmed the gate exited when done arrived
   reg.settle(run);
   assert.ok(reg.gen('T1') > g2); // the view published during ending is stale once the Mac has the tab
 });
@@ -65,7 +65,7 @@ test('an evicted generation is never handed out again (Codex impl r1)', () => {
   const { run } = reg.begin('T0', S1);
   const mid = reg.gen('T0');
   reg.end(run, 'ended');
-  reg.noteDone(run);
+  reg.noteDone(run, true); // main confirmed the gate exited when done arrived
   reg.settle(run);
   const seen = new Set([old, mid, reg.gen('T0')]);
   for (let i = 0; i < MAX_GENS + 5; i++) reg.gen(`X${i}`);
@@ -159,7 +159,7 @@ test('claim: held through ending until done AND the group and Claude are confirm
   const { run } = live(reg);
   reg.end(run, 'give-back');
   assert.equal(reg.settle(run).released, null);
-  reg.noteDone(run);
+  reg.noteDone(run, true); // main confirmed the gate exited when done arrived
   assert.equal(reg.settle(run).released, null); // processes not confirmed gone
   reg.noteGroupGone(run);
   assert.equal(reg.settle(run).released, null); // Claude pid not confirmed gone
@@ -242,7 +242,7 @@ test('claim: done with no accepted hello needs no process confirmations, but a r
   reg.acceptGate(b.run, 500);
   reg.noteRunnerSpawned(b.run, 600, 'x');
   reg.end(b.run, 'no-hello');
-  reg.noteDone(b.run);
+  reg.noteDone(b.run, true); // the gate had exited
   assert.deepEqual(reg.settle(b.run), { released: 'done', forgotten: false });
   reg.noteGroupGone(b.run);
   assert.deepEqual(reg.settle(b.run), { released: null, forgotten: true });
@@ -284,4 +284,18 @@ test('done tokens are one-use and kind-bound like the others', () => {
   assert.equal(reg.redeem(b.doneToken, 'gate').code, 'bad_token');
   assert.equal(reg.redeem(b.doneToken, 'done').ok, true);
   assert.equal(reg.redeem(b.doneToken, 'done').code, 'reused');
+});
+
+test('a done while the accepted gate still runs is refused and the claim stays held', () => {
+  const reg = createPhoneRegistry();
+  const b = reg.begin('T1', S1);
+  assert.equal(reg.redeem(b.gateToken, 'gate').ok, true);
+  assert.equal(reg.acceptGate(b.run, 4242).ok, true);
+  assert.equal(reg.redeem(b.doneToken, 'done').ok, true);
+  assert.deepEqual(reg.noteDone(b.run, false), { ok: false, code: 'gate_alive' });
+  assert.equal(b.run.status, 'ending');
+  assert.equal(b.run.doneReceived, false);
+  assert.match(b.run.error, /another program/);
+  assert.equal(reg.settle(b.run).released, null);
+  assert.equal(reg.claimOf(S1), b.run);
 });
