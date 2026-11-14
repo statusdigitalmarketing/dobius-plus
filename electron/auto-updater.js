@@ -56,7 +56,11 @@ export function isNetworkError(err) {
   return NET_CODES.has(err?.code) || NET_ERROR.test(String(err?.message || err));
 }
 export const RETRY_MS = 5 * 60 * 1000;
-let checkSource = 'auto'; // who started the check in flight: 'auto' (timer) or 'manual' (the person)
+// Manual checks not yet over (their download included). While any is open every failure is shown: electron-updater
+// shares one request between overlapping checks, so an automatic check that starts or joins during the person's
+// check must not make its failure quiet (Codex P1, PR 14).
+let manualChecks = 0;
+let manualStarts = 0; // every manual check ever started: an automatic check that saw this move overlapped one
 let retryTimer = null; // at most one pending retry
 const SQUIRREL_BUSY = /command is disabled/i;
 const QUIT_INSTALL_FLUSH_TIMEOUT_MS = 2500;
@@ -203,8 +207,8 @@ function quietStatus() {
 }
 
 // True when the failure was an automatic check hitting a network error, now handled quietly.
-function quietNetworkFailure(err) {
-  if (checkSource !== 'auto' || !isNetworkError(err)) return false;
+function quietNetworkFailure(err, overlapped = false) {
+  if (overlapped || manualChecks > 0 || !isNetworkError(err)) return false;
   console.warn('[updater] automatic check could not reach the network, retrying in 5 minutes:', err?.message || err);
   broadcast('updater:status', quietStatus());
   if (!retryTimer) {
@@ -216,17 +220,27 @@ function quietNetworkFailure(err) {
 
 async function safeCheck(source = 'auto') {
   if (installing) return; // a new download would re-point Squirrel at a new proxy mid-install
-  checkSource = source === 'manual' ? 'manual' : 'auto';
+  const manual = source === 'manual';
+  let open = manual; // this call still owes manualChecks a decrement
+  if (manual) { manualChecks += 1; manualStarts += 1; }
+  // Awaiting one shared request, the manual call's own catch can run first and close its count before this one's
+  // runs, so an automatic check remembers whether a manual one was open or started at any point during it.
+  const startsBefore = manualStarts;
+  const openBefore = manualChecks > (manual ? 1 : 0);
   broadcast('updater:status', { state: 'checking' });
   try {
-    handleDownloadPromise(await autoUpdater.checkForUpdates());
+    const download = handleDownloadPromise(await autoUpdater.checkForUpdates());
+    // The download a manual check started is part of it: its failure is shown too.
+    if (manual && download) { open = false; download.finally(() => { manualChecks -= 1; }); }
   } catch (err) {
     // A check already in flight when Restart was clicked. The install is still fine.
     if (installing) { console.warn('[updater] a check failed during the install:', err?.message || err); return; }
     // The same "no Windows build yet" the error event reports as idle: the rejection must not overwrite it.
     if (windowsNotYet(err)) { broadcast('updater:status', { state: 'idle' }); return; }
-    if (quietNetworkFailure(err)) return;
+    if (quietNetworkFailure(err, manual || openBefore || manualStarts !== startsBefore)) return;
     broadcast('updater:status', { state: 'error', message: String(err?.message || err) });
+  } finally {
+    if (open) manualChecks -= 1;
   }
 }
 
@@ -499,7 +513,8 @@ export function initAutoUpdater() {
 // Tests: drive the quiet-offline path without a real updater.
 export const _test = {
   quietNetworkFailure,
-  setCheckSource: (v) => { checkSource = v; },
+  safeCheck: (source) => safeCheck(source),
+  manualChecks: () => manualChecks,
   setPending: (v) => { pendingUpdate = v; },
   lastStatus: () => lastStatus,
   retry: () => retryTimer,
