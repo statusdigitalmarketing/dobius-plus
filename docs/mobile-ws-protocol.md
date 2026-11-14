@@ -310,7 +310,7 @@ A phone Run terminal starts in the command's own folder when it exists (else the
 ## Phone mode (beta, macOS)
 
 Design: `docs/phone-mode-design.md`. Advertised as `phone` in `authed.features` only while the Mac's setting
-(Settings > Phone > Drive conversations from the phone) is on. Handler: `electron/phone-mode-ws.js`; shapes:
+(Settings > Mobile Access > Drive conversations from the phone) is on. Handler: `electron/phone-mode-ws.js`; shapes:
 `electron/phone-protocol.js`; cards: `electron/phone-runner-core.mjs cardFor`.
 
 Every request needs the tab authorized on this socket (`authorizeTab`), a live tab, a pairing that is still valid and a

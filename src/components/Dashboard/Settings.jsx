@@ -740,6 +740,16 @@ export default function Settings() {
           />
         </SettingRow>
 
+        {/* Phone mode (docs/phone-mode-design.md, "Setting"): macOS only, off by default. */}
+        {!isWindows() && (
+        <SettingRow
+          label="Drive conversations from the phone (beta)"
+          description="Adds Move to phone to a tab's chat on your phone. Claude's questions, permission prompts and plans then come to the phone as cards, and the Mac tab shows that the conversation is on your phone. Press Enter in that tab to bring it back. Turning this off leaves a conversation already on the phone there until you bring it back."
+        >
+          <Toggle checked={settings.phoneMode === true} onChange={(v) => updateSetting('phoneMode', v === true)} />
+        </SettingRow>
+        )}
+
         {mobileStatus?.enabled && !mobileStatus?.running && (
           <div
             className="text-xs px-3 py-2 rounded"

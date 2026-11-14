@@ -1501,3 +1501,53 @@ a.today-title:active { opacity: 0.7; }
   color: var(--dim); font-size: 15px; line-height: 20px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .task-open { display: inline-flex; align-items: center; min-height: 36px; color: var(--accent); font-size: 15px; text-decoration: none; }
 @media (prefers-reduced-motion: reduce) { .task-circle { transition: none; } }
+
+/* ===== Phone mode (docs/phone-mode-design.md) ==============================
+ * The run's cards reuse the question card's look; buttons are 44pt targets.
+ * Every string on a card is Claude's or a tool's and is shown as text only. */
+.ask-opt.picked { background: var(--accent-soft); }
+.ask-opt.picked .ask-opt-label { color: var(--accent); }
+.phone-card .ask-head { min-height: 28px; }
+.phone-count { color: var(--dim); font-size: 13px; font-variant-numeric: tabular-nums; }
+.phone-q + .phone-q { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.phone-hint { margin: -4px 0 4px; font-size: 13px; color: var(--dim); }
+.phone-detail { margin: 0 0 6px; font-size: 14px; line-height: 1.42; color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; }
+.phone-plan { display: block; max-height: 40dvh; overflow-y: auto; font-size: 14px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); font-family: inherit; }
+.phone-own {
+  width: 100%; margin-top: 8px; padding: 10px 12px; resize: vertical; min-height: 44px;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--bg); color: var(--fg);
+  font: inherit; font-size: 16px; /* under 16px, iOS zooms the page on focus */
+}
+.phone-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.phone-btn {
+  flex: 1 1 auto; min-height: 44px; padding: 0 16px; border-radius: 12px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--fg);
+  font-size: 16px; font-weight: 600; cursor: pointer; touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent; transition: transform 0.1s ease, opacity 0.1s ease;
+}
+.phone-btn.primary { background: var(--accent); border-color: transparent; color: var(--on-accent); }
+.phone-btn:active { transform: scale(0.97); opacity: 0.85; }
+.phone-btn:disabled { opacity: 0.5; }
+.phone-strip {
+  display: flex; align-items: center; gap: 10px; margin: 6px 10px 0; padding: 6px 6px 6px 14px;
+  border-radius: 14px; background: var(--accent-soft); font-size: 14px; color: var(--fg);
+}
+.phone-strip-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--status-done); }
+.phone-strip-dot.working, .phone-strip-dot.starting, .phone-strip-dot.ending { background: var(--status-working); }
+.phone-strip-dot.waiting { background: var(--status-needs); }
+.phone-strip-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.phone-strip-error { font-size: 12px; color: var(--dim); overflow-wrap: anywhere; }
+.phone-strip-back {
+  flex: 0 0 auto; min-height: 36px; padding: 0 12px; border: 0; border-radius: 10px;
+  background: var(--surface); color: var(--fg); font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.phone-strip-back:disabled { opacity: 0.5; }
+.phone-note { padding: 6px 14px; font-size: 13px; color: var(--dim); text-align: center; }
+.phone-sheet { padding-left: 20px; padding-right: 20px; }
+.phone-sheet-title { margin: 0 0 8px; font-size: 20px; font-weight: 600; line-height: 1.3; color: var(--fg); }
+.phone-sheet-text { margin: 0; font-size: 16px; line-height: 1.45; color: var(--dim); }
+.tb-phone-pill {
+  flex: 0 0 auto; padding: 3px 9px; border-radius: 999px; background: var(--accent-soft);
+  color: var(--accent); font-size: 12px; font-weight: 600;
+}
+@media (prefers-reduced-motion: reduce) { .phone-btn { transition: none; } }

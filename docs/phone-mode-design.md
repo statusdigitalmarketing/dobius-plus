@@ -339,7 +339,7 @@ does. Only sending and answering change.
 
 ## Setting
 
-Settings > Phone > **Drive conversations from the phone (beta)**, off by default. macOS only in v1 (the launch is a
+Settings > Mobile Access > **Drive conversations from the phone (beta)**, off by default. macOS only in v1 (the launch is a
 zsh/bash script; the same rule `restarterFor` applies today). When off, `authed.features` does not offer `phone` and
 every `phone*` request answers `opError: off`.
 

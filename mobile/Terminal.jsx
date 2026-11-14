@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import XtermView from './XtermView';
 import ChatView from './ChatView';
 import SpecialKeys from './SpecialKeys';
+import { phoneOffered } from './phone-mode.js';
 
 // How long a new tab asked for from this screen is waited for before the screen stops expecting its reply.
 const CREATE_WAIT_MS = 60_000;
@@ -102,6 +103,17 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
   const [confirmStop, setConfirmStop] = useState(null);
   // The header's "..." menu: view toggle, history, new tab, stop.
   const [menuOpen, setMenuOpen] = useState(false);
+  // Phone mode as the chat reports it ({ id, on, status } for the tab it shows, or null), and the menu's requests to
+  // it: each tap bumps `n`, so the chat acts once per tap (docs/phone-mode-design.md, "What the person sees").
+  const [phoneView, setPhoneView] = useState(null);
+  const [phoneCmd, setPhoneCmd] = useState({ kind: null, n: 0 });
+  const onPhoneState = useCallback((id, s) => {
+    setPhoneView((cur) => {
+      if (!s) return cur?.id === id ? null : cur;
+      if (cur && cur.id === id && cur.on === s.on && cur.status === (s.status || null)) return cur;
+      return { id, on: s.on === true, status: s.status || null };
+    });
+  }, []);
   // Guards a createTerminal round-trip so a double-tap over Tailscale latency
   // can't spawn two orphan PTYs. Reset on the reply. Audit MED-10.
   const creatingRef = useRef(false);
@@ -288,6 +300,9 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
     }
   }, [active, newTerminalIn]);
 
+  // The chat on screen has this tab on the phone.
+  const phoneHere = !!(phoneView && phoneView.on && phoneView.id === activeId);
+
   const statusColor = status === 'authed' ? '#3FB950' : status === 'connecting' ? '#D29922' : '#F85149';
 
   return (
@@ -308,6 +323,7 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
           </span>
           {active && <span className="tb-title-sub">{active.projectName}</span>}
         </button>
+        {phoneHere && <span className="tb-phone-pill">On phone</span>}
         {active?.status === 'working' && <span className="tb-spinner" role="status" aria-label="Claude is working" />}
         <button className="tb-round" onClick={() => { setSwitcherOpen(false); setMenuOpen((v) => !v); }} aria-label="More" aria-expanded={menuOpen}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5.5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="18.5" cy="12" r="1.6" /></svg>
@@ -321,6 +337,12 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
               <button role="menuitem" onClick={() => { setMenuOpen(false); toggleMode(); }}>
                 {mode === 'chat' ? 'Show terminal' : 'Show chat'}
               </button>
+            )}
+            {activeId && mode === 'chat' && phoneOffered(connection.features) && (
+              <button role="menuitem" onClick={() => {
+                setMenuOpen(false);
+                setPhoneCmd((c) => ({ kind: phoneHere ? 'giveBack' : 'move', n: c.n + 1 }));
+              }}>{phoneHere ? 'Give back to Mac' : 'Move to phone'}</button>
             )}
             <button role="menuitem" onClick={() => { setMenuOpen(false); onShowHistory(); }}>Chat history</button>
             <button role="menuitem" onClick={() => { setMenuOpen(false); newTerminalHere(); }}>New tab here</button>
@@ -383,7 +405,7 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
             <p className="muted small">Tap the title bar to pick one.</p>
           </div>
         ) : mode === 'chat' ? (
-          <ChatView key={activeId} connection={connection} tab={active} onOpenTerminal={openTerminal} />
+          <ChatView key={activeId} connection={connection} tab={active} onOpenTerminal={openTerminal} phoneCmd={phoneCmd} onPhoneState={onPhoneState} />
         ) : (
           <XtermView connection={connection} activeId={activeId} />
         )}
