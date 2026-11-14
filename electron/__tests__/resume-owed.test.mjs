@@ -15,7 +15,7 @@ const link = (n) => ({ tabId: `term-/tmp/owed-proj-${n}`, projectPath: '/tmp/owe
 fs.writeFileSync(path.join(userData, 'config.json'), JSON.stringify({
   autoResume: { enabled: true, staggerMs: 50, skipOversizedMB: 4000, cancelOnUserInput: true },
   lastQuitAt: now - 30_000,
-  sessionTabMap: { 'sess-owed-0001': link(1), 'sess-owed-0002': link(2), 'sess-owed-0003': link(3) },
+  sessionTabMap: { 'sess-owed-0001': link(1), 'sess-owed-0002': link(2), 'sess-owed-0003': link(3), 'sess-owed-0004': link(4) },
   projects: {},
 }));
 process.on('exit', () => fs.rmSync(userData, { recursive: true, force: true }));
@@ -45,10 +45,13 @@ console.log('PASS  a closed tab owes nothing');
 
 ar.noteIdleWhileOwed(T3);
 assert.equal(ar.stoppedWhileOwed(T3, 'sess-owed-0003'), false, 'no typed resume: a capture seeing no Claude proves nothing yet');
+assert.equal(ar.resumeOwedFor(T3), 'sess-owed-0003', 'still owed while undecided');
 ar.noteTabClaudeSeen(T3);
-assert.equal(ar.resumeOwedFor(T3), 'sess-owed-0003', 'seeing Claude in a tab never typed into changes nothing');
+assert.equal(ar.resumeOwedFor(T3), null, 'a Claude seen in the tab retires its launch resume, typed or not');
+console.log('PASS  a Claude seen in the tab ends what is owed there');
+assert.equal(ar.resumeOwedFor('term-/tmp/owed-proj-4'), 'sess-owed-0004', 'owed before the cancel all');
 ar.cancelAll();
-assert.equal(ar.resumeOwedFor(T3), null, 'after a cancel all, nothing undecided is owed');
+assert.equal(ar.resumeOwedFor('term-/tmp/owed-proj-4'), null, 'after a cancel all, nothing undecided is owed');
 console.log('PASS  a cancel all ends what is owed');
 
 // The parts that need a live PTY, pinned in the source.

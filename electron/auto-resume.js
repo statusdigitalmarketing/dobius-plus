@@ -247,17 +247,35 @@ const SPAWN_GRACE_MS = 10_000;
 // tabId -> session: a definite "no Claude" was seen in the tab, past the spawn grace, while its typed resume protected
 // the stamp, and no Claude has been seen there since. Bounded by the number of tabs.
 const idleWhileOwed = new Map();
+// Tabs whose launch resume was retired because a Claude was already running there (logged once, there).
+const retiredBySight = new Set();
 
-/** The capture saw a Claude running in this tab: whatever resume was owed there is over. */
+/**
+ * The capture saw a Claude running in this tab: whatever resume was owed there is over, typed or not. A queued or
+ * prepared one is retired too (its write would be refused as the tab is busy anyway), so a Claude the shell started
+ * on its own and the person then stopped is never protected by a resume that will not happen (Codex P1, PR 13 round 9).
+ */
 export function noteTabClaudeSeen(tabId) {
   typed.delete(tabId);
   idleWhileOwed.delete(tabId);
+  if (!launchEligible.has(tabId) || handled.has(tabId) && !queue.has(tabId) && !preparing.has(tabId)) return;
+  handled.add(tabId);
+  retiredBySight.add(tabId);
+  preparing.delete(tabId);
+  const entry = queue.get(tabId);
+  if (entry) {
+    entry.cancelled = true;
+    clearTimeout(entry.timer);
+    queue.delete(tabId);
+    releaseSessionResume(entry.sessionId, tabId);
+  }
+  noteResume(tabId, 'not resumed: a Claude was already running in the tab');
 }
 
 /** The capture saw no Claude in a tab whose stamp it spared: remember it if the typed resume should be up by now. */
 export function noteIdleWhileOwed(tabId, now = Date.now()) {
   const t = typed.get(tabId);
-  if (t && now - t.at >= SPAWN_GRACE_MS) idleWhileOwed.set(tabId, t.sessionId);
+  if (t && now - t.at >= SPAWN_GRACE_MS) idleWhileOwed.set(tabId, { sessionId: t.sessionId, pid: t.pid, seq: t.seq });
 }
 
 /**
@@ -265,7 +283,15 @@ export function noteIdleWhileOwed(tabId, now = Date.now()) {
  * started, and nothing has seen a Claude there since: that session was stopped (Codex P1, PR 13 round 8).
  */
 export function stoppedWhileOwed(tabId, sessionId) {
-  return idleWhileOwed.get(tabId) === sessionId;
+  const w = idleWhileOwed.get(tabId);
+  if (!w || w.sessionId !== sessionId) return false;
+  // Only about that attempt: the same shell with nothing typed since. A resume the person then started by hand (the
+  // sidebar types it) or a new shell is a new run this says nothing about (Codex P2, PR 13 round 9).
+  if (terminalInputSeq(tabId) !== w.seq || (listTerminals().find((x) => x.id === tabId)?.pid ?? null) !== w.pid) {
+    idleWhileOwed.delete(tabId);
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -364,6 +390,8 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
       // Closed (and maybe reopened) since launch: never this pass's to resume
       // (Codex, restore round 6).
       if (handled.has(tabId) && !firstSeen.has(tabId)) continue;
+      // A Claude already running there retired it (noteTabClaudeSeen), whenever that happened.
+      if (retiredBySight.has(tabId)) continue;
       if (!firstSeen.has(tabId)) {
         firstSeen.set(tabId, { pidAt: live.find((t) => t.id === tabId)?.pid ?? null, gen: launchGen });
         seenPid.set(tabId, firstSeen.get(tabId).pidAt);
@@ -394,9 +422,9 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   for (const tabId of tabToBest.keys()) if (!handled.has(tabId)) noteResume(tabId, 'waiting: its window was not open at launch; it resumes when that window opens');
   // Seen, then closed before the last poll: the launch pass took it but nothing below visits it.
   const inCandidates = new Set(candidates.map((c) => c.tabId));
-  for (const tabId of firstSeen.keys()) if (!inCandidates.has(tabId)) noteResume(tabId, 'not resumed: its tab closed before the resume was queued');
+  for (const tabId of firstSeen.keys()) if (!inCandidates.has(tabId) && !retiredBySight.has(tabId)) noteResume(tabId, 'not resumed: its tab closed before the resume was queued');
   // Closed before the first poll saw it (forgetClosedTab marked it handled): it gets a line too (Codex, PR 7).
-  for (const tabId of tabToBest.keys()) if (handled.has(tabId) && !firstSeen.has(tabId) && !uncertainTabs.includes(tabId)) noteResume(tabId, 'not resumed: its tab closed before the launch reached it');
+  for (const tabId of tabToBest.keys()) if (handled.has(tabId) && !firstSeen.has(tabId) && !uncertainTabs.includes(tabId) && !retiredBySight.has(tabId)) noteResume(tabId, 'not resumed: its tab closed before the launch reached it');
   if (candidates.length === 0) {
     preparing.clear();
     console.log('[auto-resume] no live tabs with mapped sessions after 15s budget, nothing to do');
