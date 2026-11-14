@@ -15,7 +15,7 @@ const app = {
 };
 export { app };
 export const ipcMain = { handle: () => {}, on: () => {}, removeHandler: () => {} };
-export const BrowserWindow = class {};
+export const BrowserWindow = class { static getAllWindows() { return []; } };
 export const shell = {};
 // window-manager.js (imported via auto-updater.js) reads displays only when placing a window.
 export const screen = {};

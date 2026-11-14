@@ -63,7 +63,7 @@ const onError = updater.slice(updater.indexOf("autoUpdater.on('error'"));
 assert.ok(onError.indexOf('SQUIRREL_BUSY') > 0 && onError.indexOf('SQUIRREL_BUSY') < onError.indexOf('if (installing)') && onError.indexOf('if (installing)') < onError.indexOf("state: 'error'"), 'neither Squirrel being busy nor an overlapping check shows as a failed update');
 const late = updater.slice(updater.indexOf("nativeUpdater.on('before-quit-for-update'"), updater.indexOf("autoUpdater.on('update-available'"));
 assert.ok(late.includes('setQuittingForUpdate(true)') && late.includes('saveLiveRestoreListsForUpdate()') && late.includes('clearTimeout(installTimer)'), 'a quit after the timeout still counts as an update, with the windows still open');
-const check = updater.slice(updater.indexOf('async function safeCheck()'), updater.indexOf('// Centralized install routine'));
+const check = updater.slice(updater.indexOf('async function safeCheck('), updater.indexOf('// Centralized install routine'));
 assert.ok(check.indexOf('if (installing)', check.indexOf('catch')) > 0 && check.indexOf('if (installing)', check.indexOf('catch')) < check.lastIndexOf("state: 'error'"), 'a check that fails during an install shows nothing');
 console.log('PASS  a second Restart joins the install');
 
