@@ -299,3 +299,18 @@ test('a done while the accepted gate still runs is refused and the claim stays h
   assert.equal(reg.settle(b.run).released, null);
   assert.equal(reg.claimOf(S1), b.run);
 });
+
+test('cancel: only a run nothing has used; its tokens die with it and the claim is gone', () => {
+  const reg = createPhoneRegistry();
+  const b = reg.begin('T1', S1);
+  const g0 = reg.gen('T1');
+  assert.equal(reg.cancel(b.run), true);
+  assert.equal(reg.claimOf(S1), null);
+  assert.equal(reg.runOfTab('T1'), null);
+  assert.ok(reg.gen('T1') > g0);
+  assert.equal(reg.redeem(b.gateToken, 'gate').code, 'bad_token');
+  const b2 = reg.begin('T1', S1);
+  assert.equal(reg.redeem(b2.gateToken, 'gate').ok, true);
+  assert.equal(reg.cancel(b2.run), false); // a gate already used its ticket
+  assert.equal(reg.claimOf(S1), b2.run);
+});

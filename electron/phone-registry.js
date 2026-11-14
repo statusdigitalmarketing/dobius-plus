@@ -116,6 +116,20 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS, now = Date.now } = {})
     },
 
     /**
+     * Drop a run nothing has used yet: the start failed before the tab was restarted, or the restart itself failed.
+     * Refused once any of its tokens was redeemed (a gate exists, so the normal end and release rules apply).
+     * Its tokens die with it, so a launch that did start anyway is refused at its hello and starts nothing.
+     */
+    cancel(run) {
+      for (const v of tokens.values()) if (v.runId === run.runId && v.used) return false;
+      if (run.gateAccepted || !runs.has(run.runId)) return false;
+      runs.delete(run.runId);
+      dropTokens(run.runId);
+      bumpGen(run.tabId);
+      return true;
+    },
+
+    /**
      * Redeem a one-time token. A token already used ends its run at once ("another program used its start ticket"),
      * so a hijack is never silent. Returns { ok, run, kind } or { ok: false, code, run? }.
      */
