@@ -78,10 +78,36 @@ test('a full map drops a tab that is no longer live before any live one (Codex i
   const { run } = reg.begin('T0', S1);
   const mine = reg.gen('T0');
   // Other tabs move and are gone again: each move leaves an entry behind.
-  for (let i = 0; i < MAX_GENS + 5; i++) { const b = reg.begin(`D${i}`, `s-${i}`); reg.cancel(b.run); }
+  let d0 = 0;
+  for (let i = 0; i < MAX_GENS + 5; i++) { const b = reg.begin(`D${i}`, `s-${i}`); reg.cancel(b.run); if (i === 0) d0 = reg.gen('D0'); }
   assert.equal(reg.gen('T0'), mine, 'the live tab keeps its generation');
-  assert.ok(reg.gen('D0') < mine, 'a dead tab dropped falls back to the base, below every handed-out generation');
+  assert.ok(reg.gen('D0') > d0, 'a dropped tab falls back to a base above the generations it had');
   reg.cancel(run);
+});
+
+test('a live tab dropped from a full map never gets back a generation it had (Codex impl r10)', () => {
+  const reg = createPhoneRegistry({ now: () => 1_000_000 });
+  const seen = new Map(); // tab -> every generation it was shown
+  const look = (id) => { const g = reg.gen(id); if (!seen.has(id)) seen.set(id, new Set()); seen.get(id).add(g); return g; };
+  const before = look('T0');
+  for (let i = 0; i <= MAX_GENS + 2; i++) {
+    const id = `T${i}`;
+    look(id);
+    const b = reg.begin(id, `s-${i}`);
+    look(id);
+    reg.cancel(b.run);
+    look(id);
+  }
+  // Every tab is live (default isLive), so T0, T1 and T2 were dropped.
+  const now0 = reg.gen('T0');
+  assert.ok(now0 > before, 'T0 is not back at the generation a frame typed before its move carries');
+  for (const id of ['T0', 'T1', 'T2']) {
+    const g = reg.gen(id);
+    assert.ok(![...seen.get(id)].includes(g), `${id} never gets an old generation back`);
+  }
+  // The base moved once for the first drop, not once per drop.
+  assert.equal(reg.gen('never-moved-a'), reg.gen('never-moved-b'));
+  assert.equal(reg.gen('T1'), reg.gen('never-moved-a'));
 });
 
 test('generations follow the clock, so a registry started later is above an earlier one', () => {
