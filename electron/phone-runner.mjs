@@ -481,8 +481,15 @@ if (isMain) {
     g.done.then((code) => process.exit(code));
   } else if (sub === 'run') {
     runRunner({ runId: a }).then((code) => process.exit(code));
+  } else if (sub === 'check') {
+    // A packaged build's self-test: the bundled Agent SDK loads and offers query(). Starts nothing.
+    import('@anthropic-ai/claude-agent-sdk').then((sdk) => {
+      const ok = typeof sdk.query === 'function';
+      process.stdout.write(ok ? 'phone runner: Agent SDK ok\n' : 'phone runner: Agent SDK has no query()\n');
+      process.exit(ok ? 0 : 1);
+    }, (e) => { process.stderr.write(`phone runner: Agent SDK did not load (${e.message})\n`); process.exit(1); });
   } else {
-    process.stderr.write('usage: phone-runner.mjs gate <ticket> <sessionId> | run <runId> | done <ticket> <runId>\n');
+    process.stderr.write('usage: phone-runner.mjs gate <ticket> <sessionId> | run <runId> | done <ticket> <runId> | check\n');
     process.exit(2);
   }
 }

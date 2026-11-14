@@ -3478,8 +3478,11 @@ async function setupPhoneMode() {
   const pm = createPhoneMain({
     userData,
     exe: process.execPath,
-    // ponytail: the runner loads from the app folder; the packaged build's bundle and asarUnpack come with step 5.
-    runnerPath: path.join(__dirname, 'phone-runner.mjs'),
+    // Packaged: the bundle with the Agent SDK in it, unpacked from app.asar (scripts/build-phone-runner.mjs). In dev the
+    // source runner, which loads the SDK from node_modules.
+    runnerPath: app.isPackaged
+      ? path.join(process.resourcesPath, 'app.asar.unpacked', 'dist-phone', 'phone-runner.mjs')
+      : path.join(__dirname, 'phone-runner.mjs'),
     log: (line) => logLine('phone', String(line).slice(0, 2000)),
     settings: () => getSettings(),
     accounts: () => loadConfig().accounts || [],

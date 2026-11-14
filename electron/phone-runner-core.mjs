@@ -1,4 +1,4 @@
-/**
+/*!
  * Phone mode: the runner's logic that does not touch the SDK, sockets or processes, so it is tested on its own
  * (docs/phone-mode-design.md, "The SDK" and "Questions and permissions").
  *

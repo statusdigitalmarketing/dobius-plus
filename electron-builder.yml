@@ -62,11 +62,15 @@ directories:
 files:
   - dist/**/*
   - dist-mobile/**/*
+  # The phone-mode runner and the Agent SDK in one file (scripts/build-phone-runner.mjs); the SDK itself is a dev
+  # dependency and never packed.
+  - dist-phone/**/*
   - electron/**/*
   # shared/ holds modules both main and the renderer import (pairing-link.js).
   - shared/**/*
   - node_modules/node-pty/**/*
   - package.json
+  - THIRD-PARTY-NOTICES.md
   # scripts/kokoro-tts.py is spawned by voice-playback.js; without it in the
   # allowlist the packaged app always falls back to `say`, even if the user ran
   # scripts/install-kokoro-tts.sh. asarUnpack below also lifts it out of asar
@@ -81,6 +85,9 @@ files:
 # PWA kept working off its service-worker cache (found 2026-09-14, uptime 6d).
 asarUnpack:
   - dist-mobile/**/*
+  # The runner is started by Electron as Node (ELECTRON_RUN_AS_NODE) from a tab's shell: kept on disk, like
+  # dist-mobile, so nothing is copied out of app.asar into a temp file macOS may purge.
+  - dist-phone/**/*
   # scripts/kokoro-tts.py is spawned by voice-playback.js; python cannot read
   # from inside app.asar. (v1.0.80)
   - scripts/**/*

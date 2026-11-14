@@ -1141,3 +1141,9 @@
 - **FIX**: Assert the marker was found (`at > 0`) and that the slice has a plausible length before asserting anything about its contents. Sabotage the exact line each assertion guards, after every edit to the code under test, not only when the test is written.
 - **CONTEXT**: Source-pattern tests are only as good as their anchors. A `str.slice(str.indexOf(x))` with a missing `x` silently becomes the last character, and "no match of a forbidden pattern" checks then pass vacuously.
 - **DETECTION**: `grep -n "slice(.*indexOf(" electron/__tests__/*.mjs` (each should be followed by an assertion that the index is not -1)
+
+### Dependencies - 2026-11-14
+- **MISTAKE**: After `npm install -D @anthropic-ai/claude-agent-sdk` in the phone worktree, `npm test` died in commit-log's neighbour suite with `Error: posix_spawnp failed.` from node-pty's `unixTerminal.js`. The install had reinstalled node-pty: `build/Release` (made by electron-rebuild) was gone and the prebuilt `spawn-helper` had no execute bit.
+- **FIX**: `npx electron-rebuild` after ANY npm install or uninstall, before running tests or the app (the project CLAUDE.md says so for native modules; this is what skipping it looks like).
+- **CONTEXT**: The error names neither the install nor node-pty's helper, so it reads like a test bug. terminal-manager.js repairs the helper's mode at app start, but only for `build/Release`, not for the test runs.
+- **DETECTION**: `ls -la node_modules/node-pty/build/Release/spawn-helper` (missing or not -rwx means rebuild)

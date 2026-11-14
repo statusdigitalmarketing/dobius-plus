@@ -27,6 +27,7 @@ DerivedData/
 /build/
 dist/
 dist-mobile/
+dist-phone/
 dist-electron/
 .DS_Store
 *.dmg
