@@ -310,7 +310,10 @@ A phone Run terminal starts in the command's own folder when it exists (else the
 ## Phone mode (beta, macOS)
 
 Design: `docs/phone-mode-design.md`. Advertised as `phone` in `authed.features` only while the Mac's setting
-(Settings > Mobile Access > Drive conversations from the phone) is on. Handler: `electron/phone-mode-ws.js`; shapes:
+(Settings > Mobile Access > Drive conversations from the phone) is on. `phoneGen` is advertised whenever the Mac runs
+phone mode at all (macOS), setting on or off: on such a Mac every write to a tab carries the `gen` from `phoneState`,
+because a conversation can still be on the phone after the setting is turned off. Only a Mac with neither feature takes
+writes with no `gen`. Handler: `electron/phone-mode-ws.js`; shapes:
 `electron/phone-protocol.js`; cards: `electron/phone-runner-core.mjs cardFor`.
 
 Every request needs the tab authorized on this socket (`authorizeTab`), a live tab, a pairing that is still valid and a
@@ -320,7 +323,7 @@ valid `reqId` (or none). With the setting off, `phoneTake` is refused `off`, but
 | Request | Fields | Effect |
 |---|---|---|
 | `phoneTake` | `id`, `sessionId`, `gen` (from `phoneState`) | Moves the tab's Claude to the phone. The ack carries the new `runId` |
-| `phoneSend` | `id`, `runId`, `text` (1 to 8 KB, not blank), `sendId` (1 to 64 of `[A-Za-z0-9_-]`) | Sends a message; the same `sendId` twice is sent once (`duplicate:true`) |
+| `phoneSend` | `id`, `runId`, `text` (1 to 8 KB, not blank), `sendId` (1 to 64 of `[A-Za-z0-9_-]`) | Sends a message; the same `sendId` twice is sent once (`duplicate:true`). An id refused `not_live`, `busy` or `bad_request` was not taken and may be sent again; after `timeout` or `failed` it is not known, the id stays used, and a retry with it is delivered at most once |
 | `phoneAnswer` | `id`, `runId`, `requestId`, `answer` | Answers one pending card |
 | `phoneStop` | `id`, `runId` | Interrupts the current turn |
 | `phoneGiveBack` | `id`, `runId` | Ends phone mode; the tab resumes the conversation on the Mac |

@@ -3,6 +3,11 @@
 
 /** The Mac offers phone mode (its setting is on, macOS). */
 export const phoneOffered = (features) => Array.isArray(features) && features.includes('phone');
+/**
+ * The Mac runs phone mode at all, setting on or off: its writes carry the tab's generation and its tabs may be on the
+ * phone. Only a Mac without either feature (an older app, Windows) takes writes with no generation.
+ */
+export const phoneKnown = (features) => Array.isArray(features) && (features.includes('phoneGen') || features.includes('phone'));
 
 /** A fresh id for a request (reqId) or a message (sendId): 1 to 64 of [A-Za-z0-9_-]. */
 export function freshId(prefix) {
@@ -81,6 +86,22 @@ export function planAnswer(approve, { mode = null, note = '' } = {}) {
   const n = typeof note === 'string' ? note.trim() : '';
   if (n) a.note = n;
   return a;
+}
+
+// Codes that mean the Mac or the runner did not take a message. Anything else (no answer, timeout, failed, a code
+// this app does not know) leaves it unknown whether it arrived.
+const NOT_TAKEN = new Set(['off', 'bad_request', 'unknown_tab', 'not_authorized', 'revoked', 'stale_run', 'not_live',
+  'too_large', 'busy', 'stale_view', 'on_phone']);
+
+/**
+ * What became of a phone message: 'sent' (acked), 'failed' (clearly not taken) or 'unconfirmed' (`msg` null for no
+ * answer, or a code that does not say). Either failure keeps the message's sendId for Send again: the Mac forgets an id
+ * it did not take and answers `duplicate` for one that did arrive, so a retry is delivered at most once.
+ */
+export function sendOutcome(msg) {
+  if (msg && msg.type === 'ack') return 'sent';
+  if (msg && msg.type === 'opError' && NOT_TAKEN.has(msg.code)) return 'failed';
+  return 'unconfirmed';
 }
 
 /** Why a move did not happen, in the words the sheet shows. The Mac's own sentence wins when it sent one. */

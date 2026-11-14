@@ -303,6 +303,12 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS, isLive = () => true, e
       return true;
     },
 
+    /** A send the runner clearly did not take: its id may be tried again and delivered then. */
+    forgetSend(run, sendId) {
+      const i = run.sendIds.lastIndexOf(sendId);
+      if (i >= 0) run.sendIds.splice(i, 1);
+    },
+
     releaseReason,
     cleanupDone,
 

@@ -234,18 +234,28 @@ function utf16Base64(text) {
 // command line and never typed; the tab is a plain login shell afterwards. Only the shape below is accepted. Not on
 // PowerShell (Run is zsh and bash only).
 export const isRunScriptPath = (p) => typeof p === 'string' && /^\/[^\x00-\x1F\x7F]*\/dobius-run-[A-Za-z0-9_-]{16,}\.sh$/.test(p);
-// phone ({ sessionId, cwd, ticket, runId, exe, runner }, docs/phone-mode-design.md "The runner runs inside the tab"):
+// phone ({ sessionId, cwd, ticket, runId, exe, runner, permissionMode?, model? }, docs/phone-mode-design.md "The runner
+// runs inside the tab"). permissionMode and model are the stopped TUI's own flags (phone-runner-core.mjs carryOverFlags):
+// the resume after the phone gets them back, or a tab started in manual mode came back in the user's default (auto)
+// mode (ship-test, 2026-11-14).
 // the same wrapper runs the gate under Dobius's own binary, then `claude --resume` only if the gate exits 0, then
 // `done` whatever happened before it. Every value travels in env into $2..$7 before any hook runs and is checked here
 // against a fixed shape; nothing is eval'd. zsh and bash only (macOS), like the resume.
-const PHONE_ENV_SUFFIXES = ['', '_ID', '_CWD', '_TICKET', '_RUN', '_EXE', '_RUNNER'];
+const PHONE_ENV_SUFFIXES = ['', '_ID', '_CWD', '_TICKET', '_RUN', '_EXE', '_RUNNER', '_PERM', '_MODEL'];
+// The modes a phone resume may pass on, the same words as phone-runner-core.mjs CARRY_MODES, and a model name's shape.
+export const PHONE_RESUME_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'];
+const PHONE_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?:\[1m\])?$/;
+const phoneResumeMode = (v) => (PHONE_RESUME_MODES.includes(v) ? v : '');
+const phoneResumeModel = (v) => (typeof v === 'string' && PHONE_MODEL_RE.test(v) ? v : '');
 const safePath = (p) => typeof p === 'string' && isAbsPath(p) && !/[\x00-\x1F\x7F]/.test(p);
 export function isPhoneLaunch(phone) {
   return !!phone && typeof phone === 'object'
     && /^[a-zA-Z0-9][\w-]{0,99}$/.test(String(phone.sessionId)) && safePath(phone.cwd)
     && safePath(phone.ticket) && /\/phone-[0-9a-f]{32}\.ticket$/.test(phone.ticket)
     && /^[0-9a-f]{32}$/.test(String(phone.runId)) && safePath(phone.exe)
-    && safePath(phone.runner) && /\/phone-runner\.(?:mjs|cjs)$/.test(phone.runner);
+    && safePath(phone.runner) && /\/phone-runner\.(?:mjs|cjs)$/.test(phone.runner)
+    && (phone.permissionMode == null || phone.permissionMode === '' || PHONE_RESUME_MODES.includes(phone.permissionMode))
+    && (phone.model == null || phone.model === '' || PHONE_MODEL_RE.test(phone.model));
 }
 
 export function loginShellSpawn(shell, startCommand, resume = null, runScript = null, claudeOpts = null, phone = null) {
@@ -288,10 +298,12 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
   // its own job, so a Ctrl+Z inside one ended the whole wrapper (and the tab).
   // -p: bash imports no functions from the environment and reads no BASH_ENV/ENV, so a project .env (direnv) cannot
   // redefine `cd` or run a file before the script.
-  // phone: $2 session, $3 folder, $4 ticket, $5 run id, $6 Dobius binary, $7 runner. The and-list ends at the first
-  // failure, so `claude --resume` runs only when the gate exits 0 (it confirmed the runner group and Claude are gone);
-  // the `done` line runs after it whatever its outcome (docs/phone-mode-design.md, "End").
-  const launch = phoning ? '[[ $1 == phone ]] && cd -- "$3" && ELECTRON_RUN_AS_NODE=1 "$6" "$7" gate "$4" "$2" && claude --resume "$2"; [[ $1 == phone ]] && ELECTRON_RUN_AS_NODE=1 "$6" "$7" done "$4" "$5";'
+  // phone: $2 session, $3 folder, $4 ticket, $5 run id, $6 Dobius binary, $7 runner, $8 permission mode, $9 model. The
+  // and-list ends at the first failure, so `claude --resume` runs only when the gate exits 0 (it confirmed the runner
+  // group and Claude are gone); the `done` line runs after it whatever its outcome (docs/phone-mode-design.md, "End").
+  // The mode is checked again against the fixed words and the model may not look like a flag: a login rc file runs
+  // before this script and could have exported other values.
+  const launch = phoning ? `__dobius_a=(); ${shellAllow('$8', PHONE_RESUME_MODES)} && __dobius_a+=(--permission-mode "$8"); [[ -n $9 && $9 != -* ]] && __dobius_a+=(--model "$9"); [[ $1 == phone ]] && cd -- "$3" && ELECTRON_RUN_AS_NODE=1 "$6" "$7" gate "$4" "$2" && claude --resume "$2" "\${__dobius_a[@]}"; [[ $1 == phone ]] && ELECTRON_RUN_AS_NODE=1 "$6" "$7" done "$4" "$5";`
     : running ? '[[ $1 == run ]] && /bin/bash -p -- "$2";'
     : resuming ? `[[ $1 == resume ]] && cd -- "$3" && claude --resume "$2"; __dobius_on=; [[ $1 == resume-on ]] && cd -- "$3" && __dobius_on=1; [[ $__dobius_on == 1 && "${CARRY_ON_DIR}" != "$4" ]] && __dobius_on=0; [[ $__dobius_on == 1 ]] && ${CARRY_ON_TOKEN} && __dobius_on=0; [[ $__dobius_on == 1 ]] && claude --resume "$2" '${CARRY_ON_PROMPT}'; [[ $__dobius_on == 0 ]] && claude --resume "$2"; [[ $1 == fresh ]] && cd -- "$3" && claude;`
       // The flags are fixed words plus the allowlisted values in $2 and $3, built as an array, never eval'd.
@@ -316,7 +328,7 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
   }
   const script = `trap : INT; ${run} exec ${shQuote(shell)} -l`;
   const env = phoning
-    ? Object.fromEntries(P.map((n, i) => [n, ['phone', phone.sessionId, phone.cwd, phone.ticket, phone.runId, phone.exe, phone.runner][i]]))
+    ? Object.fromEntries(P.map((n, i) => [n, ['phone', phone.sessionId, phone.cwd, phone.ticket, phone.runId, phone.exe, phone.runner, phoneResumeMode(phone.permissionMode), phoneResumeModel(phone.model)][i]]))
     : running
     ? { [START_TOOL_ENV]: 'run', [`${START_TOOL_ENV}_SCRIPT`]: runScript }
     : resuming
@@ -334,5 +346,5 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
 export function isNewTabWrapperCommand(line) {
   // Anchored on argv0 (after an optional pgrep pid), so the same text inside
   // some other program's arguments never matches.
-  return /^\s*(?:\d+\s+)?(?:\S*\/)?(?:zsh|bash) -l -i -c trap : INT; (?:setopt no_nounset no_err_exit 2>\/dev\/null; |set \+eu; )set -- "\$DOBIUS_NEW_TAB_TOOL"(?: "\$DOBIUS_NEW_TAB_TOOL_ID" "\$DOBIUS_NEW_TAB_TOOL_CWD"(?: "\$DOBIUS_NEW_TAB_TOOL_CFG"| "\$DOBIUS_NEW_TAB_TOOL_TICKET" "\$DOBIUS_NEW_TAB_TOOL_RUN" "\$DOBIUS_NEW_TAB_TOOL_EXE" "\$DOBIUS_NEW_TAB_TOOL_RUNNER")?| "\$DOBIUS_NEW_TAB_TOOL_SCRIPT"| "\$DOBIUS_NEW_TAB_TOOL_MODEL" "\$DOBIUS_NEW_TAB_TOOL_PERM")?; /.test(String(line));
+  return /^\s*(?:\d+\s+)?(?:\S*\/)?(?:zsh|bash) -l -i -c trap : INT; (?:setopt no_nounset no_err_exit 2>\/dev\/null; |set \+eu; )set -- "\$DOBIUS_NEW_TAB_TOOL"(?: "\$DOBIUS_NEW_TAB_TOOL_ID" "\$DOBIUS_NEW_TAB_TOOL_CWD"(?: "\$DOBIUS_NEW_TAB_TOOL_CFG"| "\$DOBIUS_NEW_TAB_TOOL_TICKET" "\$DOBIUS_NEW_TAB_TOOL_RUN" "\$DOBIUS_NEW_TAB_TOOL_EXE" "\$DOBIUS_NEW_TAB_TOOL_RUNNER" "\$DOBIUS_NEW_TAB_TOOL_PERM" "\$DOBIUS_NEW_TAB_TOOL_MODEL")?| "\$DOBIUS_NEW_TAB_TOOL_SCRIPT"| "\$DOBIUS_NEW_TAB_TOOL_MODEL" "\$DOBIUS_NEW_TAB_TOOL_PERM")?; /.test(String(line));
 }

@@ -1153,3 +1153,9 @@
 - **FIX**: `npm install --no-save --ignore-scripts @rollup/rollup-darwin-arm64@<rollup's own version>` restores only that package. Better: never install with `--omit=optional` in a checkout that builds; the SDK being a devDependency already keeps it out of the app.
 - **CONTEXT**: Vite, esbuild and Tailwind all load per-platform native binaries that npm marks optional. The failure shows up at the next build, not at the install.
 - **DETECTION**: `node -e 'const l=require("./package-lock.json").packages,f=require("fs");for(const[k,v]of Object.entries(l))if(k.startsWith("node_modules/")&&v.optional&&(!v.os||v.os.includes("darwin"))&&(!v.cpu||v.cpu.includes("arm64"))&&!f.existsSync(k))console.log(k)'`
+
+### Architecture - 2026-11-14
+- **MISTAKE**: Phone mode's give-back resumed the TUI with a bare `claude --resume <id>`, so a tab started with `--permission-mode default` came back in the user's default (auto) mode. Only the ship-test caught it; the unit tests asserted the exact resume line and so pinned the bug.
+- **FIX**: Carry the stopped TUI's own `--permission-mode` / `--model` (runner's `carryOverFlags`) into the phone launch as `$8`/`$9`, allowlisted in JS and again in the shell (`PHONE_RESUME_MODES`, pinned equal to `CARRY_MODES` by a test).
+- **CONTEXT**: Any path that stops a Claude and restarts it for the person must restore the flags it was stopped with, not just the session id.
+- **DETECTION**: `grep -n "claude --resume \"\$2\"" shared/new-tab.js`

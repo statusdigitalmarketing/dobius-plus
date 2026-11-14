@@ -114,3 +114,46 @@ test('anything off-shape is no phone launch at all', () => {
   // A phone launch wins over a resume or run script given alongside it.
   assert.equal(loginShellSpawn('/bin/zsh', 'claude', { sessionId: 'abc', cwd: '/tmp' }, null, null, p).env.DOBIUS_NEW_TAB_TOOL, 'phone');
 });
+
+test('the resume gets back the mode and model the TUI was stopped with', () => {
+  const t = setup();
+  try {
+    for (const shell of SHELLS) {
+      for (const [carry, flags] of [
+        [{ permissionMode: 'default', model: 'opus[1m]' }, ' --permission-mode default --model opus[1m]'],
+        [{ permissionMode: 'plan' }, ' --permission-mode plan'],
+        [{ model: 'claude-sonnet-5-5' }, ' --model claude-sonnet-5-5'],
+        [{ permissionMode: '', model: '' }, ''],
+      ]) {
+        const spawn = loginShellSpawn(shell, null, null, null, null, { ...t.phone, ...carry });
+        assert.equal(isNewTabWrapperCommand([shell, ...spawn.args].join(' ')), true);
+        const script = spawn.args[3].replace(/exec '[^']*' -l$/, 'exit 0');
+        const r = spawnSync(shell, ['-c', script], { cwd: t.dir, env: { ...t.base, ...spawn.env }, encoding: 'utf8', timeout: 10000, input: '' });
+        assert.equal(lines(r)[1], `CLAUDE --resume ${SID}${flags} IN ${t.cwd}`, `${shell} ${JSON.stringify(carry)}`);
+      }
+    }
+  } finally { fs.rmSync(t.dir, { recursive: true, force: true }); }
+});
+
+test('a mode or model that is not one of the fixed shapes never reaches claude', () => {
+  const t = setup();
+  try {
+    for (const bad of [{ permissionMode: 'yolo' }, { permissionMode: '--dangerously-skip-permissions' }, { model: '--dangerously-skip-permissions' }, { model: 'a b' }, { model: 'x'.repeat(80) }]) {
+      assert.equal(isPhoneLaunch({ ...t.phone, ...bad }), false, JSON.stringify(bad));
+    }
+    // The values are read again in the shell after the rc files: one an rc exported is checked there too.
+    for (const shell of SHELLS) {
+      const spawn = loginShellSpawn(shell, null, null, null, null, { ...t.phone, permissionMode: 'plan', model: 'opus' });
+      const env = { ...t.base, ...spawn.env, DOBIUS_NEW_TAB_TOOL_PERM: 'yolo', DOBIUS_NEW_TAB_TOOL_MODEL: '--dangerously-skip-permissions' };
+      const script = spawn.args[3].replace(/exec '[^']*' -l$/, 'exit 0');
+      const r = spawnSync(shell, ['-c', script], { cwd: t.dir, env, encoding: 'utf8', timeout: 10000, input: '' });
+      assert.equal(lines(r)[1], `CLAUDE --resume ${SID} IN ${t.cwd}`, shell);
+    }
+  } finally { fs.rmSync(t.dir, { recursive: true, force: true }); }
+});
+
+test('the launch allows exactly the modes the runner carries over', async () => {
+  const { CARRY_MODES } = await import('../phone-runner-core.mjs');
+  const { PHONE_RESUME_MODES } = await import('../../shared/new-tab.js');
+  assert.deepEqual([...PHONE_RESUME_MODES].sort(), [...CARRY_MODES].sort());
+});

@@ -213,6 +213,8 @@ export function createPhoneMode(d) {
     try {
       restarted = d.restart(tabId, cwd, {
         sessionId, cwd, ticket: ticketPath(runDir, run.runId), runId: run.runId, exe: d.exe, runner: d.runnerPath,
+        // The TUI comes back with the flags it was stopped with (shared/new-tab.js, the phone launch).
+        permissionMode: run.carry?.permissionMode || '', model: run.carry?.model || '',
       }, info.pid);
     } catch (e) { return cancel('failed', `Claude stopped, but the tab could not restart: ${e.message}. ${manual}`); }
     if (!restarted) return cancel('failed', `Claude stopped, but the tab could not restart. ${manual}`);
@@ -494,8 +496,11 @@ export function createPhoneMode(d) {
 
   // ---- what the phone asks ----
 
+  const SEND_NOT_TAKEN = new Set(['not_live', 'busy', 'bad_request']);
+
+  // Not gated on the setting: turning it off stops new moves (take), but a conversation already on the phone must
+  // still take messages, answers, Stop and Give back, or the person is stuck with it there (Codex r26).
   function liveRun(tabId, runId) {
-    if (!d.on()) return { error: fail('off', 'phone mode is off on this Mac') };
     const run = reg.runOfTab(tabId);
     if (!run || run.released || run.runId !== runId) return { error: fail('stale_run', 'that phone session is over') };
     if (!['idle', 'working', 'waiting'].includes(run.status)) return { error: fail('not_live', run.status === 'ending' ? 'the phone session is ending' : 'the phone session is still starting') };
@@ -517,7 +522,11 @@ export function createPhoneMode(d) {
     const { run, conn, error } = liveRun(tabId, runId);
     if (error) return error;
     if (!reg.firstSend(run, sendId)) return { ok: true, duplicate: true };
-    return command(run, conn, { t: 'send', text });
+    const r = await command(run, conn, { t: 'send', text });
+    // Refused before the runner queued it (not connected, its queue full, empty): the same id may go again. A timeout
+    // is not known either way and keeps the id, so a retry of a message that did arrive is not delivered twice.
+    if (!r.ok && SEND_NOT_TAKEN.has(r.code)) reg.forgetSend(run, sendId);
+    return r;
   }
 
   async function answer(tabId, runId, requestId, ans) {

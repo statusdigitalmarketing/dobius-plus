@@ -691,8 +691,10 @@ async function routeToConductor(transcript) {
 // question showing, a send already in flight) is reported, never handed to the Conductor as well: one agent per
 // command. No pin, or the pinned tab gone: the Conductor as before.
 let voiceOrchestratorRoute = null;
-// Phone mode (docs/phone-mode-design.md): main hands over the instance and whether the setting is on. Until then, and
-// whenever it is off, every phone* request answers `opError: off`, `phone` is not offered and no write is gated.
+// Phone mode (docs/phone-mode-design.md): main hands over the instance (macOS only) and whether the setting is on.
+// Until then every phone* request answers `opError: off` and no write is gated. With the setting off, `phone` is not
+// offered and no new move is accepted, but `phoneGen` still is: writes keep their generation, because a conversation
+// already on the phone stays there until it comes back (Codex r26).
 let phoneMode = null;
 let phoneModeOn = () => false;
 export function setPhoneMode(pm, isOn) {
@@ -702,8 +704,8 @@ export function setPhoneMode(pm, isOn) {
 const activePhoneMode = () => {
   try { return phoneMode && phoneModeOn() ? phoneMode : null; } catch { return null; }
 };
-/** The tab's phone generation for an attached phone view, or undefined while phone mode is off. */
-const phoneGenOf = (id) => activePhoneMode()?.gen(id);
+/** The tab's phone generation for an attached phone view, or undefined on a Mac without phone mode. */
+const phoneGenOf = (id) => { try { return phoneMode?.gen(id); } catch { return undefined; } };
 /**
  * The generation gate for a phone write (mobile-tab-ops.js phoneViewGate). It asks the phone mode instance even with
  * the setting off: a conversation already on the phone stays there until it comes back, and its tab must stay closed
@@ -1923,7 +1925,7 @@ async function doStartMobileServer(stillCurrent) {
           if (!set) { set = new Set(); activeSocketsByToken.set(authedToken, set); }
           set.add(socket);
           // platform: the phone words its messages for a PC and shows Windows folders as Windows writes them (Max, 2026-11-09).
-          wsSend(socket, { type: 'authed', version: app.getVersion(), platform: process.platform === 'win32' ? 'windows' : 'mac', features: [...ACK_FEATURES, ...TODAY_FEATURES, ...(activePhoneMode() ? ['phone'] : [])] });
+          wsSend(socket, { type: 'authed', version: app.getVersion(), platform: process.platform === 'win32' ? 'windows' : 'mac', features: [...ACK_FEATURES, ...TODAY_FEATURES, ...(phoneMode ? ['phoneGen'] : []), ...(activePhoneMode() ? ['phone'] : [])] });
         } else {
           noteRefusal(msg.type === 'auth' ? 'phone key not paired with this Mac' : 'first message was not a sign-in', req);
           socket.close(4003, 'unauthorized');

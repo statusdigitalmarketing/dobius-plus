@@ -299,6 +299,7 @@ test('full run: handshake, carried flags, cards, sends once per id, give back, d
     assert.equal(restart.phone.runId, runId);
     assert.equal(restart.phone.sessionId, S);
     assert.equal(restart.phone.runner, '/x/phone-runner.mjs');
+    assert.deepEqual([restart.phone.permissionMode, restart.phone.model], ['acceptEdits', 'opus'], 'the TUI comes back with its flags');
     assert.deepEqual(rok, { t: 'runner-ok', permissionMode: 'acceptEdits', model: 'opus', resendNote: false });
     const rec = JSON.parse(fs.readFileSync(path.join(ctx.userData, 'phone-runs.json'), 'utf8'));
     assert.deepEqual(rec.map((x) => [x.runId, x.pgid, x.claudePid]), [[runId, 2200, 2300]]);
@@ -339,6 +340,39 @@ test('full run: handshake, carried flags, cards, sends once per id, give back, d
     assert.equal(ctx.mode.isPhoneTab('T1'), false);
     assert.equal(ctx.mode._registry.list().length, 0, 'forgotten');
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(ctx.userData, 'phone-runs.json'), 'utf8')), []);
+  } finally { await ctx.cleanup(); }
+});
+
+test('the setting turned off mid-run: no new move, but the run still takes messages, answers and give back (Codex r26)', async () => {
+  let on = true;
+  const ctx = setup({ on: () => on });
+  try {
+    const { runId, runner } = await live(ctx);
+    on = false;
+    runner.send({ t: 'card', card: { requestId: 'tu1', kind: 'permission', tool: 'Bash' } });
+    await sleep(50);
+    const [a] = await Promise.all([ctx.mode.answer('T1', runId, 'tu1', { kind: 'permission', allow: false }), serve(runner)]);
+    assert.deepEqual(a, { ok: true });
+    const [s1] = await Promise.all([ctx.mode.send('T1', runId, 'still here', 'send-off'), serve(runner)]);
+    assert.deepEqual(s1, { ok: true });
+    const [g] = await Promise.all([ctx.mode.giveBack('T1', runId), serve(runner)]);
+    assert.deepEqual(g, { ok: true });
+  } finally { await ctx.cleanup(); }
+});
+
+test('a send the runner refuses can go again with the same id; one that timed out cannot (Codex r26)', async () => {
+  const ctx = setup();
+  try {
+    const { runId, runner } = await live(ctx);
+    const [r1] = await Promise.all([ctx.mode.send('T1', runId, 'hi', 'send-busy'), serve(runner, () => ({ ok: false, code: 'busy', error: 'full' }))]);
+    assert.equal(r1.code, 'busy');
+    const [r2, m2] = await Promise.all([ctx.mode.send('T1', runId, 'hi', 'send-busy'), serve(runner)]);
+    assert.deepEqual(r2, { ok: true }, 'delivered on the retry, not called a duplicate');
+    assert.equal(m2.text, 'hi');
+    // No answer from the runner: not known whether it arrived, so the id stays used.
+    const r3 = await ctx.mode.send('T1', runId, 'lost?', 'send-lost');
+    assert.equal(r3.code, 'timeout');
+    assert.deepEqual(await ctx.mode.send('T1', runId, 'lost?', 'send-lost'), { ok: true, duplicate: true });
   } finally { await ctx.cleanup(); }
 });
 

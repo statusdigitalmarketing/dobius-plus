@@ -8,7 +8,7 @@ import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, 
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 import { remarkCommandBoxes, CMD_TAG } from './command-blocks.js';
 import PhoneCards from './PhoneCards';
-import { phoneOffered, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
+import { phoneOffered, phoneKnown, sendOutcome, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
 // blocks, lists were showing as raw pipes/asterisks: Sam's v1.0.53 report);
@@ -391,7 +391,7 @@ const Activity = memo(function Activity({ activity }) {
   );
 });
 
-const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending, command, detail, detailLabel, blocks: rawBlocks, startOpen, live }) {
+const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending, failed, onRetry, command, detail, detailLabel, blocks: rawBlocks, startOpen, live }) {
   const blocks = useMemo(() => (role === 'assistant' ? normalizeBlocks(rawBlocks) : null), [role, rawBlocks]);
   const text = String(content ?? '');
   const shown = rowText(text, blocks); // what the reader sees, and what Copy copies
@@ -411,7 +411,12 @@ const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending,
       <div className={`chat-msg user${sending ? ' chat-echo' : ''}`}>
         <div className="chat-bubble">{body}{more}</div>
         {command && detail && <SkillPreview detail={detail} label={detailLabel || 'skill'} />}
-        {(queued || sending) && <div className="chat-msg-state">{sending ? 'Sending…' : 'Queued for after this turn'}</div>}
+        {failed ? (
+          <div className="chat-msg-state chat-msg-failed" role="status">
+            {failed === 'failed' ? 'Not sent' : 'Not confirmed by the Mac'}
+            {onRetry && <button type="button" className="chat-retry" onClick={onRetry}>Send again</button>}
+          </div>
+        ) : (queued || sending) && <div className="chat-msg-state">{sending ? 'Sending…' : 'Queued for after this turn'}</div>}
       </div>
     );
   }
@@ -503,10 +508,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // This socket's Mac has no phone mode for this tab (it does not offer it and nothing here is on the phone): writes
   // to the tab go without a generation, as an older app's do. Until that or the tab's generation is known, a write
   // waits, because a write with neither is taken as an older app's even after a trip to the phone and back.
-  const noPhoneRef = useRef(connection.status === 'authed' && !phoneOffered(connection.features));
-  // A phone message the Mac never confirmed. Sending the same words again reuses its sendId, which the Mac delivers
-  // at most once.
-  const unconfirmedRef = useRef(null);
+  const noPhoneRef = useRef(connection.status === 'authed' && !phoneKnown(connection.features));
   const settleRef = useRef(null);
   useEffect(() => () => {
     for (const r of phoneReqs.current.values()) clearTimeout(r.timer);
@@ -813,9 +815,9 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         const lost = [...phoneReqs.current.values()];
         phoneReqs.current.clear();
         for (const e of lost) settleRef.current?.(e, null);
-        // Phone mode may have changed while the socket was down: ask again. A Mac that stopped offering it still
-        // answers for a conversation that is on the phone, so one known to be there is asked about too.
-        if (tabId && (phoneOffered(connection.features) || phoneRef.current?.on)) {
+        // Phone mode may have changed while the socket was down: ask again. A Mac with the setting off still runs it
+        // (phoneGen) and still answers for a conversation that is on the phone, so it is asked too.
+        if (tabId && (phoneKnown(connection.features) || phoneRef.current?.on)) {
           noPhoneRef.current = false;
           connection.send({ type: 'authorizeTab', id: tabId });
           connection.send({ type: 'phoneStateGet', id: tabId });
@@ -853,7 +855,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           setEchoes((cur) => {
             if (cur.length === 0) return cur;
             const now = Date.now();
-            const kept = cur.filter((e) => now - e.at < 90_000);
+            // A phone message that failed stays until it is sent again or the transcript shows it.
+            const kept = cur.filter((e) => e.fail || now - e.at < 90_000);
             return kept.length === cur.length ? cur : kept;
           });
           return;
@@ -931,7 +934,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           };
           const seen = new Set(next.filter((m) => m.role === 'user').map((m) => norm(m.content)));
           const now = Date.now();
-          const kept = cur.filter((e) => !seen.has(norm(e.content)) && now - e.at < 90_000);
+          const kept = cur.filter((e) => !seen.has(norm(e.content)) && (e.fail || now - e.at < 90_000));
           return kept.length === cur.length ? cur : kept;
         });
         if (next.length > 0) {
@@ -997,7 +1000,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // First look at phone mode for this tab (the reconnect path above asks again). authorizeTab first: every phone
   // request, phoneStateGet included, needs the tab authorized on this socket.
   useEffect(() => {
-    if (!tabId || !phoneOffered(connection.features)) return;
+    if (!tabId || !phoneKnown(connection.features)) return;
     connection.send({ type: 'authorizeTab', id: tabId });
     connection.send({ type: 'phoneStateGet', id: tabId });
   }, [connection, tabId]);
@@ -1024,16 +1027,12 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     if (entry.op === 'phoneTake') setMoveSheet((cur) => (cur ? (failed ? { busy: false, note: why } : null) : cur));
     else if (entry.op === 'phoneAnswer') { setCardBusy(false); setCardNote(why); }
     else if (entry.op === 'phoneSend') {
-      if (!failed) {
-        if (unconfirmedRef.current?.sendId === entry.sendId) unconfirmedRef.current = null;
-        return;
-      }
-      // Not sent, or not known to be: the words go back in the box. Lost keeps its sendId for the next try, so a
-      // message that did arrive is not delivered twice; a refused one was not taken, and goes again as new.
-      unconfirmedRef.current = msg ? null : { text: entry.text, sendId: entry.sendId };
-      setEchoes((cur) => cur.filter((e) => e.content !== entry.text));
-      setDraft((cur) => (cur.trim() ? cur : entry.text));
-      showSendNote(msg ? `Not sent: ${why}` : 'The Mac did not confirm that message. Send it again: it is delivered at most once.');
+      // Each message keeps its own bubble and sendId: Send again on it goes with the same id, which the Mac delivers
+      // at most once (phone-mode.js sendOutcome). Several failed messages never share or overwrite one.
+      const outcome = sendOutcome(msg);
+      if (outcome === 'sent') return;
+      setEchoes((cur) => cur.map((e) => (e.sendId === entry.sendId ? { ...e, fail: outcome } : e)));
+      showSendNote(outcome === 'failed' ? `Not sent: ${why}` : 'The Mac did not confirm a message. Tap Send again on it: it is delivered at most once.');
     } else if (failed) flashPhoneNote(why);
   };
 
@@ -1270,21 +1269,41 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       .slice(0, 6)
     : [];
 
+  // Send again on a phone message that failed: the same sendId, so one that did arrive is not delivered twice. Back on
+  // the Mac, its words go into the box to be sent from there. True when it went out.
+  const retryEcho = (e) => {
+    if (!phoneOn) {
+      setEchoes((cur) => cur.filter((x) => x.sendId !== e.sendId));
+      setDraft((cur) => (cur.trim() ? cur : e.content));
+      showSendNote('Back on the Mac: it is in the box, send it from there.');
+      return false;
+    }
+    if (!phone.runId || !phoneRequest('phoneSend', { runId: phone.runId, text: e.content, sendId: e.sendId }, { text: e.content, sendId: e.sendId })) {
+      showSendNote('Not sent: not connected to the Mac right now. Send it again in a moment.');
+      return false;
+    }
+    setSendNote('');
+    setEchoes((cur) => cur.map((x) => (x.sendId === e.sendId ? { ...x, fail: null, at: Date.now() } : x)));
+    atBottomRef.current = true;
+    return true;
+  };
+
   const send = () => {
     const text = input.trim();
     if (!text || !tabId) return;
     if (phoneOn) {
-      // On the phone the message goes to the run, never typed into the tab. The same sendId twice is sent once, so
-      // nothing here can deliver it twice.
-      const again = unconfirmedRef.current?.text === text ? unconfirmedRef.current.sendId : null;
-      const sendId = again || freshId('s');
+      // On the phone the message goes to the run, never typed into the tab. The same words as a message that failed
+      // are that message sent again, with its sendId.
+      const prior = echoes.find((e) => e.fail && e.sendId && e.content === text);
+      if (prior) { if (retryEcho(prior)) setDraft(''); return; }
+      const sendId = freshId('s');
       if (!phone.runId || !phoneRequest('phoneSend', { runId: phone.runId, text, sendId }, { text, sendId })) {
         showSendNote('Not sent: not connected to the Mac right now. Send it again in a moment.');
         return;
       }
       setSendNote('');
       sentAtRef.current = Date.now();
-      setEchoes((cur) => [...cur, { content: text, at: Date.now() }]);
+      setEchoes((cur) => [...cur, { content: text, at: Date.now(), sendId }]);
       setDraft('');
       atBottomRef.current = true;
       return;
@@ -1772,7 +1791,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           />
         ))}
         {echoes.map((e) => (
-          <Bubble key={`echo-${e.at}`} role="user" content={e.content} timestamp={e.at} sending />
+          <Bubble key={`echo-${e.sendId || e.at}`} role="user" content={e.content} timestamp={e.at} sending
+            failed={e.fail || null} onRetry={e.fail ? () => retryEcho(e) : undefined} />
         ))}
         {sessionId && working && <Activity activity={tab?.waiting === 'background' ? { verb: 'Waiting on background task' } : activity} />}
       </main>

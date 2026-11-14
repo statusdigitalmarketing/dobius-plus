@@ -1551,3 +1551,11 @@ a.today-title:active { opacity: 0.7; }
   color: var(--accent); font-size: 12px; font-weight: 600;
 }
 @media (prefers-reduced-motion: reduce) { .phone-btn { transition: none; } }
+
+/* A phone message the Mac did not take or did not confirm: says so, with Send again (44px target). */
+.chat-msg-failed { display: flex; align-items: center; justify-content: flex-end; gap: 10px; color: var(--danger, #e5484d); }
+.chat-retry {
+  min-height: 44px; padding: 0 12px; border: 0; background: none; color: var(--accent); font: inherit; font-weight: 600;
+  -webkit-tap-highlight-color: transparent;
+}
+.chat-retry:active { opacity: 0.6; }

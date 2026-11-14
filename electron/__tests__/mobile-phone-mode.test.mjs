@@ -3,7 +3,7 @@
 // Run: node --test electron/__tests__/mobile-phone-mode.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { phoneOffered, freshId, readPhoneState, questionAnswer, togglePick, permissionAnswer, planAnswer, refusalText } from '../../mobile/phone-mode.js';
+import { phoneOffered, phoneKnown, sendOutcome, freshId, readPhoneState, questionAnswer, togglePick, permissionAnswer, planAnswer, refusalText } from '../../mobile/phone-mode.js';
 import { validateAnswer, validatePhoneRequest } from '../phone-protocol.js';
 import { answerMisfit } from '../phone-runner-core.mjs';
 
@@ -11,8 +11,24 @@ const T = 'term-/p/x-1';
 
 test('offered only when the Mac says phone', () => {
   assert.equal(phoneOffered(['ack', 'phone']), true);
+  assert.equal(phoneOffered(['ack', 'phoneGen']), false);
   assert.equal(phoneOffered(['ack']), false);
   assert.equal(phoneOffered(undefined), false);
+});
+
+test('known on a Mac that runs phone mode with the setting off; writes go without a generation only elsewhere (Codex r26)', () => {
+  assert.equal(phoneKnown(['ack', 'phoneGen']), true);
+  assert.equal(phoneKnown(['ack', 'phoneGen', 'phone']), true);
+  assert.equal(phoneKnown(['ack', 'phone']), true);
+  assert.equal(phoneKnown(['ack']), false);
+  assert.equal(phoneKnown(null), false);
+});
+
+test('a send is failed only on a code that says it was not taken; anything else is unconfirmed (Codex r26)', () => {
+  assert.equal(sendOutcome({ type: 'ack', op: 'phoneSend' }), 'sent');
+  for (const code of ['busy', 'stale_run', 'not_live', 'revoked', 'off']) assert.equal(sendOutcome({ type: 'opError', code }), 'failed', code);
+  for (const code of ['timeout', 'failed', 'something_new', undefined]) assert.equal(sendOutcome({ type: 'opError', code }), 'unconfirmed', String(code));
+  assert.equal(sendOutcome(null), 'unconfirmed');
 });
 
 test('ids fit the Mac\'s sendId and reqId rules', () => {

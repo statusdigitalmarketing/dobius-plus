@@ -306,7 +306,15 @@ Owns a small registry: tabId -> { sessionId, token, socket, status, pending (at 
 
 ### Phone protocol additions (`docs/mobile-ws-protocol.md`)
 
-Offered only when the Mac's setting is on: `authed.features` includes `phone`.
+Offered only when the Mac's setting is on: `authed.features` includes `phone`. `phoneGen` is advertised whenever phone
+mode runs (macOS), setting on or off, and tells the phone to put the tab's `gen` on every write (Codex r26: a Mac with
+the setting off and a conversation still on the phone was taken for an older app, and its writes went out without one).
+
+A message sent from the phone keeps its own bubble and `sendId` until the transcript shows it. If the Mac refuses it
+(`busy`, `stale_run`, ...) the bubble says Not sent; if no answer comes or the answer does not say (`timeout`,
+`failed`), it says Not confirmed by the Mac. Both offer Send again with the same `sendId`: the Mac forgets an id it did
+not take and answers `duplicate` for one that arrived, so nothing is delivered twice. Back on the Mac, Send again puts
+the words in the box instead.
 
 | Request | Answer | Effect |
 |---|---|---|
@@ -346,11 +354,15 @@ zsh/bash script; the same rule `restarterFor` applies today). When off, `authed.
 still pushed, so the phone that holds it can give it back and learns when it is back (Codex P2, UI round 1). Any
 other `phone*` request answers `opError: off`.
 
-The phone's writes to a tab wait until it knows the tab's generation, or knows this Mac has no phone mode (it does not
-offer it and nothing on this screen is on the phone). A write with no generation is taken as an older app's, so
-sending one from a screen that never learned the generation would undo the gate after a trip to the phone and back
-(Codex P1, UI round 1). A phone message the Mac never answered (lost socket, timeout) goes back into the box and is
-sent again with the same `sendId`, which the Mac delivers at most once.
+The phone's writes to a tab wait until it knows the tab's generation, or knows this Mac has no phone mode (neither
+`phoneGen` nor `phone` in its features, and nothing on this screen is on the phone). A write with no generation is
+taken as an older app's, so sending one from a screen that never learned the generation would undo the gate after a
+trip to the phone and back (Codex P1, UI rounds 1 and 2). A phone message the Mac did not take or did not confirm stays
+on screen with Send again (see "Phone protocol additions").
+
+When the conversation comes back, the TUI resumes with the permission mode and model it was stopped with
+(`--permission-mode`, `--model`, the same allowlist the runner uses, checked again in the shell). Without them a tab
+started in manual mode came back in the user's default mode (ship-test, 2026-11-14).
 
 ## Safety and stability
 
