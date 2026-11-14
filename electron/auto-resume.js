@@ -68,7 +68,7 @@ const restoredDuringStartup = new Set();
 // nothing re-stamped them before the quit, and 28 tabs came back as bare shells on the next launch). A resume is owed
 // from the launch decision until its Claude is first seen running in the tab, it is dropped, or RESUME_SIGHT_MS passes.
 // preparing: decided, not yet queued (a transcript size lookup, a claim). typed: written, its Claude not yet seen.
-const preparing = new Set();
+const preparing = new Map(); // tabId -> the shell pid it was decided for
 const typed = new Map(); // tabId -> { sessionId, at, seq, pid }
 // Bounded: a resume whose Claude never shows up (the shell failed it) stops protecting the stamp after this. A typed
 // `claude --resume` is a process within seconds even under load, so this only has to outlast a few slow checks.
@@ -229,7 +229,7 @@ export function resumeOwedFor(tabId, now = Date.now()) {
   // tab from any source, means the write will be refused, so the stamp is not protected meanwhile (Codex P2, PR 13).
   if (cancelGen !== 0 || terminalInputSeq(tabId) !== 0) return null;
   if (queue.has(tabId)) return pidNow() === queue.get(tabId).pidAt ? queue.get(tabId).sessionId : null;
-  if (preparing.has(tabId)) return e.sessionId;
+  if (preparing.has(tabId)) return pidNow() === preparing.get(tabId) ? e.sessionId : null;
   // Not decided yet: the launch pass is still looking for its terminal, or its window has not been opened.
   if (!handled.has(tabId)) return e.sessionId;
   return null;
@@ -248,6 +248,8 @@ export function noteTabClaudeSeen(tabId) {
 export function endTypedResumes() {
   typed.clear();
 }
+// Main stops a Claude by pid in two places, the Dashboard kill and an account move's stop (Codex P1, PR 13 round 4);
+// both call this, so no stop by pid leaves a typed resume protected.
 
 /**
  * Entry point. Wait `startupDelayMs` so windows have fully mounted and
@@ -353,7 +355,7 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   // cancelled and closed before the last poll included: Codex P1, round 3);
   // the rest wait for their window to be opened (resumeRestoredTab).
   for (const tabId of firstSeen.keys()) handled.add(tabId);
-  for (const c of candidates) preparing.add(c.tabId);
+  for (const c of candidates) preparing.set(c.tabId, c.pidAt);
   finishStartup();
   const waiting = tabToBest.size - candidates.length;
   if (waiting > 0) console.log(`[auto-resume] ${waiting} session(s) wait for their window to be opened`);
@@ -419,7 +421,7 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
  * launch-time pass and a tab restored later (resumeRestoredTab).
  */
 async function queueResume(e, delayMs) {
-  preparing.add(e.tabId);
+  preparing.set(e.tabId, e.pidAt);
   try { await queueResumeNow(e, delayMs); } finally { preparing.delete(e.tabId); }
 }
 
@@ -554,7 +556,7 @@ export async function resumeRestoredTab(tabId) {
   const info = launchEligible.get(tabId);
   if (!info) { noteResume(tabId, 'window opened later: no session was running here at the last quit'); return; }
   handled.add(tabId);
-  preparing.add(tabId);
+  preparing.set(tabId, listTerminals().find((t) => t.id === tabId)?.pid ?? null);
   try { await resumeRestoredDecided(tabId, info); } finally { preparing.delete(tabId); }
 }
 

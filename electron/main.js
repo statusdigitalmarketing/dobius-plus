@@ -3344,7 +3344,8 @@ function setupHeadroomHandlers() {
     keyFor: (dir) => { try { return keychainServiceFor(dir); } catch { return null; } },
     login: (dir) => loginState(dir),
     nlink: (p) => fs.promises.stat(p).then((st) => st.nlink),
-    stop: (pid) => process.kill(pid, 'SIGHUP'), // what closing its PTY would send
+    // What closing its PTY would send. A stopped Claude must not keep a typed auto-resume's stamp (see endTypedResumes).
+    stop: (pid) => { process.kill(pid, 'SIGHUP'); endTypedResumes(); },
     alive: (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } },
     claim: (sessionId, tabId) => claimSessionResume(sessionId, tabId),
     release: (sessionId, tabId) => releaseSessionResume(sessionId, tabId),
