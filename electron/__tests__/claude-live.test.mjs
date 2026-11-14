@@ -186,20 +186,19 @@ ok('empty/null input is not live');
     '\u001bP' + 'a'.repeat(245758) + '\n' + '\u001b[400G' + '\u001b[B'.repeat(5458),
     '\u001b[400C'.repeat(43000),
   ];
-  // 300ms on an idle Mac (the code before 095453b takes ~400ms there), scaled by the load per core, fastest of three
-  // runs: this Mac routinely sits at load 20+ on 18 cores with dozens of sessions, and a single 302ms run failed a
-  // release preflight on 2026-11-14 with nothing wrong in the code.
-  // Capped at 4x, and a sandbox that reports no CPUs or no load gets the idle budget, never an unbounded one.
-  const perCore = os.loadavg()[0] / Math.max(1, os.cpus().length);
-  const budget = 300 * Math.min(4, Math.max(1, Number.isFinite(perCore) ? perCore : 1));
+  // CPU time of stripAnsi alone, fastest of three runs, not wall time: wall time on this Mac (load 20+ on 18 cores with
+  // dozens of sessions) failed two release preflights on 2026-11-14 with nothing wrong in the code, and a budget scaled
+  // by load average admits the regression once the load drops (Codex P2, PR #15). Measured 2026-11-14, 10 calls on the
+  // first input: 80 to 150ms now, 250 to 480ms for the code before 095453b, so 250ms separates them either way.
+  // claudeTuiPresent strips through the same scanner, so it is covered by this bound.
+  const cpuMs = (f) => { const c0 = process.cpuUsage(); f(); const c = process.cpuUsage(c0); return (c.user + c.system) / 1000; };
   for (const r of amp) {
     let best = Infinity;
-    for (let tries = 0; tries < 3 && best >= budget; tries += 1) {
-      const t0 = Date.now();
-      for (let n = 0; n < 10; n += 1) { stripAnsi(r, 4096); claudeTuiPresent(r); }
-      best = Math.min(best, Date.now() - t0);
+    for (let tries = 0; tries < 3 && best >= 250; tries += 1) {
+      best = Math.min(best, cpuMs(() => { for (let n = 0; n < 10; n += 1) stripAnsi(r, 4096); }));
     }
-    assert.ok(best < budget, `10 calls took ${best}ms at best of 3 (budget ${Math.round(budget)}ms at this load)`);
+    assert.ok(best < 250, `10 stripAnsi calls took ${best.toFixed(0)}ms of CPU at best of 3 (budget 250ms)`);
+    claudeTuiPresent(r);
   }
   ok('tail mode equals the full strip tail and stays fast on cursor-motion runs');
 }
