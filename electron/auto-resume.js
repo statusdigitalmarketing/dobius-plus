@@ -568,9 +568,9 @@ async function queueResumeNow(e, delayMs) {
     };
     const fire = async () => {
       if (entry.cancelled) return;
-      // One write at a time, spaced by the size of the one before it (Codex P1/P2, impl round 20): the gate is taken
-      // here, at the write, not when the timer was set, so the time a claim took and slots never used do not count.
-      const slot = writeGate.take(writeGapMs(e.sizeMB, getAutoResume().staggerMs));
+      // One attempt at a time from here to the write, and the room after a write counted from the write itself
+      // (Codex P1/P2, impl rounds 20 and 21): slow checks or slots never used do not let two writes start together.
+      const slot = writeGate.take();
       if (slot.waitMs > 0) { entry.timer = setTimeout(fire, slot.waitMs); return; }
       const release = slot.release;
       const giveUpHere = (why) => { release(); giveUp(why); };
@@ -599,6 +599,9 @@ async function queueResumeNow(e, delayMs) {
       }
       queue.delete(e.tabId);
       try {
+        // The room starts at the write (same tick), and stays even if anything after this throws: a write may have
+        // gone out, so the next one still waits (a write that failed costs one gap, never two writes at once).
+        slot.wrote(writeGapMs(e.sizeMB, getAutoResume().staggerMs));
         writeTerminal(e.tabId, cmd);
         typed.set(e.tabId, { sessionId: e.sessionId, at: Date.now(), seq: terminalInputSeq(e.tabId), pid: e.pidAt });
         // A new run: doubt carried from before the quit ends here, or a crash after this launch would still measure
@@ -629,22 +632,28 @@ export function writeGapMs(sizeMB, staggerMs) {
 }
 /**
  * One resume write at a time, for every path (the launch pass, a window opened later, a tab released by phone mode's
- * sweep). `take(gapMs)` answers `{ waitMs }` while the last write's room has not passed, else takes the gate and
- * answers `{ waitMs: 0, release }`; `release()` gives the room back when that write did not happen (only while no
- * later write has taken the gate). Nothing is reserved ahead of time, so a cancelled resume holds up nobody.
+ * sweep). `take()` answers `{ waitMs }` while another attempt holds the gate (its write-time checks are still running)
+ * or the last write's room has not passed; else it takes the gate and answers `{ waitMs: 0, wrote, release }`.
+ * `wrote(gapMs)` frees the gate and starts the room at the actual write; `release()` frees it with no room when no
+ * write happened. Nothing is reserved ahead of time, so a cancelled resume holds up nobody (Codex impl rounds 20, 21).
+ * ponytail: an attempt that never calls either (a throw) is treated as gone after `holdMaxMs`; a write after that is
+ * the only way two can overlap, and it needs write-time checks stuck for 30 s.
  */
-export function createWriteGate(now = () => Date.now()) {
+export function createWriteGate(now = () => Date.now(), { holdMaxMs = 30_000, pollMs = 250 } = {}) {
   let freeAt = 0;
   let holder = null;
   return {
-    take(gapMs) {
+    take() {
       const t = now();
+      if (holder && t - holder.at < holdMaxMs) return { waitMs: pollMs };
       if (freeAt > t) return { waitMs: freeAt - t };
-      const before = freeAt;
-      const me = {};
+      const me = { at: t };
       holder = me;
-      freeAt = t + Math.max(0, gapMs || 0);
-      return { waitMs: 0, release: () => { if (holder === me) { holder = null; freeAt = before; } } };
+      return {
+        waitMs: 0,
+        wrote: (gapMs) => { if (holder === me) holder = null; freeAt = Math.max(freeAt, now() + Math.max(0, gapMs || 0)); },
+        release: () => { if (holder === me) holder = null; },
+      };
     },
   };
 }

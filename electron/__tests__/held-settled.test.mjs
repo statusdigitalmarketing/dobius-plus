@@ -73,28 +73,33 @@ test('the launch pass does not wait behind a held tab: it is queued on its own (
   assert.match(loop, /for \(const c of candidates\) if \(!sweepWaits\.has\(c\.tabId\)\) preparing\.delete\(c\.tabId\);/, 'a waiting tab keeps its preparing entry');
 });
 
-test('the write gate: one write at a time, spaced at the write, and an unused slot holds up nobody (Codex impl r20)', async () => {
+test('the write gate: one attempt from its checks to its write, room counted from the write (Codex impl r20, r21)', async () => {
   const ar = await import('../auto-resume.js');
   let t = 1000;
-  const gate = ar.createWriteGate(() => t);
+  const gate = ar.createWriteGate(() => t, { holdMaxMs: 30_000, pollMs: 250 });
   const gap = ar.writeGapMs(2000, 50);
   assert.equal(gap, 4050);
-  // A claim that took 4,050 ms does not matter: the second write is spaced from the first WRITE.
+  // T1 takes the gate; its write-time checks take 4,050 ms. T2 does not pass meanwhile.
+  const t1 = gate.take();
+  assert.equal(t1.waitMs, 0);
   t = 5050;
-  const first = gate.take(gap);
-  assert.equal(first.waitMs, 0);
-  const second = gate.take(gap);
-  assert.equal(second.waitMs, 4050, 'two heavy writes never start together');
+  assert.equal(gate.take().waitMs, 250, 'held while T1 is still checking');
+  // T1 writes now: T2 waits the room from that write, not from when T1 took the gate.
+  t1.wrote(gap);
+  assert.equal(gate.take().waitMs, 4050, 'two heavy writes never start together');
   t = 9100;
-  const third = gate.take(gap);
-  assert.equal(third.waitMs, 0);
-  // That write was given up (a cancel, a refused claim): the room goes back and the next waiter is not held.
-  third.release();
-  const fourth = gate.take(gap);
-  assert.equal(fourth.waitMs, 0, 'a released slot holds up nobody');
-  // A stale release (after a later write took the gate) changes nothing.
-  third.release();
-  assert.equal(gate.take(gap).waitMs, 4050);
+  const t3 = gate.take();
+  assert.equal(t3.waitMs, 0);
+  // That attempt was given up: the gate is free at once and no room is added.
+  t3.release();
+  const t4 = gate.take();
+  assert.equal(t4.waitMs, 0, 'a given-up attempt holds up nobody');
+  // A stale release (another attempt holds the gate now) changes nothing.
+  t3.release();
+  assert.equal(gate.take().waitMs, 250);
+  // An attempt that never answers (a throw) is treated as gone after holdMaxMs.
+  t += 30_000;
+  assert.equal(gate.take().waitMs, 0);
 });
 
 test('writeGapMs: size bounded, missing values are zero', async () => {
@@ -109,7 +114,8 @@ test('every resume write goes through the gate, and every path that gives up rel
   const src = fs.readFileSync(new URL('../auto-resume.js', import.meta.url), 'utf8');
   assert.ok(!/takeWriteSlot|nextWriteAt|nextRestoredAt/.test(src), 'no reservation clock left');
   const fire = src.slice(src.indexOf('const fire = async () => {'), src.indexOf('entry.timer = setTimeout(fire, delayMs);'));
-  assert.match(fire, /const slot = writeGate\.take\(writeGapMs\(e\.sizeMB, getAutoResume\(\)\.staggerMs\)\);\s*if \(slot\.waitMs > 0\) \{ entry\.timer = setTimeout\(fire, slot\.waitMs\); return; \}/);
+  assert.match(fire, /const slot = writeGate\.take\(\);\s*if \(slot\.waitMs > 0\) \{ entry\.timer = setTimeout\(fire, slot\.waitMs\); return; \}/);
+  assert.match(fire, /slot\.wrote\(writeGapMs\(e\.sizeMB, getAutoResume\(\)\.staggerMs\)\);\s*writeTerminal\(e\.tabId, cmd\);/, 'the room starts at the write');
   // After the gate is taken, every return releases it (directly or through giveUpHere), except a written resume.
   const after = fire.slice(fire.indexOf('const release = slot.release;'));
   assert.ok(!/\bgiveUp\(/.test(after.replace('giveUp(why)', '')), 'no bare giveUp after the gate');
