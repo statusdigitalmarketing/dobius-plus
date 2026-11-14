@@ -20,8 +20,9 @@ function fakeSys(procs, { boot = 1000 } = {}) {
   const sent = [];
   const err = (code) => Object.assign(new Error(code), { code });
   const sys = {
-    table, sent, onKill: null,
-    psAll: async () => [...table.values()].map((p) => `${p.pid} ${p.pgid} ${p.ppid ?? 1} ${p.lstart} ${p.command}`).join('\n'),
+    table, sent, onKill: null, psFails: null,
+    // Real ps always lists at least one process (launchd, itself); a listing failure is psAll returning null.
+    psAll: async () => (sys.psFails?.() ? null : [`1 1 0 ${T0} /sbin/launchd`, ...[...table.values()].map((p) => `${p.pid} ${p.pgid} ${p.ppid ?? 1} ${p.lstart} ${p.command}`)].join('\n')),
     psStart: async (pid) => table.get(pid)?.lstart ?? null,
     kill(pid, sig) {
       const targets = pid < 0 ? [...table.values()].filter((p) => p.pgid === -pid) : [table.get(pid)].filter(Boolean);
@@ -236,5 +237,18 @@ test('sweep: each record is judged from its own listing, not one taken before an
     await sweepAtLaunch(sys, store);
     assert.equal(sys.table.has(600), true);
     assert.equal(sys.sent.some(([p]) => p === -600 || p === 600), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('sweep: a failed listing after the cleanup keeps the record (Codex impl r3)', async () => {
+  const { dir, store } = tmpStore();
+  try {
+    store.upsert({ runId: RUN, sessionId: 's1', boot: 1000, pgid: null, claudePid: null, aliveAt: 0 });
+    const sys = fakeSys([{ pid: 650, pgid: 650, lstart: T0, command: `/a/D /a/phone-runner.mjs run ${RUN}` }]);
+    let calls = 0;
+    sys.psFails = () => ++calls >= 2; // the first listing works, every later one fails
+    const r = await sweepAtLaunch(sys, store);
+    assert.deepEqual([...r.blocked], ['s1']);
+    assert.equal(store.read().length, 1);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

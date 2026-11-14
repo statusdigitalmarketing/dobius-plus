@@ -40,6 +40,7 @@ export const MAX_QUEUED_MESSAGES = 32;
 
 // Caps on what a card carries, so 8 cards fit well inside one 256 KB socket line.
 const CAP_TEXT = 1000; // a label, description, title, header
+const CAP_QUESTION = 8000; // under the protocol's 8 KB answer-key cap, so a shortened question can still be answered
 const CAP_INPUT = 4096; // a tool's input shown on a permission card
 const CAP_PLAN = 16384; // a plan's text
 const CAP_QUESTIONS = 20;
@@ -91,10 +92,13 @@ export function requestIdFor(opts) {
   return `r_${crypto.createHash('sha256').update(raw).digest('hex').slice(0, 40)}`;
 }
 
+// `index` is the question's place in the tool input, so an answer is keyed by the ORIGINAL question text even when
+// the card's copy was shortened (Codex P2, impl round 3). The card's text is what the phone answers by.
 function questionsOf(input) {
   const qs = Array.isArray(input?.questions) ? input.questions.slice(0, CAP_QUESTIONS) : [];
-  return qs.map((q) => ({
-    question: cap(q?.question, CAP_TEXT),
+  return qs.map((q, index) => ({
+    index,
+    question: cap(q?.question, CAP_QUESTION),
     header: cap(q?.header, CAP_TEXT),
     multiSelect: q?.multiSelect === true,
     options: (Array.isArray(q?.options) ? q.options.slice(0, CAP_OPTIONS) : []).map((o) => ({
@@ -149,8 +153,14 @@ export function answerMisfit(card, answer) {
 export function resultFor(card, answer, input, suggestions) {
   const base = input && typeof input === 'object' ? input : {};
   if (card.kind === 'question') {
-    const answers = {};
-    for (const q of Object.keys(answer.answers)) answers[q] = answer.answers[q];
+    // Null prototype: a question named "__proto__" is an ordinary key (Codex P2, impl round 3).
+    const answers = Object.create(null);
+    const orig = Array.isArray(base.questions) ? base.questions : [];
+    for (const q of card.questions) {
+      if (!Object.prototype.hasOwnProperty.call(answer.answers, q.question)) continue;
+      const key = typeof orig[q.index]?.question === 'string' ? orig[q.index].question : q.question;
+      answers[key] = answer.answers[q.question];
+    }
     return { behavior: 'allow', updatedInput: { ...base, answers }, decisionClassification: 'user_temporary' };
   }
   if (card.kind === 'plan') {

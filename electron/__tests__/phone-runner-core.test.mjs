@@ -69,7 +69,8 @@ test('resultFor: the SDK results for each answer', () => {
   const q = cardFor('AskUserQuestion', input, { toolUseID: 't1' });
   const r = resultFor(q, ans({ kind: 'question', answers: { 'Which color?': 'Teal (typed)', 'Size?': 'S, L' } }), input);
   assert.equal(r.behavior, 'allow');
-  assert.deepEqual(r.updatedInput.answers, { 'Which color?': 'Teal (typed)', 'Size?': 'S, L' });
+  assert.deepEqual({ ...r.updatedInput.answers }, { 'Which color?': 'Teal (typed)', 'Size?': 'S, L' });
+  assert.equal(Object.getPrototypeOf(r.updatedInput.answers), null);
   assert.equal(r.updatedInput.questions, input.questions);
   const perm = cardFor('Bash', { command: 'ls' }, { toolUseID: 't', suggestions: [{ type: 'addRules' }] });
   const sugg = [{ type: 'addRules' }];
@@ -170,4 +171,27 @@ test('input queue: delivers in order, waits between turns, bounded, closes', asy
   q.close();
   assert.equal((await waiting).done, true);
   assert.equal(q.push('late'), false);
+});
+
+test('a shortened question is answered under its ORIGINAL text (Codex impl r3)', async () => {
+  const long = 'Q'.repeat(9000);
+  const input = { questions: [{ question: long, header: 'h', multiSelect: false, options: [] }, { question: 'Short?', header: 'h', multiSelect: false, options: [] }] };
+  const { r } = router();
+  const p = r.canUseTool('AskUserQuestion', input, { toolUseID: 'q' });
+  const card = r.pendingCards()[0];
+  assert.ok(card.questions[0].question.length < long.length);
+  const answers = { [card.questions[0].question]: 'yes', 'Short?': 'no' };
+  assert.deepEqual(await r.answer('q', ans({ kind: 'question', answers })), { ok: true });
+  const res = await p;
+  assert.deepEqual({ ...res.updatedInput.answers }, { [long]: 'yes', 'Short?': 'no' });
+});
+
+test('a question named __proto__ keeps its answer (Codex impl r3)', async () => {
+  const input = { questions: [{ question: '__proto__', header: 'h', multiSelect: false, options: [] }] };
+  const { r } = router();
+  const p = r.canUseTool('AskUserQuestion', input, { toolUseID: 'q' });
+  assert.deepEqual(await r.answer('q', ans({ kind: 'question', answers: JSON.parse('{"__proto__":"no"}') })), { ok: true });
+  const res = await p;
+  assert.equal(Object.prototype.hasOwnProperty.call(res.updatedInput.answers, '__proto__'), true);
+  assert.equal(JSON.parse(JSON.stringify(res.updatedInput)).answers.__proto__, 'no'); // survives the SDK's JSON
 });

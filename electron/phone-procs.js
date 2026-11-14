@@ -64,6 +64,12 @@ export function parsePsAll(out) {
   return rows;
 }
 
+/** A process listing, or null when ps failed (ps always lists at least itself, so an empty one is a failure too). */
+async function listing(sys) {
+  const rows = parsePsAll(await sys.psAll());
+  return rows.length ? rows : null;
+}
+
 const sameStart = (a, b) => typeof a === 'string' && typeof b === 'string' && a.replace(/\s+/g, ' ') === b.replace(/\s+/g, ' ');
 
 /** 'alive' | 'gone' | 'unknown' for a process group (kill -pgid 0). */
@@ -145,8 +151,8 @@ const MEMBER_ROUNDS = 3; // ponytail: a group that keeps forking past 3 list-and
 /** End a leaderless group's provable members until the group is empty. 'gone' | 'left' (something remains). */
 async function endLeaderless(sys, rec, endOpts, log) {
   for (let round = 0; round < MEMBER_ROUNDS; round++) {
-    const rows = parsePsAll(await sys.psAll());
-    if (rows.length === 0) return 'left'; // ps failed: cannot judge
+    const rows = await listing(sys);
+    if (!rows) return 'left'; // ps failed: cannot judge
     const { kill, keep } = judgeMembers(rows, rec.pgid, rec.runId, rec.aliveAt);
     let left = false;
     for (const r of kill) if ((await endPid(sys, r.pid, r.lstart, endOpts)) !== 'gone') left = true;
@@ -210,8 +216,8 @@ export async function sweepAtLaunch(sys, store, { endOpts } = {}) {
   for (const rec of records) {
     if (boot != null && rec.boot !== boot) { store.remove(rec.runId); log.push(`run ${rec.runId.slice(0, 8)}: earlier boot, dropped`); continue; }
     // A listing taken for THIS record, after any earlier record's cleanup finished awaiting.
-    const rows = boot == null ? [] : parsePsAll(await sys.psAll());
-    if (boot == null || rows.length === 0) { blocked.add(rec.sessionId); log.push(`run ${rec.runId.slice(0, 8)}: cannot check this boot, kept`); continue; }
+    const rows = boot == null ? null : await listing(sys);
+    if (!rows) { blocked.add(rec.sessionId); log.push(`run ${rec.runId.slice(0, 8)}: cannot check this boot, kept`); continue; }
     let left = false;
     if (rec.pgid != null) {
       const leader = rows.find((r) => r.pid === rec.pgid);
@@ -222,7 +228,10 @@ export async function sweepAtLaunch(sys, store, { endOpts } = {}) {
       }
       // A leader alive with a different start is a new process: the old group cannot still exist under its id.
     }
-    for (const r of taggedRows(parsePsAll(await sys.psAll()), rec.runId)) if ((await endPid(sys, r.pid, r.lstart, endOpts)) !== 'gone') left = true;
+    // A failed listing proves nothing about tagged runners (Codex P2, impl round 3): keep the record.
+    const after = await listing(sys);
+    if (!after) left = true;
+    else for (const r of taggedRows(after, rec.runId)) if ((await endPid(sys, r.pid, r.lstart, endOpts)) !== 'gone') left = true;
     if (rec.claudePid != null && rec.claudeStart) {
       if ((await endPid(sys, rec.claudePid, rec.claudeStart, endOpts)) !== 'gone') left = true;
     }
