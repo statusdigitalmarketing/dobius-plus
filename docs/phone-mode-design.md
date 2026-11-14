@@ -71,7 +71,12 @@ shell runs its startup files exactly as for a resume, then runs:
 ```
 cd -- "$cwd" && ELECTRON_RUN_AS_NODE=1 "<Dobius binary>" "<phone-runner.mjs>" gate "$ticket" "$sessionId" \
   && claude --resume "$sessionId"
+ELECTRON_RUN_AS_NODE=1 "<Dobius binary>" "<phone-runner.mjs>" done "$runId"
 ```
+
+The second line runs after the first has completely finished, whatever its outcome: the gate refused, the fallback
+failed to start, or the fallback Claude ran and exited. `done` reads a 0600 one-time token that main wrote for this
+run at the gate's hello (`<run dir>/<runId>.done`, read and unlinked) and tells main the launch command is over.
 
 Two processes, one supervising the other:
 
@@ -255,13 +260,17 @@ Owns a small registry: tabId -> { sessionId, token, socket, status, pending (at 
   when one of these is true:
   - the tab's own Claude is seen running session S (`processSessionIds` for this tab), which then holds it as any
     running Claude does; or
-  - the tab's foreground program has been the shell for 10 s (the gate refused, the fallback failed to start, or the
-    person stopped the resume) AND every process main knows of for the run is confirmed gone: the runner group and
-    the reported Claude pid when a hello was accepted, nothing more when none was (no hello means no Claude was ever
-    started for the run, and a later hello is refused, so that runner can never start one: Codex P2, design round
-    5, an open tab whose fallback failed held the claim forever); or
-  - the tab closed AND main has confirmed the runner group and the reported Claude pid are gone; or
-  - the tab closed before main accepted a hello. The run is marked dead first, so a hello arriving later is refused
+  - main received `done` for the run (the launch command is over, so no fallback can still start: Codex P1, design
+    round 7, a shell idle at its prompt is not proof, since a shell stopped between the gate and `claude --resume`
+    looks idle and can run the fallback much later) AND every process main knows of for the run is confirmed gone:
+    the runner group and the reported Claude pid when a hello was accepted, nothing more when none was (no hello
+    means no Claude was ever started for the run, and a later hello is refused, so that runner can never start one:
+    Codex P2, design round 5). If `done` itself cannot run, the claim stays held until the tab closes; that is the
+    safe side; or
+  - the tab closed AND its shell process is confirmed gone (main SIGKILLs it 5 s after the close if it is still
+    there, so a stopped shell cannot carry a pending fallback past the release) AND main has confirmed the runner
+    group and the reported Claude pid are gone; or
+  - the tab closed before main accepted a hello, with its shell confirmed gone the same way. The run is marked dead first, so a hello arriving later is refused
     and that runner exits without starting Claude (Codex P2, design round 3: with no Claude pid, none of the other
     conditions could ever become true and the claim held the session until Dobius restarted).
   **Cleanup does not depend on the runner** (Codex P2, design round 3: a runner stopped with SIGSTOP handles neither
