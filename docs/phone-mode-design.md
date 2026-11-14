@@ -69,12 +69,21 @@ When a tab moves to the phone, main stops the tab's Claude and restarts the tab'
 shell runs its startup files exactly as for a resume, then runs:
 
 ```
-cd -- "$cwd" && ELECTRON_RUN_AS_NODE=1 "<Dobius binary>" "<phone-runner.mjs>"; claude --resume "$sessionId"
+cd -- "$cwd" && ELECTRON_RUN_AS_NODE=1 "<Dobius binary>" "<phone-runner.mjs>" run "$ticket";
+ELECTRON_RUN_AS_NODE=1 "<Dobius binary>" "<phone-runner.mjs>" gate "$sessionId" && claude --resume "$sessionId"
 ```
 
-The second command is the take-back: whenever the runner exits, for any reason (Enter at the Mac, Give back on the
-phone, an error starting the SDK, a crash), the tab resumes the conversation in the normal Claude TUI. The
-conversation always ends up back on the Mac, never stranded.
+The last line is the take-back: whenever the runner exits, for any reason (Enter at the Mac, Give back on the phone,
+an error starting the SDK, a crash, a SIGKILL), the tab resumes the conversation in the normal Claude TUI, so it
+always ends up back on the Mac. But only through the **gate**, a separate short process that survives whatever
+happened to the runner (Codex P1, design round 1: a runner killed with SIGKILL cannot wait for its own child, and a
+killed parent does not take its child with it). The gate reads Claude's own process records
+(`<configDir>/sessions/<pid>.json`) and waits until no live process holds the session. A Claude still holding it after
+10 s whose record names this session and whose parent is gone (the orphaned SDK child) gets SIGTERM, then SIGKILL
+after 5 s more. If a process still holds the session after that, or one that is not the orphan (another tab), the gate
+prints why and exits non-zero: the tab is left at a shell prompt with the exact `claude --resume` line to run, and
+nothing starts a second writer. Main's claim gate (`claimSessionResume`) also still sees that process, so no other
+surface can start one either.
 
 Why the runner lives in the tab and not in main:
 
@@ -109,6 +118,14 @@ supported way to drive Claude Code with structured input and callbacks.
 - Streaming input (an async queue of user messages), so the query stays alive between turns and background-task
   messages keep flowing.
 
+Packaging: the SDK loads `@modelcontextprotocol/sdk` (which pulls zod, ajv, hono), about 60 MB installed. The runner is
+bundled into one file at build time (esbuild, already present through Vite), so only the code the runner reaches ships,
+and `node_modules/@anthropic-ai/claude-agent-sdk*` is excluded from the app's files.
+
+Terms: the SDK's license points to Anthropic's legal agreements, whose Agent SDK guidance asks third-party products not
+to offer claude.ai login. Dobius offers no login: the runner drives the person's own installed `claude` with whatever
+login that CLI already has, exactly as the TUI tab does (and as Happy does). Flagged to Sam, not decided here.
+
 Alternative considered: speak the CLI's stream-json control protocol ourselves (`--input-format stream-json
 --permission-prompt-tool stdio`) with no dependency. Rejected for v1: the protocol is the SDK's internal contract, not a
 documented API, and the SDK is what Anthropic maintains against each CLI release.
@@ -126,6 +143,11 @@ The runner's `canUseTool(toolName, input, { signal, suggestions, toolUseID })`:
   mode run first). It goes to the phone as a permission card. Allow returns allow with the original input; Always
   allow also returns `updatedPermissions: suggestions` (the same rule the TUI's "don't ask again" saves); Deny returns
   deny with the note, or Happy's default deny text.
+- The card's sentence is the SDK's own `title` ("Claude wants to read foo.txt") with `description` under it, falling
+  back to the tool name and input only when a CLI predates them. When the SDK sets `defaultToNo`, the card has no
+  one-tap Allow (Allow sits behind a second confirm, as the TUI opens such a prompt on its decline option). When it
+  sets `suppressAlwaysAllowRule`, there is no Always allow. MCP server names (`mcpServer.name`) are shown as untrusted
+  text.
 - Each pending request has an id (`toolUseID`, scoped by `agentID` for subagents, as Happy does). An answer names the
   id; an answer for an id that is not pending is refused, so an answer can never land on a different question.
   The SDK's abort signal removes a pending request (the turn was stopped) and the phone is told.
@@ -136,8 +158,13 @@ Owns a small registry: tabId -> { sessionId, token, socket, status, pending (at 
 
 - **Socket.** One unix socket, `<userData>/run/phone.sock`, in a 0700 folder (a short path under the temp dir when the
   userData path is too long for a socket). Newline-delimited JSON, each line capped at 256 KB, a connection that sends
-  more is closed. A runner proves itself with its one-time 256-bit token (from its env, set at spawn, bound to the tab
-  and session); the token is never logged and dies with the run.
+  more is closed. A runner proves itself with a one-time 256-bit token bound to the tab and session. The token never
+  travels in env or argv (both readable with `ps eww`, and env is inherited by Claude, its Bash commands and MCP
+  servers, where a diagnostic could print it into the transcript and the phone's chat: Codex P2, design round 1).
+  Main writes it to a 0600 **ticket file** in the 0700 run folder; the launch passes only the ticket's path; the runner
+  reads it, deletes it, and connects. The SDK gets an explicit `env`: the runner's own environment minus every
+  `DOBIUS_PHONE_*` name. A ticket not redeemed within 60 s is deleted by main. The token is never logged and dies with
+  the run.
 - **Start (phone asks):** setting on, macOS, a desktop tab owned by a window, at most 4 phone runs at once, one start
   at a time (a lock). Then the same checks and order as the account move (`account-headroom-service.js moveOne`, which
   survived many review rounds): Claude is the sole program in the shell, its record names a session with a
@@ -154,7 +181,16 @@ Owns a small registry: tabId -> { sessionId, token, socket, status, pending (at 
 - **While on the phone**, the session counts as live: `liveClaudeSessionIds` and the claim gate include it, so no
   other surface resumes it (auto-resume, History, another tab, the phone's own Resume).
   - Every path that types into a tab already refuses here, because the foreground program is the runner, not Claude:
-    dobius-send, /openTab, team delivery, voice routing, the selector card. The phone's own `submitPrompt` for a
+    dobius-send, /openTab, team delivery, voice routing, the selector card. Not trusted alone: the choke points
+    (`sendToTab`, `answerSelector`, `submitPromptDetailed`) also refuse a phone-mode tab by name.
+  - The phone's raw `input` route (`mobile-tab-ops.js handleTabOp` to `writeRawInput`) writes to the PTY without
+    looking at its foreground program, so a phone Enter delayed past the switch would reach the runner and take the
+    conversation back (Codex P2, design round 1). Every phone-originated tab write (`input`, `submitPrompt`,
+    `selectorKey`, `resize` included) records the tab's **phone generation** when it is accepted, and is refused at
+    the moment it is written (the existing `stillOk` check, which already runs right before a queued write) if the
+    tab is in phone mode or its generation changed since. The desktop window's own keystrokes are not gated: they are
+    how Enter takes it back.
+  - The phone's own `submitPrompt` for a
     phone-mode tab is answered `opError: on_phone` (the phone uses `phoneSend` instead).
   - The account move and auto-move refuse a phone-mode tab by name. Snooze refuses it too. Tear-off and dock move the
     PTY as today; the runner keeps running.
@@ -169,14 +205,21 @@ Offered only when the Mac's setting is on: `authed.features` includes `phone`.
 | Request | Answer | Effect |
 |---|---|---|
 | `phoneTake {id, reqId}` | `ack` or `opError {code, error}` | Starts the move |
-| `phoneSend {id, text, sendId}` | `ack` or `opError` | Sends a message; the same `sendId` twice is sent once |
-| `phoneAnswer {id, requestId, answer}` | `ack` or `opError` | Answers one pending card |
-| `phoneStop {id}` | `ack` | Interrupts the current turn |
-| `phoneGiveBack {id}` | `ack` | Ends phone mode; the tab resumes on the Mac |
+| `phoneSend {id, runId, text, sendId}` | `ack` or `opError` | Sends a message; the same `sendId` twice is sent once |
+| `phoneAnswer {id, runId, requestId, answer}` | `ack` or `opError` | Answers one pending card |
+| `phoneStop {id, runId}` | `ack` | Interrupts the current turn |
+| `phoneGiveBack {id, runId}` | `ack` | Ends phone mode; the tab resumes on the Mac |
 | `phoneStateGet {id}` | `phoneState` | Current state |
 
-Pushed to every socket that authorized the tab: `phoneState {id, on, status: starting|idle|working|waiting|ending,
-pending: [...], error?}`. A pending item is `{requestId, kind: question|permission|plan, tool, questions?, summary?,
+Every request that changes something (`phoneSend`, `phoneAnswer`, `phoneStop`, `phoneGiveBack`) carries the `runId`
+the phone was shown. A run id is 128 random bits, new for every move to the phone, and dies with the run. A request
+whose `runId` is not the tab's current run is refused `opError: stale_run`, so a message written for one conversation
+can never reach another that took over the same tab later (Codex P1, design round 1: a stalled `phoneSend` arrived
+after the tab went back to the Mac and moved to the phone again on a different session). `phoneAnswer` is also bound
+to its `requestId`, which must be pending in that run.
+
+Pushed to every socket that authorized the tab: `phoneState {id, runId, sessionId, on, status:
+starting|idle|working|waiting|ending, pending: [...], error?}`. A pending item is `{requestId, kind: question|permission|plan, tool, questions?, summary?,
 input? (capped at 4 KB), canAlways}`.
 
 `answer` is one of `{kind: 'question', answers: {[question]: string}}`, `{kind: 'permission', allow, always?, note?}`,
@@ -199,7 +242,8 @@ every `phone*` request answers `opError: off`.
 - **Two writers on one transcript** is the failure that matters. The TUI Claude is confirmed exited before the runner
   starts, the session is claimed for the tab, and while the runner lives its claude child's own record holds the
   session. The runner exits only after its claude child has exited (it waits for the SDK's process to end, SIGTERM
-  after 10 s, SIGKILL after 5 more), and only then does the launch script start the TUI resume.
+  after 10 s, SIGKILL after 5 more), and the launch script starts the TUI resume only through the gate, which checks
+  that no process holds the session whatever happened to the runner.
 - **Bounded:** at most 4 runs, 8 pending cards per run, 64 remembered send ids per tab, 256 KB per socket line, the
   Mac log lines capped at 2,000 characters each. The runner keeps no history: the transcript is the record.
 - **Nothing is typed and nothing is eval'd.** Phone text becomes an SDK user message. The launch script passes the
@@ -238,8 +282,7 @@ text, subagent-scoped request ids), the streaming input queue that keeps the que
 ## Questions for review
 
 1. Is the runner-in-the-tab split right, or should the SDK run in a utility process owned by main?
-2. Is "always resume in the TUI after the runner exits" safe in every exit path (including a runner killed while its
-   claude child is still alive)?
+2. Is the gate enough to make the TUI resume safe in every exit path?
 3. Is the auto "ask it again" message acceptable, or should the phone show the interrupted prompt and let the person
    decide?
 4. Anything in the start sequence that differs from `moveOne` and should not.
