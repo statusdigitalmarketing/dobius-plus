@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createPhoneRegistry, MAX_PENDING, MAX_SEND_IDS, MAX_GENS, GEN_RESERVE } from '../phone-registry.js';
+import { createPhoneRegistry, MAX_PENDING, MAX_SEND_IDS, MAX_GENS, EPOCH_SPAN } from '../phone-registry.js';
 
 const S1 = '11111111-1111-1111-1111-111111111111';
 const S2 = '22222222-2222-2222-2222-222222222222';
@@ -81,12 +81,12 @@ test('a full map drops a tab that is no longer live before any live one (Codex i
   let d0 = 0;
   for (let i = 0; i < MAX_GENS + 5; i++) { const b = reg.begin(`D${i}`, `s-${i}`); reg.cancel(b.run); if (i === 0) d0 = reg.gen('D0'); }
   assert.equal(reg.gen('T0'), mine, 'the live tab keeps its generation');
-  assert.ok(reg.gen('D0') > d0, 'a dropped tab falls back to a base above the generations it had');
+  assert.notEqual(reg.gen('D0'), d0, 'a dropped tab falls back to a base it never had');
   reg.cancel(run);
 });
 
 test('a live tab dropped from a full map never gets back a generation it had (Codex impl r10)', () => {
-  const reg = createPhoneRegistry({ now: () => 1_000_000 });
+  const reg = createPhoneRegistry();
   const seen = new Map(); // tab -> every generation it was shown
   const look = (id) => { const g = reg.gen(id); if (!seen.has(id)) seen.set(id, new Set()); seen.get(id).add(g); return g; };
   const before = look('T0');
@@ -99,8 +99,7 @@ test('a live tab dropped from a full map never gets back a generation it had (Co
     look(id);
   }
   // Every tab is live (default isLive), so T0, T1 and T2 were dropped.
-  const now0 = reg.gen('T0');
-  assert.ok(now0 > before, 'T0 is not back at the generation a frame typed before its move carries');
+  assert.notEqual(reg.gen('T0'), before, 'T0 is not back at the generation a frame typed before its move carries');
   for (const id of ['T0', 'T1', 'T2']) {
     const g = reg.gen(id);
     assert.ok(![...seen.get(id)].includes(g), `${id} never gets an old generation back`);
@@ -110,45 +109,40 @@ test('a live tab dropped from a full map never gets back a generation it had (Co
   assert.equal(reg.gen('T1'), reg.gen('never-moved-a'));
 });
 
-test('a restart with the clock set back never reissues a generation (Codex impl r11)', () => {
-  let saved = 0;
-  const writes = [];
-  const highWater = { read: () => saved, reserve: (c) => { writes.push(c); saved = c; } };
-  const a = createPhoneRegistry({ now: () => 1_000_000, highWater });
+test('a later launch never reissues a generation, whatever the clock (Codex impl r11, r12)', () => {
+  // Two launches draw different epochs; nothing is read from disk or the clock.
+  const draws = [7, 8];
+  const a = createPhoneRegistry({ epoch: () => draws.shift() });
   const handed = new Set([a.gen('T')]);
   const { run } = a.begin('T', S1);
   handed.add(a.gen('T'));
   a.end(run, 'ended');
   handed.add(a.gen('T'));
-  const top = Math.max(...handed);
-  assert.ok(saved >= top, 'the ceiling is saved before any generation under it is used');
-  assert.equal(writes.length, 1, 'one write covers the reserve');
-  const b = createPhoneRegistry({ now: () => 1_000_002, highWater });
-  assert.ok(b.gen('T') > top, 'the new launch starts above everything the last one handed out');
-  assert.ok(!handed.has(b.gen('T')));
+  const b = createPhoneRegistry({ epoch: () => draws.shift() });
+  assert.ok(!handed.has(b.gen('T')), 'the restarted tab has none of the old generations');
+  for (const g of [...handed, b.gen('T')]) assert.ok(Number.isSafeInteger(g) && g >= 0);
 });
 
-test('the ceiling is raised before a generation past it is used', () => {
-  let saved = 0;
-  const highWater = { read: () => saved, reserve: (c) => { saved = c; } };
-  let t = 5_000_000;
-  const reg = createPhoneRegistry({ now: () => t, highWater });
-  for (let i = 0; i < 3; i++) {
-    t += GEN_RESERVE * 2; // the clock runs past the reserve
-    const { run } = reg.begin(`T${i}`, `s-${i}`);
-    assert.ok(reg.gen(`T${i}`) <= saved, 'never above the saved ceiling');
+test('epochs: random, below 2^31, every generation a safe integer, a used-up epoch replaced by an unused one', () => {
+  const real = createPhoneRegistry();
+  assert.ok(Number.isSafeInteger(real.gen('T')) && real.gen('T') >= EPOCH_SPAN);
+  // The highest epoch's last generation is still safe.
+  assert.ok(Number.isSafeInteger((2 ** 31 - 1) * EPOCH_SPAN + EPOCH_SPAN - 1));
+  // Out-of-range or repeated draws are drawn again.
+  const draws = [0, 2 ** 31, 1.5, 5, 5, 6];
+  const reg = createPhoneRegistry({ epoch: () => draws.shift() });
+  assert.equal(reg.gen('T'), 5 * EPOCH_SPAN);
+  const seen = new Set([reg.gen('T')]);
+  const fresh = () => { const g = reg.gen('T'); assert.ok(!seen.has(g), `generation ${g} issued twice`); seen.add(g); };
+  // Use up the epoch: each begin and cancel issues two generations, every one of them new.
+  while (seen.size < EPOCH_SPAN + 4) {
+    const { run } = reg.begin('T', S1);
+    fresh();
     reg.cancel(run);
-    assert.ok(reg.gen(`T${i}`) <= saved);
+    fresh();
   }
-});
-
-test('generations follow the clock, so a registry started later is above an earlier one', () => {
-  let t = 1_000_000;
-  const a = createPhoneRegistry({ now: () => t });
-  const before = Math.max(a.gen('T1'), a.gen('T2'), a.gen('T3'));
-  t += 1000; // a restart takes far longer than a millisecond per generation handed out
-  const b = createPhoneRegistry({ now: () => t });
-  assert.ok(b.gen('T1') > before);
+  assert.equal(draws.length, 0, 'the repeated 5 was refused and 6 drawn');
+  assert.ok(reg.gen('T') >= 6 * EPOCH_SPAN && reg.gen('T') < 7 * EPOCH_SPAN);
 });
 
 test('tokens: one use each, kind-bound, and a reused token ends the run loudly', () => {

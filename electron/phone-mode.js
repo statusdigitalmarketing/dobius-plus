@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createPhoneRegistry } from './phone-registry.js';
 import {
-  realSys, parsePsAll, groupState, pidState, endGroup, endPid, taggedRows, createRunStore, createGenCeilingStore, sweepAtLaunch,
+  realSys, parsePsAll, groupState, pidState, endGroup, endPid, taggedRows, createRunStore, sweepAtLaunch,
 } from './phone-procs.js';
 import {
   ensureRunDir, ticketPath, donePath, writeTokenFile, dropTokenFile, startPhoneSocket,
@@ -53,11 +53,7 @@ export function createPhoneMode(d) {
   const log = d.log || (() => {});
   const now = d.now || Date.now;
   // isLive is asked only when the generation map is full (2000 tabs moved in one launch).
-  const reg = createPhoneRegistry({
-    now,
-    isLive: (id) => { try { return d.tabs().some((t) => t.id === id); } catch { return true; } },
-    highWater: createGenCeilingStore(path.join(d.userData, 'phone-gen.json'), log),
-  });
+  const reg = createPhoneRegistry({ isLive: (id) => { try { return d.tabs().some((t) => t.id === id); } catch { return true; } } });
   const store = createRunStore(path.join(d.userData, 'phone-runs.json'), log);
   const conns = new Map(); // runId -> runner connection
   const replies = new Map(); // reqId -> { resolve, timer }

@@ -18,53 +18,60 @@ export const MAX_RUNS = 4;
 export const MAX_PENDING = 8;
 export const MAX_SEND_IDS = 64;
 export const MAX_GENS = 2000; // tab generations remembered; the oldest is forgotten first (it gets a NEW one on next use)
-export const GEN_RESERVE = 10000; // reserved past the newest generation in the saved ceiling (a write when it runs out)
+export const EPOCH_SPAN = 2 ** 22; // generations per epoch; epochs are below 2^31, so every generation is below 2^53
+const randomEpoch = () => crypto.randomInt(1, 2 ** 31);
 
 const LIVE = new Set(['idle', 'working', 'waiting']);
 const hash = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
 const newToken = () => crypto.randomBytes(32).toString('hex');
 
-export function createPhoneRegistry({ maxRuns = MAX_RUNS, now = Date.now, isLive = () => true, highWater = null } = {}) {
+export function createPhoneRegistry({ maxRuns = MAX_RUNS, isLive = () => true, epoch: pickRandom = randomEpoch } = {}) {
   const runs = new Map(); // runId -> run
   const tokens = new Map(); // sha256(token) -> { runId, kind: 'gate' | 'runner' | 'done', used }
-  const gens = new Map(); // tabId -> generation, only for tabs that moved to the phone at least once
-  // A tab that never moved has the base generation; only a move (and its end and release) gives a tab its
-  // own. Asking about a tab never creates an entry, so lookups of other ids cannot evict a live tab's generation
-  // (Codex P1, impl round 9). Generations never repeat across launches: `highWater` (phone-procs.js
-  // createGenCeilingStore, a file) keeps a ceiling no generation ever handed out exceeds, reserved GEN_RESERVE ahead
-  // before any generation past the old one is used, and a launch starts above it and above the clock. The clock alone
-  // was not enough: a clock set back across a restart reissued generations the last launch had invalidated (Codex P1,
-  // impl round 11). When the map is full the oldest entry of a
-  // tab that is no longer live is dropped, the oldest live one only if every entry is live. A dropped tab falls back to
-  // the base, so dropping an entry newer than the base first raises the base above every generation handed out:
-  // falling back must never give a tab a generation it had before (Codex P1, impl round 10: a live tab dropped back to
-  // the launch base accepted a frame typed before its trip to the phone; a reopened tab id would too). Entries already
-  // below the base need no raise, so it moves at most once per 2000 moves, and then a phone showing a never-moved tab
-  // gets one `stale_view` and refreshes.
-  const hw = highWater || { read: () => 0, reserve: () => {} };
-  let ceiling = 0;
-  let genCounter = 0;
-  /** The next generation: above every earlier one and the clock, and inside the saved ceiling. */
-  const next = (floor = 0) => {
-    genCounter = Math.max(genCounter + 1, now(), floor);
-    if (genCounter > ceiling) { ceiling = genCounter + GEN_RESERVE; hw.reserve(ceiling); }
-    return genCounter;
+  const gens = new Map(); // tabId -> { g, seq }, only for tabs that moved to the phone at least once
+  // Generations are only ever compared for equality (phoneViewGate, take), so all they need is never to repeat. Each
+  // launch draws a random epoch below 2^31 and counts within it: epoch * 2^22 + n. Nothing is saved, so a clock set back,
+  // a failed write or two copies on one userData cannot reissue an old one (Codex P1, impl rounds 11 and 12: the clock,
+  // then a saved ceiling, each could); a repeat across launches needs the same 31-bit epoch drawn twice. An epoch used
+  // up (2^22 generations in one launch) is replaced by a fresh one not used in this launch.
+  // A tab that never moved has the base generation; only a move (and its end and release) gives a tab its own. Asking
+  // about a tab never creates an entry, so lookups of other ids cannot evict a live tab's generation (Codex P1, impl
+  // round 9). When the map is full the oldest entry of a tab that is no longer live is dropped, the oldest live one only
+  // if every entry is live. A dropped tab falls back to the base, so dropping an entry issued after the base first moves
+  // the base to a fresh generation: falling back must never give a tab a generation it had before (Codex P1, impl round
+  // 10). Entries issued before the base need no move (`seq` orders issue within the launch), so it moves at most once
+  // per 2000 moves, and then a phone showing a never-moved tab gets one `stale_view` and refreshes.
+  const usedEpochs = new Set();
+  const newEpoch = () => {
+    for (;;) {
+      const e = pickRandom();
+      if (Number.isSafeInteger(e) && e >= 1 && e < 2 ** 31 && !usedEpochs.has(e)) { usedEpochs.add(e); return e; }
+    }
   };
-  const saved = hw.read();
-  let base = next(Number.isSafeInteger(saved) && saved > 0 ? saved + 1 : 0);
+  let epoch = newEpoch();
+  let n = 0;
+  let seq = 0;
+  const next = () => {
+    if (n >= EPOCH_SPAN) { epoch = newEpoch(); n = 0; }
+    const g = epoch * EPOCH_SPAN + n;
+    n += 1;
+    seq += 1;
+    return { g, seq };
+  };
+  let base = next();
 
   const bumpGen = (tabId) => {
-    const g = next();
+    const e = next();
     gens.delete(tabId);
-    gens.set(tabId, g);
+    gens.set(tabId, e);
     if (gens.size > MAX_GENS) {
       let victim = null;
       for (const id of gens.keys()) { if (id !== tabId && !isLive(id)) { victim = id; break; } }
       const key = victim ?? gens.keys().next().value;
-      if (gens.get(key) > base) base = next();
+      if (gens.get(key).seq > base.seq) base = next();
       gens.delete(key);
     }
-    return g;
+    return e.g;
   };
   const issue = (run, kind) => {
     const t = newToken();
@@ -105,7 +112,7 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS, now = Date.now, isLive
 
   const api = {
     /** The generation a phone write must carry for this tab (the base until it first moves). Never creates an entry. */
-    gen: (tabId) => gens.get(tabId) ?? base,
+    gen: (tabId) => (gens.get(tabId) ?? base).g,
 
     /** The run currently on this tab (any status), or null. */
     runOfTab,
