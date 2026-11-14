@@ -51,9 +51,9 @@ console.log('PASS  a cancel all ends what is owed');
 
 // The parts that need a live PTY, pinned in the source.
 const resume = fs.readFileSync(new URL('../auto-resume.js', import.meta.url), 'utf8');
-assert.match(resume, /writeTerminal\(e\.tabId, cmd\);\s*typed\.set\(e\.tabId, \{ sessionId: e\.sessionId, at: Date\.now\(\) \}\);/, 'a typed resume stays owed until its Claude is seen');
+assert.match(resume, /writeTerminal\(e\.tabId, cmd\);\s*typed\.set\(e\.tabId, \{ sessionId: e\.sessionId, at: Date\.now\(\), seq: terminalInputSeq\(e\.tabId\) \}\);/, 'a typed resume records the input count right after its own write');
 assert.match(resume, /if \(queue\.has\(tabId\)\) return queue\.get\(tabId\)\.sessionId;/, 'a queued resume is owed');
-assert.match(resume, /if \(now - t\.at < RESUME_SIGHT_MS\) return t\.sessionId;/, 'a typed resume is owed for a bounded time');
+assert.match(resume, /if \(now - t\.at < RESUME_SIGHT_MS && terminalInputSeq\(tabId\) === t\.seq\) return t\.sessionId;/, 'a typed resume is owed for a bounded time, and only until anything else is typed into the tab');
 assert.match(resume, /export function forgetClosedTab\(tabId\) \{\s*handled\.add\(tabId\);\s*typed\.delete\(tabId\);/, 'closing the tab ends a typed resume');
 const main = fs.readFileSync(new URL('../main.js', import.meta.url), 'utf8');
 assert.match(main, /if \(mappedIdle && resumeOwedFor\(t\.id\) !== mappedIdle\) clearSessionTabRunning\(mappedIdle\);\s*continue;\s*\}\s*noteTabClaudeSeen\(t\.id\);/, 'the capture spares an owed stamp and notes a Claude it sees');

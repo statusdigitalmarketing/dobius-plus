@@ -69,7 +69,7 @@ const restoredDuringStartup = new Set();
 // from the launch decision until its Claude is first seen running in the tab, it is dropped, or RESUME_SIGHT_MS passes.
 // preparing: decided, not yet queued (a transcript size lookup, a claim). typed: written, its Claude not yet seen.
 const preparing = new Set();
-const typed = new Map(); // tabId -> { sessionId, at }
+const typed = new Map(); // tabId -> { sessionId, at, seq }
 // Bounded: a resume whose Claude never shows up (the shell failed it) stops protecting the stamp after this.
 const RESUME_SIGHT_MS = 10 * 60_000;
 function finishStartup() {
@@ -214,7 +214,9 @@ export function resumeOwedFor(tabId, now = Date.now()) {
   if (!e) return null;
   const t = typed.get(tabId);
   if (t) {
-    if (now - t.at < RESUME_SIGHT_MS) return t.sessionId;
+    // Anything typed into the tab after the resume (a Ctrl+C, another command, from the window or the phone) ends it:
+    // the person may have stopped that Claude before the capture ever saw it (Codex P1, PR 13).
+    if (now - t.at < RESUME_SIGHT_MS && terminalInputSeq(tabId) === t.seq) return t.sessionId;
     typed.delete(tabId);
     return null;
   }
@@ -490,7 +492,7 @@ async function queueResumeNow(e, delayMs) {
       queue.delete(e.tabId);
       try {
         writeTerminal(e.tabId, cmd);
-        typed.set(e.tabId, { sessionId: e.sessionId, at: Date.now() });
+        typed.set(e.tabId, { sessionId: e.sessionId, at: Date.now(), seq: terminalInputSeq(e.tabId) });
         // A new run: doubt carried from before the quit ends here, or a crash after this launch would still measure
         // it only up to that older quit and resume a session stopped since (Codex, PR 7).
         clearSessionTabUncertain(e.sessionId);
