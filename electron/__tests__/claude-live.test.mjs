@@ -189,7 +189,9 @@ ok('empty/null input is not live');
   // 300ms on an idle Mac (the code before 095453b takes ~400ms there), scaled by the load per core, fastest of three
   // runs: this Mac routinely sits at load 20+ on 18 cores with dozens of sessions, and a single 302ms run failed a
   // release preflight on 2026-11-14 with nothing wrong in the code.
-  const budget = 300 * Math.max(1, os.loadavg()[0] / os.cpus().length);
+  // Capped at 4x, and a sandbox that reports no CPUs or no load gets the idle budget, never an unbounded one.
+  const perCore = os.loadavg()[0] / Math.max(1, os.cpus().length);
+  const budget = 300 * Math.min(4, Math.max(1, Number.isFinite(perCore) ? perCore : 1));
   for (const r of amp) {
     let best = Infinity;
     for (let tries = 0; tries < 3 && best >= budget; tries += 1) {
