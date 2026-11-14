@@ -42,7 +42,24 @@ const MESSAGES = {
   cancelled: 'A cancel key dropped the write',
   stranded: 'Pasted, but Enter was withheld because something else typed into the tab',
   write_failed: 'The write failed',
+  stale_view: 'The tab changed since this screen was drawn; reload it',
+  on_phone: 'This conversation is on the phone; send from its phone card',
 };
+
+/**
+ * Phone mode's check on a phone write (docs/phone-mode-design.md, "While on the phone"). `pm` is the phone mode
+ * instance (null when it is not running). A write that names the tab generation it was typed against must match the
+ * tab's current one, so a key delayed past a trip to the phone and back cannot answer a different prompt. A write
+ * without one comes from a phone page older than phone mode (the App Store app bundles its own pages), which never
+ * saw a generation: it is refused only while the tab is on the phone, where it would land on the gate and take the
+ * conversation back.
+ */
+export function phoneViewGate(pm, id, msg) {
+  if (!pm) return null;
+  if (msg.gen === undefined || msg.gen === null) return pm.isPhoneTab(id) ? 'on_phone' : null;
+  if (!Number.isSafeInteger(msg.gen) || msg.gen !== pm.gen(id)) return 'stale_view';
+  return pm.isPhoneTab(id) ? 'on_phone' : null;
+}
 
 /** A client reqId is optional; when present it is a short string or a safe integer. */
 export function validReqId(v) {
@@ -84,6 +101,9 @@ export function tabCandidates(shortId, liveIds) {
  *   submitPrompt(id, text, ok)   chat-service submitPromptDetailed
  *   onAccepted(op, id, msg)      side effects that ran before acks existed
  *                                (selector refresh), once a write is accepted
+ *   viewGate(id, msg)            optional: a refusal code from phone mode
+ *                                (phoneViewGate), checked on arrival and
+ *                                again at the moment of the write
  * Returns a promise that settles after the reply is sent (tests await it).
  */
 export async function handleTabOp(msg, deps) {
@@ -110,17 +130,27 @@ export async function handleTabOp(msg, deps) {
   // non-empty keys (a lone space or Enter is a real keypress).
   if (op === 'submitPrompt' ? !text.trim() : !text) return fail('empty_text');
   if (Buffer.byteLength(text, 'utf8') > deps.maxBytes) return fail('too_large');
+  const gated = deps.viewGate?.(id, msg);
+  if (gated) return fail(gated);
   deps.onAccepted?.(op, id, msg);
+  // Checked again when the write's turn comes: the tab may have moved to the phone while it queued.
+  let gateAtWrite = null;
+  const stillOk = () => {
+    if (!deps.stillOk()) return false;
+    gateAtWrite = deps.viewGate?.(id, msg) || null;
+    return !gateAtWrite;
+  };
   let r;
   try {
     r = op === 'input'
-      ? await deps.writeRawInput(id, text, deps.stillOk)
-      : await deps.submitPrompt(id, text, deps.stillOk);
+      ? await deps.writeRawInput(id, text, stillOk)
+      : await deps.submitPrompt(id, text, stillOk);
   } catch (err) {
     console.error('[mobile] tab write threw:', err?.message || err);
     r = { ok: false, reason: 'write_failed', uncertain: true };
   }
   if (r?.ok) return deps.send({ type: 'ack', op, id, reqId });
+  if (gateAtWrite && r?.reason === 'not_allowed') return fail(gateAtWrite);
   // uncertain: the text reached the tab and may have been submitted by
   // another writer's Enter. A client must not resend it as if unsent.
   const code = REASON_CODES[r?.reason] || 'write_failed';
