@@ -58,4 +58,19 @@ test('auto-resume waits before its launch claim', () => {
   assert.match(main, /setHeldSessions\(\(\) => pm\.heldSessions\(\), \{ pending: \(sid\) => pm\.heldUntilSwept\(sid\), settled: \(\) => pm\.whenSwept\(\) \}\)/);
 });
 
+test('heldSettlePending answers what the owner says, and false on a throw', () => {
+  tm.setHeldSessions(() => new Set([S]), { pending: (sid) => sid === S });
+  assert.equal(tm.heldSettlePending(S), true);
+  assert.equal(tm.heldSettlePending('other'), false);
+  tm.setHeldSessions(() => new Set(), { pending: () => { throw new Error('x'); } });
+  assert.equal(tm.heldSettlePending(S), false);
+});
+
+test('the launch pass does not wait behind a held tab: it is queued on its own (Codex impl r18)', () => {
+  const src = fs.readFileSync(new URL('../auto-resume.js', import.meta.url), 'utf8');
+  const loop = src.slice(src.indexOf('const sweepWaits = new Set();'), src.indexOf('async function queueResume('));
+  assert.match(loop, /if \(heldSettlePending\(e\.sessionId\)\) \{\s*sweepWaits\.add\(e\.tabId\);\s*void queueResume\(e, delayMs\)\.catch\([^\n]*\n\s*continue;\s*\}\s*await queueResume\(e, delayMs\);/);
+  assert.match(loop, /for \(const c of candidates\) if \(!sweepWaits\.has\(c\.tabId\)\) preparing\.delete\(c\.tabId\);/, 'a waiting tab keeps its preparing entry');
+});
+
 test.after(() => { tm.setHeldSessions(() => new Set()); fs.rmSync(process.env.DOBIUS_TEST_USERDATA, { recursive: true, force: true }); });

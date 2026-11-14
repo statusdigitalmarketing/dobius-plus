@@ -1119,10 +1119,11 @@ export function setHeldSessions(fn, opts = {}) {
  * Wait, at most `maxMs`, while `sessionId` is held only until the hold's owner has started (phone mode's launch sweep).
  * Returns at once when it is not. Past the cap the caller claims anyway and is refused: the safe side.
  */
+export function heldSettlePending(sessionId) {
+  try { return heldSettle.pending(sessionId) === true; } catch { return false; }
+}
 export async function waitHeldSettled(sessionId, maxMs = 60_000) {
-  let pending = false;
-  try { pending = heldSettle.pending(sessionId) === true; } catch { pending = false; }
-  if (!pending) return;
+  if (!heldSettlePending(sessionId)) return;
   let timer = null;
   try {
     await Promise.race([

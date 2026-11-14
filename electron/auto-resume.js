@@ -31,7 +31,7 @@
 
 import { getAutoResume, getSessionTabMap, loadConfig, clearSessionTabUncertain, getPreviousLaunchAt } from './config-manager.js';
 import {
-  listTerminals, writeTerminal, releaseSessionResume, claimSessionResume, waitHeldSettled,
+  listTerminals, writeTerminal, releaseSessionResume, claimSessionResume, waitHeldSettled, heldSettlePending,
   getTerminalWebContentsId,
   terminalInputSeq, terminalBusy,
 } from './terminal-manager.js';
@@ -468,13 +468,22 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   // inside about a second (Codex Medium). Tiny sessions still go at full
   // speed; only the expensive ones buy extra room.
   let cumulativeMs = 0;
+  // A tab whose session waits for phone mode's launch sweep (queueResumeNow) is queued on its own, so the tabs after
+  // it keep their stagger instead of waiting up to a minute behind it (Codex P2, impl round 18). It clears its own
+  // `preparing` entry when it settles.
+  const sweepWaits = new Set();
   for (const e of eligible) {
     const delayMs = cumulativeMs;
     cumulativeMs += cfg.staggerMs + Math.round(Math.min(e.sizeMB || 0, 2000) * 2);
+    if (heldSettlePending(e.sessionId)) {
+      sweepWaits.add(e.tabId);
+      void queueResume(e, delayMs).catch((err) => console.warn(`[auto-resume] ${e.tabId}: ${err?.message || err}`));
+      continue;
+    }
     await queueResume(e, delayMs);
   }
-  // Every one is queued or dropped by now (queueResume clears its own; this covers a throw).
-  for (const c of candidates) preparing.delete(c.tabId);
+  // Every other one is queued or dropped by now (queueResume clears its own; this covers a throw).
+  for (const c of candidates) if (!sweepWaits.has(c.tabId)) preparing.delete(c.tabId);
 }
 
 /**
