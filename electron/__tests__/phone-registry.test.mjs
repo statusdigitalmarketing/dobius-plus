@@ -17,7 +17,7 @@ function live(reg, tab = 'T1', sid = S1) {
   assert.equal(reg.redeem(a.runnerToken, 'runner').ok, true);
   assert.equal(reg.acceptRunner(b.run, 600, true).ok, true);
   assert.equal(reg.noteClaude(b.run, 700, 'Sat Nov 14 10:00:01 2026'), true);
-  return { run: b.run, gateToken: b.gateToken, runnerToken: a.runnerToken, doneToken: a.doneToken };
+  return { run: b.run, gateToken: b.gateToken, runnerToken: a.runnerToken, doneToken: b.doneToken };
 }
 
 test('one run per tab, one claim per session, at most 4 runs', () => {
@@ -266,4 +266,22 @@ test('stateOf: no tokens or pids reach the phone', () => {
   const t9 = reg.stateOf('T9');
   assert.deepEqual(Object.keys(t9).sort(), ['gen', 'id', 'on']);
   assert.equal(t9.on, false);
+});
+
+test('done for a run whose gate never ran releases at once (no hello, nothing to clean)', () => {
+  const reg = createPhoneRegistry();
+  const b = reg.begin('T1', S1);
+  const d = reg.redeem(b.doneToken, 'done');
+  assert.equal(d.ok, true);
+  reg.noteDone(b.run);
+  assert.deepEqual(reg.settle(b.run), { released: 'done', forgotten: true });
+  assert.equal(reg.claimOf(S1), null);
+});
+
+test('done tokens are one-use and kind-bound like the others', () => {
+  const reg = createPhoneRegistry();
+  const b = reg.begin('T1', S1);
+  assert.equal(reg.redeem(b.doneToken, 'gate').code, 'bad_token');
+  assert.equal(reg.redeem(b.doneToken, 'done').ok, true);
+  assert.equal(reg.redeem(b.doneToken, 'done').code, 'reused');
 });

@@ -94,8 +94,9 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS, now = Date.now } = {})
     },
 
     /**
-     * Reserve a run for a move to the phone, before the TUI is stopped. Returns { ok, run, gateToken } or
-     * { ok: false, code }. The claim is held from here.
+     * Reserve a run for a move to the phone, before the TUI is stopped. Returns { ok, run, gateToken, doneToken } or
+     * { ok: false, code }. The claim is held from here. The done token exists from the start, so `done` can end a
+     * run whose gate never ran (its folder was gone): with no accepted hello no runner can start a Claude.
      */
     begin(tabId, sessionId) {
       if (runOfTab(tabId)) return { ok: false, code: 'busy' };
@@ -111,7 +112,7 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS, now = Date.now } = {})
       };
       runs.set(run.runId, run);
       bumpGen(tabId);
-      return { ok: true, run, gateToken: issue(run, 'gate') };
+      return { ok: true, run, gateToken: issue(run, 'gate'), doneToken: issue(run, 'done') };
     },
 
     /**
@@ -132,14 +133,14 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS, now = Date.now } = {})
       return { ok: true, run, kind };
     },
 
-    /** The gate's hello (after `redeem(token, 'gate')`). Returns { ok, runnerToken, doneToken } or a refusal. */
+    /** The gate's hello (after `redeem(token, 'gate')`). Returns { ok, runnerToken } or a refusal. */
     acceptGate(run, gatePid) {
       if (run.status !== 'starting' || run.stage !== 'gate' || run.tabClosed) return { ok: false, code: 'not_starting' };
       if (!Number.isSafeInteger(gatePid) || gatePid <= 1) return { ok: false, code: 'bad_pid' };
       run.gatePid = gatePid;
       run.gateAccepted = true;
       run.stage = 'runner';
-      return { ok: true, runnerToken: issue(run, 'runner'), doneToken: issue(run, 'done') };
+      return { ok: true, runnerToken: issue(run, 'runner') };
     },
 
     /** The gate reports the runner it spawned (pid, start time; its group id is its pid). */
