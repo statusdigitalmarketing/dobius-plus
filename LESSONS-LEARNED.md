@@ -1171,3 +1171,9 @@
 - **FIX**: Moved the prune into `pruneEchoes` / `ageEchoes` in mobile/phone-mode.js and decide "changed" by array identity from the helper, not by length. Confirmed messages stay as hidden placeholders while one with the same words waits, so their rows stay theirs across polls and visits.
 - **CONTEXT**: Any state update that short-circuits on `length` breaks the moment an item is replaced instead of removed. Test multi-poll behaviour (call the reducer twice on the same rows), not one call.
 - **DETECTION**: `grep -n "kept.length === cur.length" mobile/*.jsx`
+
+### Architecture - 2026-11-14
+- **MISTAKE**: Phone message bubbles were cleared by matching transcript TEXT (rounds 27 to 29 kept tightening it: baselines, one row per message, hidden placeholders). Codex r30 broke it again: another phone sending the same words writes a genuinely new row that no text rule can tell from ours, so an unconfirmed message lost its bubble and Send again.
+- **FIX**: A transcript row may only clear a message the Mac already said it took (ack, or `duplicate` on Send again). A message whose answer was lost keeps its bubble until its OWN sendId settles it via Send again, or Remove. Deleted the placeholder machinery that existed only to make text matching safe.
+- **CONTEXT**: When identity is not in the data (rows have no sendId), no heuristic over that data is safe; route the decision through the party that has the identity. Each round of "tighter matching" was patching the wrong layer.
+- **DETECTION**: `grep -n "acked === true" mobile/phone-mode.js` (reconcileEchoes must keep this gate)

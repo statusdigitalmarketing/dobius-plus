@@ -315,15 +315,15 @@ A message sent from the phone keeps its own bubble and `sendId` until the transc
 `failed`), it says Not confirmed by the Mac. Both offer Send again with the same `sendId`: the Mac forgets an id it did
 not take and answers `duplicate` for one that arrived, so nothing is delivered twice. Send again goes to the run the
 message was written for: once that run is over (back on the Mac, or a later move), it puts the words in the box
-instead, and only into an empty box. A bubble clears when the transcript shows a user row with the same words that
-was not there when the message was sent (its baseline of row ids and queued rows) and was written since (30 s allowed
-for clock skew); an older message with the same words never counts (Codex r27, r28). Each row confirms one
-message: two sends of the same words need two rows, and a confirmed one stays as a hidden placeholder, holding its row
-on every later poll, for as long as another message with those words waits (Codex r29). A message the Mac refused is
-never confirmed by a row. Messages not yet answered as taken are kept per tab in the phone's storage (5 waiting per
-tab, plus up to 20 hidden placeholders, 20 tabs, 7 days), so leaving the tab or reloading the app brings them back as
-Not confirmed with Send again. The composer lets at most 5 wait at once: a sixth stays in the box with a note, so none
-is pushed out of storage unseen. Each Not sent or Not confirmed bubble also has Remove.
+instead, and only into an empty box. A transcript row carries no sendId, so a row only ever clears the bubble of a
+message the Mac said it took (ack, or `duplicate` on Send again): the same words from another phone or an earlier
+message look identical (Codex r27 to r30). Such a row must not have been there when the message was sent (its baseline
+of row ids and queued rows) and must be written since (30 s allowed for clock skew), and each row clears one message.
+A message that was refused or never answered keeps its bubble until Send again settles it by its own sendId, or Remove.
+Messages not yet answered as taken are kept per tab in the phone's storage, so leaving the tab or reloading the app
+brings them back as Not confirmed with Send again. The composer lets at most 5 wait on a tab and keeps messages for at
+most 20 tabs at once; past either a new message stays in the box with a note, so none is pushed out of storage unseen.
+Entries older than 7 days are dropped.
 
 The Mac remembers each send id per run with its outcome: pending, taken, or unknown (no answer within 10 s). A retry
 of a pending id waits for the first answer; of an unknown id it is answered `timeout` again, never `duplicate`, until

@@ -3,7 +3,7 @@
 // Run: node --test electron/__tests__/mobile-phone-mode.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { phoneOffered, phoneKnown, sendOutcome, reconcileEchoes, pruneEchoes, ageEchoes, ECHO_TTL_MS, shownEchoes, waitingCount, MAX_OUTSTANDING, echoBaseline, readOutbox, writeOutbox, ARRIVAL_SKEW_MS, freshId, readPhoneState, questionAnswer, togglePick, permissionAnswer, planAnswer, refusalText } from '../../mobile/phone-mode.js';
+import { phoneOffered, phoneKnown, sendOutcome, reconcileEchoes, pruneEchoes, ageEchoes, ECHO_TTL_MS, waitingCount, MAX_OUTSTANDING, OUTBOX_TABS, outboxFull, echoBaseline, readOutbox, writeOutbox, ARRIVAL_SKEW_MS, freshId, readPhoneState, questionAnswer, togglePick, permissionAnswer, planAnswer, refusalText } from '../../mobile/phone-mode.js';
 import { validateAnswer, validatePhoneRequest } from '../phone-protocol.js';
 import { answerMisfit } from '../phone-runner-core.mjs';
 
@@ -102,7 +102,7 @@ test('a phone message arrives only by a row that was not there when it was sent 
   const echoArrived = (e, rows) => reconcileEchoes([e], rows).length === 0;
   const since = Date.parse('2026-11-14T16:00:00Z');
   const recent = { id: 'u1', role: 'user', content: 'continue', timestamp: '2026-11-14T15:59:50Z' };
-  const echo = { content: 'continue', sendId: 's1', since, ...echoBaseline('continue', [recent, { role: 'user', content: 'other', id: 'u0' }]) };
+  const echo = { content: 'continue', sendId: 's1', acked: true, since, ...echoBaseline('continue', [recent, { role: 'user', content: 'other', id: 'u0' }]) };
   assert.deepEqual([echo.known, echo.knownQueued], [['u1'], 0]);
   assert.equal(echoArrived(echo, [recent]), false, 'a row from 10 s before the send is an earlier message');
   assert.equal(echoArrived(echo, [{ id: 'u0', role: 'user', content: 'continue', timestamp: '2026-11-14T15:00:00Z' }]), false, 'an older page');
@@ -126,95 +126,69 @@ test('the outbox keeps unanswered phone messages across visits, bounded, and bri
   map = writeOutbox(map, 'T', [], now);
   assert.equal('T' in map, false);
   let many = {};
-  for (let i = 0; i < 30; i++) many = writeOutbox(many, `T${i}`, [e(i)], now);
-  assert.equal(Object.keys(many).length, 20);
+  for (let i = 0; i < 50; i++) many = writeOutbox(many, `T${i}`, [e(i)], now);
+  assert.equal(Object.keys(many).length, 40, 'a hard ceiling only a race past the composer can reach');
   assert.deepEqual(readOutbox({ T: [e(1, { since: now - 8 * 86_400_000 })] }, 'T', now), [], 'older than a week');
   assert.deepEqual(readOutbox({ T: [{ content: 5 }, null, e(1, { runId: 7 })] }, 'T', now), [], 'garbage is dropped');
   assert.deepEqual(readOutbox(null, 'T', now), []);
 });
 
-test('one transcript row confirms one phone message, never two with the same words (Codex r29)', () => {
+test('one transcript row clears one acked phone message, oldest first (Codex r29)', () => {
   const since = Date.parse('2026-11-14T16:00:00Z');
-  const a = { content: 'continue', sendId: 'sa', since, known: [], knownQueued: 0 };
-  const b = { content: 'continue', sendId: 'sb', since: since + 1000, known: [], knownQueued: 0 };
+  const a = { content: 'continue', sendId: 'sa', since, known: [], knownQueued: 0, acked: true };
+  const b = { content: 'continue', sendId: 'sb', since: since + 1000, known: [], knownQueued: 0, acked: true };
   const row = (id) => ({ id, role: 'user', content: 'continue', timestamp: '2026-11-14T16:00:05Z' });
-  const shown = (list) => shownEchoes(list).map((e) => e.sendId);
-  assert.deepEqual(shown(reconcileEchoes([a, b], [row('u1')])), ['sb'], 'one row, the older send');
-  assert.deepEqual(reconcileEchoes([a, b], [row('u1'), row('u2')]), [], 'two rows, both, and nothing kept hidden');
+  assert.deepEqual(reconcileEchoes([a, b], [row('u1')]).map((e) => e.sendId), ['sb']);
+  assert.deepEqual(reconcileEchoes([a, b], [row('u1'), row('u2')]), []);
   const q = { role: 'user', content: 'continue', queued: true };
-  assert.deepEqual(shown(reconcileEchoes([a, b], [q])), ['sb'], 'one queued row, one send');
+  assert.deepEqual(reconcileEchoes([a, b], [q]).map((e) => e.sendId), ['sb']);
   assert.deepEqual(reconcileEchoes([a, b], [q, q]), []);
-  const refused = { ...b, fail: 'failed' };
-  assert.deepEqual(shown(reconcileEchoes([a, refused], [row('u1'), row('u2')])), ['sb'], 'a refused send stays for Send again');
-  const local = { content: 'continue', at: since };
-  const same = [local];
-  assert.equal(reconcileEchoes(same, [row('u1')]), same, 'nothing cleared: the same array back');
+  const same = [a];
+  assert.equal(reconcileEchoes(same, []), same, 'nothing cleared: the same array back');
 });
 
-test('the row a confirmed message used stays its own on every later poll (Codex r29, ship-test)', () => {
+test('a row never clears a message the Mac did not say it took: only its own sendId settles it (Codex r29, r30)', () => {
   const since = Date.parse('2026-11-14T16:00:00Z');
-  const a = { content: 'grape', sendId: 'sa', since, known: [], knownQueued: 0, acked: true };
-  const b = { content: 'grape', sendId: 'sb', since: since + 150, known: [], knownQueued: 0, fail: 'unconfirmed' };
-  const rows = [{ id: 'g1', role: 'user', content: 'grape', timestamp: '2026-11-14T16:00:02Z' }];
-  let list = reconcileEchoes([a, b], rows);
-  for (let poll = 0; poll < 3; poll++) list = reconcileEchoes(list, rows);
-  assert.deepEqual(shownEchoes(list).map((e) => e.sendId), ['sb'], 'the waiting one is still shown after more polls');
-  assert.equal(waitingCount(list), 1);
-  assert.equal(reconcileEchoes(list, rows), list, 'a settled list comes back as the same array (no re-render, no outbox write per poll)');
-  // Queued first, then written as a real row: the hidden one follows it.
-  let q = reconcileEchoes([{ ...a, acked: false }, b], [{ role: 'user', content: 'grape', queued: true }]);
-  q = reconcileEchoes(q, rows);
-  assert.deepEqual(shownEchoes(q).map((e) => e.sendId), ['sb']);
-  // Once nothing with those words waits, the hidden one goes.
-  assert.deepEqual(reconcileEchoes(list.filter((e) => e.sendId !== 'sb'), rows), []);
+  const rows = [{ id: 'q1', role: 'user', content: 'continue', timestamp: '2026-11-14T16:05:00Z' }];
+  const lost = { content: 'continue', sendId: 'sa', since, known: [], knownQueued: 0, fail: 'unconfirmed' };
+  const refused = { ...lost, sendId: 'sb', fail: 'failed' };
+  const pending = { ...lost, sendId: 'sc', fail: null };
+  // Another phone sent the same words and its row arrived: none of these is that message.
+  assert.deepEqual(reconcileEchoes([lost, refused, pending], rows).map((e) => e.sendId), ['sa', 'sb', 'sc']);
+  assert.deepEqual(reconcileEchoes([lost, refused, pending], [{ role: 'user', content: 'continue', queued: true }]).map((e) => e.sendId), ['sa', 'sb', 'sc']);
+  // Send again answered (ack or duplicate): now it is the Mac's word, and a row may clear it.
+  assert.deepEqual(reconcileEchoes([{ ...lost, fail: null, acked: true }], rows), []);
+  assert.equal(waitingCount([lost, refused, pending, { ...lost, sendId: 'sd', acked: true, fail: null }]), 3);
 });
 
-test('across a visit, a taken or confirmed message still holds its row (Codex r29)', () => {
-  const now = Date.parse('2026-11-14T16:00:00Z');
-  const run = 'r'.repeat(32);
-  const a = { content: 'grape', sendId: 'sa', runId: run, since: now - 2000, known: [], knownQueued: 0, acked: true };
-  const b = { content: 'grape', sendId: 'sb', runId: run, since: now - 1000, known: [], knownQueued: 0, fail: 'unconfirmed' };
-  const back = readOutbox(writeOutbox({}, 'T', [a, b], now), 'T', now);
-  assert.deepEqual(back.map((e) => [e.sendId, !!e.done]), [['sa', true], ['sb', false]]);
-  const rows = [{ id: 'g1', role: 'user', content: 'grape', timestamp: new Date(now - 500).toISOString() }];
-  assert.deepEqual(shownEchoes(reconcileEchoes(back, rows)).map((e) => e.sendId), ['sb']);
-  assert.deepEqual(readOutbox(writeOutbox({}, 'T', [a], now), 'T', now), [], 'alone, a taken one is not kept');
-});
-
-test('the outbox keeps every message the composer lets wait (Codex r29)', () => {
-  const now = Date.parse('2026-11-14T16:00:00Z');
-  const waiting = Array.from({ length: MAX_OUTSTANDING }, (_, i) => ({ content: `m${i}`, sendId: `s${i}`, runId: 'r'.repeat(32), since: now - i, known: [], knownQueued: 0 }));
-  const back = readOutbox(writeOutbox({}, 'T', waiting, now), 'T', now);
-  assert.deepEqual(back.map((e) => e.sendId), waiting.map((e) => e.sendId));
-});
-
-test('pruneEchoes keeps a confirmed one hidden and says so, the same array only when nothing changed (ship-test r29)', () => {
+test('pruneEchoes: acked ones by their rows, local ones by their words, the rest by age; the same array when nothing changed', () => {
   const since = Date.parse('2026-11-14T22:24:24Z');
   const t = 'Reply with only the word peach.';
   const a = { content: t, sendId: 'a', since, at: since, known: [], knownQueued: 0, acked: true };
   const b = { content: t, sendId: 'b', since: since + 380, at: since + 380, known: [], knownQueued: 0, fail: 'unconfirmed' };
   const rows = [{ role: 'user', content: t, timestamp: '2026-11-14T22:24:25Z', id: '60cb90' }, { role: 'assistant', content: 'peach' }];
-  const cur = [a, b];
-  const next = pruneEchoes(cur, rows, undefined, since + 4000);
-  assert.notEqual(next, cur, 'two in, two out, but one is now hidden: that is a change');
-  assert.deepEqual(shownEchoes(next).map((e) => e.sendId), ['b']);
+  const next = pruneEchoes([a, b], rows, undefined, since + 4000);
+  assert.deepEqual(next.map((e) => e.sendId), ['b']);
   assert.equal(pruneEchoes(next, rows, undefined, since + 8000), next, 'settled: the same array');
+  assert.equal(pruneEchoes(next, rows, undefined, since + 10 * ECHO_TTL_MS), next, 'a message never confirmed does not age out');
   const local = { content: 'hi', at: since };
   assert.deepEqual(pruneEchoes([local], [{ role: 'user', content: 'hi' }], undefined, since + 1000), [], 'a local echo goes once its words show');
-  assert.deepEqual(pruneEchoes([local], [], undefined, since + ECHO_TTL_MS + 1), [], 'and after the wait');
-  const failed = { ...b, fail: 'failed', at: since - 10 * ECHO_TTL_MS };
-  assert.deepEqual(pruneEchoes([failed], [], undefined, since).map((e) => e.sendId), ['b'], 'a failed one stays');
+  assert.deepEqual(ageEchoes([local], since + ECHO_TTL_MS + 1), [], 'and after the wait');
+  assert.deepEqual(ageEchoes([a], since + ECHO_TTL_MS + 1), [], 'an acked one whose row never came goes after the wait: the Mac has it');
 });
 
-test('past the wait, a taken phone message still holds its row while one with the same words waits', () => {
-  const t0 = Date.parse('2026-11-14T22:30:00Z');
-  const a = { content: 'go', sendId: 'a', since: t0, at: t0, known: [], knownQueued: 0, acked: true };
-  const b = { content: 'go', sendId: 'b', since: t0 + 100, at: t0 + 100, known: [], knownQueued: 0, fail: 'unconfirmed' };
-  const aged = ageEchoes([a, b], undefined, t0 + ECHO_TTL_MS + 1);
-  assert.deepEqual(aged.map((e) => [e.sendId, !!e.done]), [['a', true], ['b', false]]);
-  const late = [{ id: 'r1', role: 'user', content: 'go', timestamp: new Date(t0 + 200_000).toISOString() }];
-  assert.deepEqual(shownEchoes(pruneEchoes(aged, late, undefined, t0 + 200_001)).map((e) => e.sendId), ['b'], 'the late row is the taken one\'s');
-  assert.deepEqual(ageEchoes([a], undefined, t0 + ECHO_TTL_MS + 1), [], 'alone, it just goes');
-  const fresh = [a, b];
-  assert.equal(ageEchoes(fresh, undefined, t0 + 10), fresh, 'nothing due: the same array');
+test('the outbox keeps every message the composer lets wait, and no tab\'s are dropped for another\'s (Codex r29, r30)', () => {
+  const now = Date.parse('2026-11-14T16:00:00Z');
+  const msg = (i) => ({ content: `m${i}`, sendId: `s${i}`, runId: 'r'.repeat(32), since: now - i, known: [], knownQueued: 0 });
+  const waiting = Array.from({ length: MAX_OUTSTANDING }, (_, i) => msg(i));
+  assert.deepEqual(readOutbox(writeOutbox({}, 'T', waiting, now), 'T', now).map((e) => e.sendId), waiting.map((e) => e.sendId));
+  let map = {};
+  for (let i = 0; i < OUTBOX_TABS; i++) map = writeOutbox(map, `T${i}`, [msg(i)], now);
+  assert.equal(outboxFull(map, 'new', now), true, 'a new tab may not start keeping messages');
+  assert.equal(outboxFull(map, 'T3', now), false, 'a tab that already keeps some may add more (its own cap applies)');
+  const over = writeOutbox(map, 'extra', [msg(99)], now); // past the limit only by a race
+  assert.equal(outboxFull(over, 'T3', now), false, 'even past the limit, a tab already keeping some is never refused');
+  assert.equal(outboxFull(writeOutbox(map, 'T3', [], now), 'new', now), false, 'room again once one is settled');
+  assert.equal(outboxFull({ ...map, T0: [{ ...msg(0), since: now - 8 * 86_400_000 }] }, 'new', now), false, 'expired ones do not count');
+  assert.equal(outboxFull(null, 'new', now), false);
 });

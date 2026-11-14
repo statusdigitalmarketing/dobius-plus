@@ -8,7 +8,7 @@ import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, 
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 import { remarkCommandBoxes, CMD_TAG } from './command-blocks.js';
 import PhoneCards from './PhoneCards';
-import { phoneOffered, phoneKnown, sendOutcome, pruneEchoes, ageEchoes, shownEchoes, waitingCount, MAX_OUTSTANDING, echoBaseline, readOutbox, writeOutbox, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
+import { phoneOffered, phoneKnown, sendOutcome, pruneEchoes, ageEchoes, waitingCount, MAX_OUTSTANDING, OUTBOX_TABS, outboxFull, echoBaseline, readOutbox, writeOutbox, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
 // blocks, lists were showing as raw pipes/asterisks: Sam's v1.0.53 report);
@@ -881,7 +881,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           // age out echo bubbles (their 90s TTL must not depend on the
           // transcript changing).
           // A phone message that failed stays until it is sent again or the transcript shows it.
-          setEchoes((cur) => ageEchoes(cur, normEcho));
+          setEchoes((cur) => ageEchoes(cur));
           return;
         }
         // A reply for a smaller window than the one now asked for (a poll still
@@ -1041,8 +1041,9 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       // at most once (phone-mode.js sendOutcome). Several failed messages never share or overwrite one.
       const outcome = sendOutcome(msg);
       if (outcome === 'sent') {
-        // Taken: no longer kept for Send again; the bubble stays until the transcript shows it.
-        setEchoes((cur) => cur.map((e) => (e.sendId === entry.sendId ? { ...e, acked: true, fail: null } : e)));
+        // Taken: no longer kept for Send again; the bubble stays until the transcript shows it. Its row may already be
+        // here (an answer that came late, or Send again answered `duplicate`), so look at the rows held now too.
+        setEchoes((cur) => pruneEchoes(cur.map((e) => (e.sendId === entry.sendId ? { ...e, acked: true, fail: null } : e)), messagesRef.current || [], normEcho));
         return;
       }
       setEchoes((cur) => cur.map((e) => (e.sendId === entry.sendId ? { ...e, fail: outcome } : e)));
@@ -1317,6 +1318,13 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       // new one waits in the box rather than pushing an older one out unseen (Codex r29).
       if (waitingCount(echoes) >= MAX_OUTSTANDING) {
         showSendNote(`${MAX_OUTSTANDING} messages are still waiting for the Mac. Send this one once they are answered, or remove one.`);
+        return;
+      }
+      // Across tabs too: a tab's waiting messages are never pushed out of storage for another's (Codex r30).
+      let full = false;
+      try { full = outboxFull(JSON.parse(localStorage.getItem(outboxKey) || '{}'), tabId); } catch (err) { console.warn('[phone] outbox not read:', err?.message || err); }
+      if (full) {
+        showSendNote(`Messages are waiting for the Mac on ${OUTBOX_TABS} other tabs. Send them again or remove them there first.`);
         return;
       }
       const sendId = freshId('s');
@@ -1815,7 +1823,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
             live={working && i === lastClaude && i === messages.length - 1}
           />
         ))}
-        {shownEchoes(echoes).map((e) => (
+        {echoes.map((e) => (
           <Bubble key={`echo-${e.sendId || e.at}`} role="user" content={e.content} timestamp={e.at} sending
             failed={e.fail || null} onRetry={e.fail ? () => retryEcho(e) : undefined}
             onRemove={e.fail && e.sendId ? () => setEchoes((cur) => cur.filter((x) => x.sendId !== e.sendId)) : undefined} />
