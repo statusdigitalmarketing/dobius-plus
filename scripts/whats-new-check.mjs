@@ -31,8 +31,10 @@ export function checkNotes(version, dir = NOTES_DIR) {
   // both: no emphasis, code, escapes, HTML, entities or links (Codex, PR 11). A "Tasks > Team" menu path is fine.
   const marked = p.bullets.find((b) => /[*_`~\\<]|&#?\w+;|\]\(/.test(b));
   if (marked) return { ok: false, error: `${path.basename(file)}: plain text only, the app shows markdown marks as typed: ${marked}` };
-  const mac = p.bullets.find((b) => /\bthis\s+Mac\b/i.test(b));
-  if (mac) return { ok: false, error: `${path.basename(file)}: say "this computer", not "this Mac" (the notes show on Windows too): ${mac}` };
+  // "the Mac" and "your Mac" too: "When the Mac is offline" shipped twice (2.2.30, 2.2.32) past a "this Mac" only check.
+  // A screen named after Macs ("Your Macs", "Add a Mac") is a name, not the machine, and stays allowed.
+  const mac = p.bullets.find((b) => /\b(?:this|the|your)\s+Mac\b/i.test(b));
+  if (mac) return { ok: false, error: `${path.basename(file)}: say "this computer" or "the computer", not "the Mac" (the notes show on Windows too): ${mac}` };
   return { ok: true, bullets: p.bullets };
 }
 

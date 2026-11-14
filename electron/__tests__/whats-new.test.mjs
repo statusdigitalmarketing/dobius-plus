@@ -95,6 +95,14 @@ test('release check: next version and its notes', async () => {
     fs.writeFileSync(path.join(dir, '1.0.5.md'), `- A phone turned away by ${line} is now logged.\n`);
     assert.match(checkNotes('1.0.5', dir).error, /plain text only/, line);
   }
+  // Any "the Mac" or "your Mac" (Max, 2.2.30 and 2.2.32: "When the Mac is offline" showed on Windows).
+  for (const line of ['When the Mac is offline, it waits.', 'Your Mac keeps the list.', 'When THE  MAC sleeps, nothing is lost.']) {
+    fs.writeFileSync(path.join(dir, '1.0.7.md'), `- ${line}\n`);
+    assert.match(checkNotes('1.0.7', dir).error, /the computer/, line);
+  }
+  // Screen names stay allowed.
+  fs.writeFileSync(path.join(dir, '1.0.8.md'), '- Slide Your Macs and the Add a Mac screen down to close them.\n');
+  assert.equal(checkNotes('1.0.8', dir).ok, true);
   fs.writeFileSync(path.join(dir, '1.0.6.md'), '- Tasks > Team shows open messages on this computer.\n');
   assert.equal(checkNotes('1.0.6', dir).ok, true);
   fs.writeFileSync(path.join(dir, '1.0.3.md'), '- A phone turned away by this computer is now logged.\n');
