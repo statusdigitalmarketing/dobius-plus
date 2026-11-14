@@ -186,10 +186,18 @@ ok('empty/null input is not live');
     '\u001bP' + 'a'.repeat(245758) + '\n' + '\u001b[400G' + '\u001b[B'.repeat(5458),
     '\u001b[400C'.repeat(43000),
   ];
+  // 300ms on an idle Mac (the code before 095453b takes ~400ms there), scaled by the load per core, fastest of three
+  // runs: this Mac routinely sits at load 20+ on 18 cores with dozens of sessions, and a single 302ms run failed a
+  // release preflight on 2026-11-14 with nothing wrong in the code.
+  const budget = 300 * Math.max(1, os.loadavg()[0] / os.cpus().length);
   for (const r of amp) {
-    const t0 = Date.now();
-    for (let n = 0; n < 10; n += 1) { stripAnsi(r, 4096); claudeTuiPresent(r); }
-    assert.ok(Date.now() - t0 < 300, `10 calls took ${Date.now() - t0}ms`);
+    let best = Infinity;
+    for (let tries = 0; tries < 3 && best >= budget; tries += 1) {
+      const t0 = Date.now();
+      for (let n = 0; n < 10; n += 1) { stripAnsi(r, 4096); claudeTuiPresent(r); }
+      best = Math.min(best, Date.now() - t0);
+    }
+    assert.ok(best < budget, `10 calls took ${best}ms at best of 3 (budget ${Math.round(budget)}ms at this load)`);
   }
   ok('tail mode equals the full strip tail and stays fast on cursor-motion runs');
 }
