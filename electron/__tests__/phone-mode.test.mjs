@@ -53,7 +53,7 @@ function setup(over = {}) {
     presence: async () => ({ sessionId: S, status: 'idle' }),
     hasTranscript: async () => true,
     activity: () => ({ status: 'done' }),
-    screen: async () => ({ lines: ['x'], modes: {} }), promptBox: () => '',
+    screen: async () => ({ lines: ['x'], modes: {} }), promptBox: () => '', promptMode: () => 'default',
     processArgv: async () => ['claude', '--permission-mode', 'acceptEdits', '--model', 'opus'],
     processCwd: async () => userData, isDir: () => true,
     stop: (pid) => { calls.stop.push(pid); tuiAlive = false; sys.table.delete(900); },
@@ -174,6 +174,24 @@ test('take: the mode shown on screen goes to the phone and comes back to the TUI
     const { rok } = await live(ctx);
     assert.equal(rok.permissionMode, 'plan');
     assert.equal(ctx.calls.restart[0].phone.permissionMode, 'plan', 'the TUI restarts in the shown mode, not its launch flag');
+  } finally { await ctx.cleanup(); }
+});
+
+test('take: a permission mode it cannot read is looked at once more, then the move is refused, never loosened (Codex r36)', async () => {
+  let reads = 0;
+  let ctx = setup({ promptMode: () => (++reads >= 2 ? 'plan' : null) });
+  try {
+    const { rok } = await live(ctx);
+    assert.equal(reads, 2, 'a second look');
+    assert.equal(rok.permissionMode, 'plan');
+  } finally { await ctx.cleanup(); }
+  ctx = setup({ promptMode: () => null });
+  try {
+    await ctx.mode.init();
+    const r = await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
+    assert.equal(r.code, 'cannot', JSON.stringify(r));
+    assert.deepEqual([ctx.calls.stop, ctx.calls.restart], [[], []], 'nothing was stopped or restarted');
+    assert.equal(ctx.mode.heldSessions().size, 0);
   } finally { await ctx.cleanup(); }
 });
 
@@ -321,7 +339,7 @@ test('sessionOfTab names the session a tab runs on the phone, and nothing for ot
 });
 
 test('full run: handshake, carried flags, cards, sends once per id, give back, done, released and forgotten', async () => {
-  const ctx = setup();
+  const ctx = setup({ promptMode: () => 'acceptEdits' });
   try {
     const { runId, gate, runner, rok, doneToken } = await live(ctx);
     const restart = ctx.calls.restart[0];
@@ -329,7 +347,7 @@ test('full run: handshake, carried flags, cards, sends once per id, give back, d
     assert.equal(restart.phone.sessionId, S);
     assert.equal(restart.phone.runner, '/x/phone-runner.mjs');
     assert.deepEqual([restart.phone.permissionMode, restart.phone.model], ['acceptEdits', 'opus'], 'the TUI comes back with its flags');
-    // No mode shown on screen in this setup: the phone side asks first rather than take the looser launch flag.
+    // The screen shows the launch mode: the TUI comes back in it, and the phone side still asks first (capped at manual).
     assert.deepEqual(rok, { t: 'runner-ok', permissionMode: 'default', model: 'opus', resendNote: false });
     const rec = JSON.parse(fs.readFileSync(path.join(ctx.userData, 'phone-runs.json'), 'utf8'));
     assert.deepEqual(rec.map((x) => [x.runId, x.pgid, x.claudePid]), [[runId, 2200, 2300]]);
