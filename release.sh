@@ -37,7 +37,22 @@ security find-identity -v -p codesigning | grep -q "$IDENTITY" || { echo "ERROR:
 xcrun --find notarytool >/dev/null || { echo "ERROR: notarytool missing" >&2; exit 1; }
 # node_modules must match package.json BEFORE the version bump: a dependency merged from another worktree and never
 # installed here passed npm test and failed the esbuild step after 2.2.33 was already bumped and pushed.
-npm ls --depth=0 --include=dev >/dev/null 2>&1 || { echo "ERROR: node_modules does not match package.json (npm ls); run npm install" >&2; exit 1; }
+# Read straight from disk, not npm ls: inherited npm config (NODE_ENV, omit, package-lock-only, link) changes what
+# npm ls checks (Codex r1, r2). Every direct dependency must be installed at the version package-lock.json records.
+node -e '
+const fs = require("fs"), read = (f) => JSON.parse(fs.readFileSync(f, "utf8"));
+const p = read("package.json"), lock = read("package-lock.json").packages || {};
+const bad = [];
+for (const n of Object.keys({ ...p.dependencies, ...p.devDependencies })) {
+  const want = lock["node_modules/" + n]?.version;
+  let have = null;
+  try { have = JSON.parse(fs.readFileSync("node_modules/" + n + "/package.json", "utf8")).version; }
+  catch (e) { have = e.code === "ENOENT" ? null : "an unreadable package.json (" + (e.code || e.message) + ")"; }
+  if (!want) bad.push(n + " (not in package-lock.json)");
+  else if (have !== want) bad.push(n + " (installed " + (have || "nothing") + ", lockfile " + want + ")");
+}
+if (bad.length) { console.error("ERROR: node_modules does not match the lockfile; run npm install:\n  " + bad.join("\n  ")); process.exit(1); }
+' || exit 1
 export APPLE_ID="sahil.nihal09@gmail.com"
 export APPLE_TEAM_ID="Z349CC556Z"
 APPLE_APP_SPECIFIC_PASSWORD="$(security find-generic-password -s dobius-notary-password -w)" || { echo "ERROR: notary password not in Keychain (service dobius-notary-password)" >&2; exit 1; }

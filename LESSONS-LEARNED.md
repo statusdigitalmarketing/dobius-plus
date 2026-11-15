@@ -1216,6 +1216,6 @@
 
 ### Deployment: 2026-11-15
 - **MISTAKE**: 2.2.33's `./release.sh patch` bumped and pushed the version, then died in `electron:build`: esbuild could not resolve `@anthropic-ai/claude-agent-sdk` (electron/phone-runner.mjs). Phone mode added it as a devDependency from its own worktree; the main checkout's node_modules was never synced, and `npm test` plus `npm run build` (Vite only) never import it. Then, resuming, I deleted the local v2.2.33 tag and `scripts/release-notes.mjs` failed for want of it.
-- **FIX**: `npm install` in the main checkout (lockfile unchanged), finish the SAME version with a copy of release.sh minus the bump and push, and keep the local tag (or `git fetch origin tag vX`). release.sh preflight now runs `npm ls --depth=0` before the bump.
+- **FIX**: `npm install` in the main checkout (lockfile unchanged), finish the SAME version with a copy of release.sh minus the bump and push, and keep the local tag (or `git fetch origin tag vX`). release.sh preflight now reads every direct dependency from node_modules and compares it with package-lock.json before the bump (not `npm ls`: NODE_ENV, omit, package-lock-only and link all make it pass with a package missing, Codex r1 and r2).
 - **CONTEXT**: Worktrees with symlinked or separate node_modules drift from the main checkout. Only the electron bundle step resolves every import, and it runs after the bump is public.
-- **DETECTION**: `npm ls --depth=0 >/dev/null || echo DRIFT` in the main checkout before any release.
+- **DETECTION**: the release.sh preflight block that starts `node -e` under the notarytool check; run it by hand in the main checkout after merging a branch that touched package.json.
