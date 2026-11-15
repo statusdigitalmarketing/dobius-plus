@@ -34,29 +34,44 @@ export default function ReportProblem() {
   useEffect(() => {
     if (!open) return undefined;
     requestAnimationFrame(() => areaRef.current?.focus());
+    let closing = false; // a click outside is closing it: the focus that click moves is the person's, never pulled back
     const onDown = (e) => {
       if (boxRef.current?.contains(e.target) || btnRef.current?.contains(e.target)) return;
+      closing = true;
       setOpen(false);
     };
-    // Focus that fell to the page while open: no key reaches the window's shortcut handlers (Cmd+K types `clear` into
-    // the terminal), and Escape still closes. Keys inside the box are the box's own (its onKeyDown stops them).
+    // While it is open, focus is the popover's: a click outside closes it (onDown) before anything else can take focus,
+    // so focus anywhere else came from something asynchronous (a disabled control, a terminal's Improve resolving and
+    // refocusing its input). Keys there are stopped before they reach any handler, Escape closes, and focus is pulled
+    // back into the box (Codex PR 18 r1, r2).
+    const pullBack = () => (areaRef.current || boxRef.current?.querySelector('button'))?.focus();
     const onKey = (e) => {
-      const a = document.activeElement;
-      if (boxRef.current?.contains(a)) return;
-      if (a && a !== document.body) return;
+      if (closing || boxRef.current?.contains(document.activeElement)) return;
       e.stopPropagation();
-      if (e.key !== 'Escape' || e.isComposing) return;
       e.preventDefault();
-      setOpen(false);
-      setState((st) => (st.phase === 'sending' ? st : { phase: 'idle' }));
-      requestAnimationFrame(() => btnRef.current?.focus());
+      if (e.key === 'Escape' && !e.isComposing) {
+        setOpen(false);
+        setState((st) => (st.phase === 'sending' ? st : { phase: 'idle' }));
+        requestAnimationFrame(() => btnRef.current?.focus());
+        return;
+      }
+      pullBack();
+    };
+    const onFocusIn = (e) => {
+      if (closing || boxRef.current?.contains(e.target) || btnRef.current?.contains(e.target)) return;
+      pullBack();
     };
     document.addEventListener('mousedown', onDown, true);
     document.addEventListener('keydown', onKey, true);
-    return () => { document.removeEventListener('mousedown', onDown, true); document.removeEventListener('keydown', onKey, true); };
+    document.addEventListener('focusin', onFocusIn, true);
+    return () => {
+      document.removeEventListener('mousedown', onDown, true);
+      document.removeEventListener('keydown', onKey, true);
+      document.removeEventListener('focusin', onFocusIn, true);
+    };
   }, [open]);
 
-  // Sending disables the controls, which drops focus; put it back in the box once it is done.
+  // After a send, or a state change that re-rendered the controls, focus is back in the box.
   useEffect(() => {
     if (!open || state.phase === 'sending') return;
     requestAnimationFrame(() => {
