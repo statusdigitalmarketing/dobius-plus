@@ -83,6 +83,9 @@ git push origin main
 
 step "Build + sign + notarize + publish (electron-builder)"
 npm run electron:build -- --publish always
+# The release is still a draft here. Refuse an app that lacks a production dependency (2.2.34 shipped without every
+# scoped package and died at launch): nobody can update to a draft, and an app that cannot start cannot update itself.
+node scripts/verify-packaged-deps.mjs "dist-electron/mac-universal/Dobius+.app/Contents/Resources/app.asar" || { echo "ERROR: the packaged app is incomplete; v$V stays a draft" >&2; exit 1; }
 
 step "Sign + notarize + staple the DMG container"
 DMG="dist-electron/dobius-plus-${V}.dmg"
