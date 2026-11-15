@@ -1213,3 +1213,9 @@
 - **FIX**: `createPhoneMain` takes `m.platform` and `m.readPressure`; the test passes `platform: 'darwin'` and `readPressure: async () => 1`.
 - **CONTEXT**: Any test that reaches a host reading (memory, platform, uptime) through a factory must inject it, or it passes on a quiet Mac and fails on a busy one.
 - **DETECTION**: `grep -n "createPhoneMain(" electron/__tests__/*.mjs` and confirm each call passes platform and readPressure.
+
+### Deployment: 2026-11-15
+- **MISTAKE**: 2.2.33's `./release.sh patch` bumped and pushed the version, then died in `electron:build`: esbuild could not resolve `@anthropic-ai/claude-agent-sdk` (electron/phone-runner.mjs). Phone mode added it as a devDependency from its own worktree; the main checkout's node_modules was never synced, and `npm test` plus `npm run build` (Vite only) never import it. Then, resuming, I deleted the local v2.2.33 tag and `scripts/release-notes.mjs` failed for want of it.
+- **FIX**: `npm install` in the main checkout (lockfile unchanged), finish the SAME version with a copy of release.sh minus the bump and push, and keep the local tag (or `git fetch origin tag vX`). release.sh preflight now runs `npm ls --depth=0` before the bump.
+- **CONTEXT**: Worktrees with symlinked or separate node_modules drift from the main checkout. Only the electron bundle step resolves every import, and it runs after the bump is public.
+- **DETECTION**: `npm ls --depth=0 >/dev/null || echo DRIFT` in the main checkout before any release.
