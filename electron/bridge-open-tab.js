@@ -206,21 +206,26 @@ export function promptBoxText(lines, modes) {
 // "⏵⏵ accept edits on (shift+tab to cycle)"), and the mode each names.
 const FOOTER_MODE_RE = /^\s*(?:⏵⏵|⏸)\s+(manual mode|auto mode|accept edits|plan mode|bypass permissions) on\b/;
 const FOOTER_MODES = { 'manual mode': 'default', 'auto mode': 'auto', 'accept edits': 'acceptEdits', 'plan mode': 'plan', 'bypass permissions': 'bypassPermissions' };
-const FOOTER_ROWS = 4; // rows under the box searched (a status line may come first)
+// Strictest first. A custom statusLine prints its own rows under the box, so they can carry a mode-looking line too.
+const FOOTER_STRICTNESS = ['plan', 'default', 'acceptEdits', 'auto', 'bypassPermissions'];
 
 /**
  * The permission mode Claude shows under its idle input box right now (it changes with Shift+Tab, which no flag or
- * record reflects), or null when the screen is not an idle prompt or shows no mode line. Only rows directly under the
- * box are read, never the transcript above it.
+ * record reflects), or null when the screen is not an idle prompt or shows no mode line. Only rows under the box are
+ * read, never the transcript above it: every row down to the bottom of the screen (the box ends within
+ * PROMPT_BOTTOM_ROWS of it), because a multi-line statusLine can come before Claude's own line (Codex r36). The
+ * statusLine is the person's script and may print a mode-looking line of its own, so of several the STRICTEST is
+ * taken: a stray line can only make the result stricter, never looser.
  */
 export function promptFooterMode(lines, modes) {
   const box = findPromptBox(lines, modes);
   if (!box) return null;
-  for (const row of lines.slice(box.bottom + 1, box.bottom + 1 + FOOTER_ROWS)) {
+  const seen = new Set();
+  for (const row of lines.slice(box.bottom + 1, box.bottom + 2 + PROMPT_BOTTOM_ROWS)) {
     const m = FOOTER_MODE_RE.exec(String(row || ''));
-    if (m) return FOOTER_MODES[m[1]];
+    if (m) seen.add(FOOTER_MODES[m[1]]);
   }
-  return null;
+  return FOOTER_STRICTNESS.find((mode) => seen.has(mode)) ?? null;
 }
 
 function findPromptBox(lines, modes) {

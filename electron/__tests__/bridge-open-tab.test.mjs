@@ -696,6 +696,12 @@ ok('dobius-open script end to end');
   assert.equal(promptFooterMode(screen('  ⏸ plan mode on (shift+tab to cycle)'), at(2, 2)), 'plan');
   assert.equal(promptFooterMode(screen('  ⏵⏵ bypass permissions on (shift+tab to cycle)'), at(2, 2)), 'bypassPermissions');
   assert.equal(promptFooterMode(screen('  ? for shortcuts'), at(2, 2)), null, 'no mode line');
+  // Codex r36: a multi-line statusLine before Claude's own line, and a statusLine printing a mode-looking line.
+  const status4 = [rule, '❯ ', rule, '  Project: demo', '  Branch: main', '  Context: 10%', '  Cost: $0.01', '  ⏸ plan mode on (shift+tab to cycle)'];
+  assert.equal(promptFooterMode(status4, at(2, 1)), 'plan', 'found past four status rows');
+  const spoof = [rule, '❯ ', rule, '  ⏸ manual mode on', '  ⏸ plan mode on (shift+tab to cycle)'];
+  assert.equal(promptFooterMode(spoof, at(2, 1)), 'plan', 'of two the strictest, never the first');
+  assert.equal(promptFooterMode([rule, '❯ ', rule, '  ⏵⏵ bypass permissions on', '  ⏵⏵ accept edits on'], at(2, 1)), 'acceptEdits');
   // A mode line in the transcript above the box is text, not the mode.
   assert.equal(promptFooterMode(['  ⏵⏵ bypass permissions on', rule, '❯ ', rule, '  ? for shortcuts'], at(2, 2)), null);
   // Not an idle prompt (no bracketed paste, or a dialog): nothing is read.

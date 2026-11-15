@@ -453,8 +453,10 @@ Shift+Tab gets permission cards on the phone and comes back in manual (ship-test
 - Images from the phone are sent as file paths in the text, as today.
 - Slash commands that need the TUI (/login, /model picker, /resume) do not work from the phone. Text commands that
   Claude Code accepts in a prompt (/compact) do.
-- The permission mode comes from the TUI's footer. If a future Claude Code changes that footer's wording, the phone
-  session falls back to manual unless argv named a strict mode, and the restart to the argv mode.
+- The permission mode comes from the TUI's footer, every row under the input box (a custom statusLine may print its
+  own rows there first, and of several mode lines the strictest is taken). If no mode line can be read (a future
+  Claude Code rewording it), the phone session runs the stricter of the launch flag and manual, so every tool still
+  asks on the phone, and the TUI comes back with its launch flag.
 - After Dobius quits or restarts, a phone-mode tab comes back on the Mac (the normal auto-resume).
 - Windows: not offered.
 - Phone-created terminals (`term-mobile-*`) are not offered (no window to restart them in).
