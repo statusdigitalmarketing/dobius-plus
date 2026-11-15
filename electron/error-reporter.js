@@ -448,7 +448,7 @@ function gh(args) {
   });
 }
 
-function findGh() {
+export function findGh() {
   if (process.env.DOBIUS_GH_BIN) return process.env.DOBIUS_GH_BIN;
   return ['/opt/homebrew/bin/gh', '/usr/local/bin/gh'].find((p) => { try { fs.accessSync(p, fs.constants.X_OK); return true; } catch { return false; } }) || null;
 }

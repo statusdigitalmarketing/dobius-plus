@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import { modelLabel } from '../../lib/model-label';
 import { compactTokens } from '../../lib/compact-tokens';
 import { baseName } from '../../../shared/platform.js';
+import ReportProblem from './ReportProblem';
 
 function ctxColor(pct) {
   if (pct >= 95) return '#f85149';
@@ -259,6 +260,7 @@ export default function StatusBar() {
             <span style={{ fontSize: 9, fontFamily: "'SF Mono', monospace" }}>--</span>
           </span>
         ))}
+        <ReportProblem />
         <span>{appVersion ? `v${appVersion}` : ''}</span>
       </div>
     </div>

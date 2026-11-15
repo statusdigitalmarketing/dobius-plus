@@ -1096,7 +1096,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
   useEffect(() => {
     const handleKeyDown = (raw) => {
       // The What's new popup holds the keyboard (its own handler stops keys, but one can land before it is focused).
-      if (useStore.getState().whatsNewOpen) return;
+      if (useStore.getState().whatsNewOpen || useStore.getState().reportProblemOpen) return;
       // Windows: app shortcuts are Ctrl+Shift (shared/win-keys.js); a press
       // that is not one belongs to the terminal and is left alone.
       const e = isWindows() ? winToMacShortcut(raw) : raw;
@@ -1238,7 +1238,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
   // right-click menu owns the keyboard.
   useEffect(() => {
     if (!window.electronAPI) return;
-    const keysHeld = () => { const st = useStore.getState(); return st.newTabPickerOpen || st.tabMenuOpen || st.whatsNewOpen; };
+    const keysHeld = () => { const st = useStore.getState(); return st.newTabPickerOpen || st.tabMenuOpen || st.whatsNewOpen || st.reportProblemOpen; };
     const cleanups = [
       window.electronAPI.onMenuToggleView?.(() => {
         if (keysHeld()) return;
@@ -1246,7 +1246,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
       }),
       window.electronAPI.onMenuOpenSettings?.(() => {
-        if (useStore.getState().whatsNewOpen) return;
+        if (useStore.getState().whatsNewOpen || useStore.getState().reportProblemOpen) return;
         useStore.getState().setNewTabPickerOpen(false);
         useStore.getState().setDashboardTab('settings');
         setActiveView('dashboard');
@@ -1254,7 +1254,8 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       window.electronAPI.onMenuToggleSidebar?.(() => { if (!keysHeld()) toggleSidebar(); }),
       window.electronAPI.onMenuToggleGitPanel?.(() => { if (!keysHeld()) toggleGitPanel(); }),
       window.electronAPI.onMenuNewTab?.(() => {
-        if (useStore.getState().tabMenuOpen || useStore.getState().whatsNewOpen) return; // an open menu or popup holds the keys
+        const st = useStore.getState();
+        if (st.tabMenuOpen || st.whatsNewOpen || st.reportProblemOpen) return; // an open menu or popup holds the keys
         useStore.getState().setNewTabPickerOpen(false);
         openNewTab(projectPath);
         setActiveView('terminal');

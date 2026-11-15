@@ -14,6 +14,7 @@ import { projectPathFromTabId } from './tab-id-util.js';
 import { claudeEnvForAccount, expandTilde, pinPluginRoot } from './claude-account-env.js';
 import { installErrorLog, logLine, errorLogPath, setLogSink } from './error-log.js';
 import { startErrorReporter, noteFault, isReportable } from './error-reporter.js';
+import { createProblemReporter } from './problem-report.js';
 
 // Stall watchdog (v1.0.70). Wrapped here, at import time, so the very first
 // ipcMain.handle/on registration below is already tracked; armed in whenReady
@@ -1129,6 +1130,9 @@ function setupDataHandlers() {
     }
     return { ok: true, enabled: on };
   });
+  // Report a problem (status bar bug button): one submitter for the app, so its one-at-a-time rule spans every window.
+  const submitProblem = createProblemReporter({ version: app.getVersion(), logPath: () => errorLogPath() });
+  ipcMain.handle('report:submit', (_event, req) => submitProblem({ text: req?.text, includeLog: req?.includeLog === true }));
   ipcMain.handle('errorLog:info', () => ({ path: errorLogPath() }));
   ipcMain.handle('errorLog:reveal', () => {
     const p = errorLogPath();
