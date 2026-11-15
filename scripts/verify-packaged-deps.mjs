@@ -10,7 +10,7 @@
 //
 // Usage: node scripts/verify-packaged-deps.mjs <path to app.asar>
 import { createRequire } from 'node:module';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 const require = createRequire(import.meta.url);
@@ -21,11 +21,16 @@ if (!asarPath) { console.error('usage: verify-packaged-deps.mjs <app.asar>'); pr
 
 const files = new Set(asar.listPackage(asarPath).map((f) => f.replace(/\\/g, '/').replace(/^\/+/, '')));
 
-// Whether a file is really in the app: listed in the asar, and on disk when asarUnpack moved it out.
+// Whether a FILE is really in the app (a folder does not count, Codex r4): a non-folder entry in the asar header, and
+// a real file on disk when asarUnpack moved it out.
 function present(rel) {
   if (!files.has(rel)) return false;
-  try { return asar.statFile(asarPath, rel)?.unpacked ? existsSync(path.join(`${asarPath}.unpacked`, rel)) : true; }
+  let stat;
+  try { stat = asar.statFile(asarPath, rel); }
   catch { return false; } // statFile throws only for a path the header does not hold, which files.has just ruled out
+  if (!stat || stat.files) return false;
+  if (!stat.unpacked) return true;
+  try { return statSync(path.join(`${asarPath}.unpacked`, rel)).isFile(); } catch (e) { if (e.code !== 'ENOENT') throw e; return false; }
 }
 
 // A package.json that is really in the app, parsed.
