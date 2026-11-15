@@ -35,6 +35,28 @@ git fetch -q origin main
 gh auth status >/dev/null 2>&1 || { echo "ERROR: gh not authed" >&2; exit 1; }
 security find-identity -v -p codesigning | grep -q "$IDENTITY" || { echo "ERROR: signing identity not in Keychain" >&2; exit 1; }
 xcrun --find notarytool >/dev/null || { echo "ERROR: notarytool missing" >&2; exit 1; }
+# node_modules must match package.json BEFORE the version bump: a dependency merged from another worktree and never
+# installed here passed npm test and failed the esbuild step after 2.2.33 was already bumped and pushed.
+# Read straight from disk, not npm ls: inherited npm config (NODE_ENV, omit, package-lock-only, link) changes what
+# npm ls checks (Codex r1, r2). Every direct dependency must be installed at the version package-lock.json records.
+node -e '
+const fs = require("fs"), read = (f) => JSON.parse(fs.readFileSync(f, "utf8"));
+const p = read("package.json"), lockFile = read("package-lock.json");
+const lock = lockFile.packages || {}, v1 = lockFile.dependencies || {};
+const bad = [];
+for (const n of Object.keys({ ...p.dependencies, ...p.devDependencies })) {
+  // A file: dependency is a link whose version sits on its target record; a v1 lockfile has only `dependencies`, where
+  // a file: dependency records its path instead of a version, so only its presence is checked (Codex r3, r4).
+  const entry = lock["node_modules/" + n];
+  const want = (entry?.link ? lock[entry.resolved] : entry)?.version ?? v1[n]?.version;
+  let have = null, why = "nothing";
+  try { have = JSON.parse(fs.readFileSync("node_modules/" + n + "/package.json", "utf8")).version || null; }
+  catch (e) { if (e.code !== "ENOENT") why = "an unreadable package.json (" + (e.code || e.message) + ")"; }
+  if (!want) bad.push(n + " (not in package-lock.json)");
+  else if (/^(file|link):/.test(want) ? !have : have !== want) bad.push(n + " (installed " + (have || why) + ", lockfile " + want + ")");
+}
+if (bad.length) { console.error("ERROR: node_modules does not match the lockfile; run npm install:\n  " + bad.join("\n  ")); process.exit(1); }
+' || exit 1
 export APPLE_ID="sahil.nihal09@gmail.com"
 export APPLE_TEAM_ID="Z349CC556Z"
 APPLE_APP_SPECIFIC_PASSWORD="$(security find-generic-password -s dobius-notary-password -w)" || { echo "ERROR: notary password not in Keychain (service dobius-notary-password)" >&2; exit 1; }
