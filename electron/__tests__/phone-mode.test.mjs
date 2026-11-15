@@ -191,6 +191,8 @@ test('take: the mode must read the same on two looks in a row, each with no draf
   for (const [over, code] of [
     [{ promptMode: () => null }, 'cannot'],
     [{ promptMode: (() => { let i = 0; return () => (i++ % 2 ? 'plan' : 'default'); })() }, 'cannot'],
+    // Two frames of one redraw read the same mode, but the screen is still changing (Codex r36e).
+    [{ promptMode: () => 'default', screen: (() => { let i = 0; return async () => ({ lines: ['x', `frame ${i++}`], modes: {} }); })() }, 'cannot'],
     // The look that supplies the mode shows a draft typed before the move began.
     [{ promptBox: (() => { let i = 0; return () => (i++ ? 'do not lose this draft' : ''); })() }, 'draft'],
   ]) {

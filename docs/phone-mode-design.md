@@ -456,7 +456,8 @@ Shift+Tab gets permission cards on the phone and comes back in manual (ship-test
 - The permission mode comes from the TUI's footer, every row under the input box (a custom statusLine may print its
   own rows there first, and of several mode lines the strictest is taken). The screen is a rolling buffer and a redraw
   caught halfway can read as no mode, or as a statusLine's own mode line while Claude's is half drawn, so it is read
-  until two looks 300 ms apart give the same mode, each an idle prompt with no draft (at most 4 looks). Never settled,
+  until two looks 300 ms apart show the same screen (every row) and a mode, each an idle prompt with no draft (at most
+  4 looks); a row that starts like a mode line but is not a whole one makes the footer unreadable. Never settled,
   the move is refused ("Claude's permission mode could not be read in the tab"), never made with the launch flag,
   which can be looser than the screen (Codex r36). A Claude Code that rewords the footer therefore blocks moves until FOOTER_MODE_RE learns it.
 - After Dobius quits or restarts, a phone-mode tab comes back on the Mac (the normal auto-resume).
