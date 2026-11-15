@@ -47,14 +47,20 @@ const sameStart = (a, b) => typeof a === 'string' && typeof b === 'string' && a.
 const plain = (s, n = 300) => String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').slice(0, n);
 
 /**
- * The modes a move carries. The TUI comes back with the mode shown on screen when it was stopped, else its launch flag
- * (unchanged from before). The phone side runs the shown mode; with none shown it never runs looser than asking first:
- * the launch flag only when it asks at least as much (plan, default, dontAsk), otherwise default.
+ * The modes a move carries. The mode read off the screen can only make either side STRICTER than the launch flag,
+ * never looser: screen text is a read of rows, the flag is what the person started Claude with (security review of
+ * 6e6a31c). The TUI comes back in the shown mode when it is no looser than the flag (with no flag, only a strict shown
+ * mode, else no flag at all, which is how it started). The phone never runs looser than asking first: the stricter of
+ * the shown mode and the flag, capped at default.
  */
+const LOOSENESS = { dontAsk: 0, plan: 1, default: 2, acceptEdits: 3, auto: 4, bypassPermissions: 5 };
 const STRICT_MODES = new Set(['plan', 'default', 'dontAsk']);
+const stricter = (a, b) => (LOOSENESS[a] <= LOOSENESS[b] ? a : b);
 export function carryFlags(flags, shownMode) {
-  const permissionMode = shownMode || flags?.permissionMode || null;
-  const phoneMode = shownMode || (STRICT_MODES.has(flags?.permissionMode) ? flags.permissionMode : 'default');
+  const launch = flags?.permissionMode in LOOSENESS ? flags.permissionMode : null;
+  const shown = shownMode in LOOSENESS ? shownMode : null;
+  const permissionMode = launch ? (shown ? stricter(shown, launch) : launch) : (STRICT_MODES.has(shown) ? shown : null);
+  const phoneMode = [shown, launch].filter(Boolean).reduce(stricter, 'default');
   return { permissionMode, model: flags?.model ?? null, phoneMode };
 }
 

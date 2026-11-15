@@ -148,10 +148,19 @@ async function serve(runner, reply = (m) => ({ ok: true })) {
   return m;
 }
 
-test('carryFlags: the shown mode wins for both sides; with none shown the phone never runs looser than asking (round 34 ship-test)', () => {
+test('carryFlags: the shown mode can only tighten the launch flag; the phone never runs looser than asking (round 34 ship-test, security review)', () => {
   // Launched skipping permissions, then switched to manual with Shift+Tab: both sides follow the screen.
   assert.deepEqual(carryFlags({ permissionMode: 'bypassPermissions', model: 'opus' }, 'default'), { permissionMode: 'default', model: 'opus', phoneMode: 'default' });
-  assert.deepEqual(carryFlags({ permissionMode: null, model: null }, 'auto'), { permissionMode: 'auto', model: null, phoneMode: 'auto' });
+  assert.deepEqual(carryFlags({ permissionMode: 'acceptEdits' }, 'plan'), { permissionMode: 'plan', model: null, phoneMode: 'plan' });
+  // A screen claiming a looser mode than the flag is never believed, on either side.
+  assert.deepEqual(carryFlags({ permissionMode: 'default' }, 'bypassPermissions'), { permissionMode: 'default', model: null, phoneMode: 'default' });
+  assert.deepEqual(carryFlags({ permissionMode: 'acceptEdits' }, 'auto'), { permissionMode: 'acceptEdits', model: null, phoneMode: 'default' });
+  assert.deepEqual(carryFlags({ permissionMode: 'plan' }, 'default'), { permissionMode: 'plan', model: null, phoneMode: 'plan' });
+  // No flag: the TUI comes back without one unless the screen shows a strict mode; the phone asks at least.
+  assert.deepEqual(carryFlags({ permissionMode: null, model: null }, 'auto'), { permissionMode: null, model: null, phoneMode: 'default' });
+  assert.deepEqual(carryFlags({ permissionMode: null }, 'plan'), { permissionMode: 'plan', model: null, phoneMode: 'plan' });
+  assert.equal(carryFlags({ permissionMode: null }, 'bypassPermissions').permissionMode, null);
+  assert.equal(carryFlags({ permissionMode: 'default' }, 'nonsense').permissionMode, 'default');
   // Nothing shown: the TUI comes back as launched, the phone asks first unless the flag already asks as much.
   assert.deepEqual(carryFlags({ permissionMode: 'bypassPermissions', model: null }, null), { permissionMode: 'bypassPermissions', model: null, phoneMode: 'default' });
   assert.equal(carryFlags({ permissionMode: 'acceptEdits' }, null).phoneMode, 'default');

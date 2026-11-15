@@ -145,10 +145,12 @@ supported way to drive Claude Code with structured input and callbacks.
   preset, so CLAUDE.md, hooks, plugins, MCP servers and permission rules load as in the TUI.
 - `model` is carried over from the stopped process's argv (`--model`). The permission mode is the one Claude shows
   under its prompt box when the phone takes the tab (`promptFooterMode` in bridge-open-tab.js reads the footer rows:
-  manual, auto, accept edits, plan, bypass permissions), so a Shift+Tab change inside the TUI is kept. When the footer
-  cannot be read, the argv mode (`--permission-mode`, `--dangerously-skip-permissions`) is used only if it is one of
-  the strict ones (plan, default, dontAsk); a looser argv mode starts the phone session in manual, because Shift+Tab
-  may have tightened it unseen. Each value is checked against a fixed allowlist.
+  manual, auto, accept edits, plan, bypass permissions), so a Shift+Tab change inside the TUI is kept. The screen can
+  only make a mode STRICTER than the launch flag (`--permission-mode`, `--dangerously-skip-permissions`), never looser,
+  on either side (`carryFlags`, ranked dontAsk < plan < default < acceptEdits < auto < bypassPermissions): screen rows
+  are a read, the flag is what the person started Claude with. The phone session runs the stricter of the two, capped
+  at manual. With no flag, the TUI comes back with no flag unless the screen shows a strict mode (plan, manual). Each
+  value is checked against a fixed allowlist.
 - `CLAUDE_CODE_ENTRYPOINT=remote_mobile` unless the shell already set one. The SDK would otherwise tag the session
   `sdk-ts`, and both `claude --resume`'s picker and Dobius's History hide `sdk-*` sessions. This is Happy's fix
   (slopus/happy#1202).
