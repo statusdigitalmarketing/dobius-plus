@@ -177,22 +177,32 @@ test('take: the mode shown on screen goes to the phone and comes back to the TUI
   } finally { await ctx.cleanup(); }
 });
 
-test('take: a permission mode it cannot read is looked at once more, then the move is refused, never loosened (Codex r36)', async () => {
+test('take: the mode must read the same on two looks in a row, each with no draft, or the move is refused (Codex r36)', async () => {
+  // A redraw caught halfway: no mode, then a statusLine's own "manual" while Claude's plan line is half drawn.
+  const seq = [null, 'default', 'plan', 'plan'];
   let reads = 0;
-  let ctx = setup({ promptMode: () => (++reads >= 2 ? 'plan' : null) });
+  let ctx = setup({ promptMode: () => seq[reads++] });
   try {
     const { rok } = await live(ctx);
-    assert.equal(reads, 2, 'a second look');
+    assert.equal(reads, 4);
     assert.equal(rok.permissionMode, 'plan');
+    assert.equal(ctx.calls.restart[0].phone.permissionMode, 'plan');
   } finally { await ctx.cleanup(); }
-  ctx = setup({ promptMode: () => null });
-  try {
-    await ctx.mode.init();
-    const r = await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
-    assert.equal(r.code, 'cannot', JSON.stringify(r));
-    assert.deepEqual([ctx.calls.stop, ctx.calls.restart], [[], []], 'nothing was stopped or restarted');
-    assert.equal(ctx.mode.heldSessions().size, 0);
-  } finally { await ctx.cleanup(); }
+  for (const [over, code] of [
+    [{ promptMode: () => null }, 'cannot'],
+    [{ promptMode: (() => { let i = 0; return () => (i++ % 2 ? 'plan' : 'default'); })() }, 'cannot'],
+    // The look that supplies the mode shows a draft typed before the move began.
+    [{ promptBox: (() => { let i = 0; return () => (i++ ? 'do not lose this draft' : ''); })() }, 'draft'],
+  ]) {
+    ctx = setup(over);
+    try {
+      await ctx.mode.init();
+      const r = await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
+      assert.equal(r.code, code, JSON.stringify(r));
+      assert.deepEqual([ctx.calls.stop, ctx.calls.restart], [[], []], 'nothing was stopped or restarted');
+      assert.equal(ctx.mode.heldSessions().size, 0);
+    } finally { await ctx.cleanup(); }
+  }
 });
 
 test('descends walks parents in one listing', () => {

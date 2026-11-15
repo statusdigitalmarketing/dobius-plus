@@ -31,7 +31,8 @@ export const COMMAND_MS = 10_000; // a command to the runner must be answered wi
 const LATE_MS = 5 * 60_000; // a send that timed out still hears the runner's late answer this long
 export const SPAWN_WAIT_MS = 5_000; // a runner hello waits this long for its gate's spawn report
 const TICK_MS = 1_000;
-const MODE_RETRY_MS = 400; // a second look at the screen when the permission mode line was not readable
+const MODE_RETRY_MS = 300; // between looks at the screen for the permission mode
+const MODE_LOOKS = 4; // looks before a mode that never reads the same twice refuses the move
 // What became of a run's phone messages is kept after the run ends, so a phone that comes back later learns which never
 // reached Claude (Codex r34). ponytail: memory only, at most ENDED_TABS tabs x ENDED_RUNS runs x ENDED_LOST ids, for a
 // day; a phone asking after a Mac restart finds nothing and shows those messages as not confirmed.
@@ -258,18 +259,23 @@ export function createPhoneMode(d) {
     if (!(await d.hasTranscript(sessionId).catch(() => false))) return fail('no_transcript', 'that conversation has nothing to resume yet');
     const act = d.activity(tabId);
     if (rec.status === 'busy' || act?.status === 'working') return fail('working', 'Claude is working; move it when the turn is over');
-    const sc = await d.screen(tabId).catch(() => null);
-    const box = sc ? d.promptBox(sc.lines, sc.modes) : null;
-    if (d.inputHeld(tabId) || typeof box !== 'string' || box.trim()) return fail('draft', "there is unsent text in the tab's prompt, or it could not be read");
     // The mode Claude shows now: Shift+Tab changes it with no flag or record saying so, so the launch flags alone could
     // run the phone side looser than what the person was looking at (round 34 ship-test). The screen is a rolling
-    // buffer, so a redraw caught halfway reads as no mode: look once more, and if it still cannot be read, refuse
-    // rather than fall back to the launch flag, which can be looser than the screen (Codex r36).
+    // buffer, so a redraw caught halfway can read as no mode, or as a statusLine's own mode line while Claude's is
+    // half drawn (Codex r36). So it is read until two looks in a row agree, each an idle prompt with no draft (the
+    // look that supplies the mode is the one checked); never settled, the move is refused rather than made with the
+    // launch flag, which can be looser than the screen.
     const modeOf = (s) => (s && d.promptMode ? d.promptMode(s.lines, s.modes) : null);
-    let shownMode = modeOf(sc);
-    if (!shownMode) {
-      await new Promise((r) => setTimeout(r, MODE_RETRY_MS));
-      shownMode = modeOf(await d.screen(tabId).catch(() => null));
+    let shownMode = null;
+    let prev = null;
+    for (let look = 0; look < MODE_LOOKS && !shownMode; look += 1) {
+      if (look) await new Promise((r) => setTimeout(r, MODE_RETRY_MS));
+      const sc = await d.screen(tabId).catch(() => null);
+      const box = sc ? d.promptBox(sc.lines, sc.modes) : null;
+      if (d.inputHeld(tabId) || typeof box !== 'string' || box.trim()) return fail('draft', "there is unsent text in the tab's prompt, or it could not be read");
+      const m = modeOf(sc);
+      if (m && m === prev) shownMode = m;
+      prev = m;
     }
     if (!shownMode) return fail('cannot', "Claude's permission mode could not be read in the tab; try again in a moment");
     const argv = await d.processArgv(info.pid).catch(() => null);
