@@ -469,9 +469,13 @@ test('the dark flag deleted mid-run: the conversation is given back and nothing 
 });
 
 test('the dark flag deleted before the gate or runner says hello: nothing starts (Codex r38)', async () => {
-  for (const when of ['gate', 'runner']) {
+  for (const when of ['gate', 'gate-ps', 'runner']) {
     let on = true;
     const ctx = setup({ on: () => on });
+    if (when === 'gate-ps') { // turned off while the gate's ps runs (Codex r39)
+      const ps = ctx.sys.psAll;
+      ctx.sys.psAll = async (...a) => { const out = await ps(...a); on = false; return out; };
+    }
     try {
       await ctx.mode.init();
       const r = await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
@@ -484,7 +488,7 @@ test('the dark flag deleted before the gate or runner says hello: nothing starts
       const gate = client(socketPath(dir));
       gate.send({ t: 'gate', token: gateToken, pid: 2100 });
       const gok = await gate.next();
-      if (when === 'gate') {
+      if (when !== 'runner') {
         assert.equal(gok.t, 'refused');
         assert.equal(gok.code, 'off');
       } else {

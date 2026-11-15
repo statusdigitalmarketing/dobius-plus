@@ -420,14 +420,6 @@ export function createPhoneMode(d) {
     }
     const run = r.run;
     dropTokenFile(ticketPath(runDir, run.runId), log); // already consumed by the gate; a leftover would be a bug
-    // Turned off between the take and the gate's hello: nothing starts (Codex r38). A refused gate exits non-zero.
-    if (!d.on()) {
-      reg.end(run, 'phone mode was turned off on this Mac, so the conversation was not moved');
-      conn.send({ t: 'refused', code: 'off', error: 'phone mode is off on this Mac' });
-      afterChange(run);
-      conn.close('refused');
-      return;
-    }
     // The new shell's startup files or prompt hooks can change CLAUDE_CONFIG_DIR after the spawn chose the account: the
     // gate reports what it inherited and must match what the conversation ran on, or nothing starts (Codex P1, impl
     // round 16). The gate exits non-zero on a refusal, so the launch's own `claude --resume` does not run either.
@@ -442,10 +434,13 @@ export function createPhoneMode(d) {
     const rows = Number.isSafeInteger(m.pid) && m.pid > 1 ? parsePsAll(await sys.psAll().catch(() => '')) : [];
     const gateRow = rows.find((x) => x.pid === m.pid);
     const start = gateRow && Number.isSafeInteger(run.ptyPid) && descends(rows, m.pid, run.ptyPid) ? gateRow.lstart : null;
-    const a = start ? reg.acceptGate(run, m.pid) : { ok: false, code: 'bad_pid' };
+    // Turned off since the take, the ps above included: nothing starts, so the gate never spawns a runner (Codex r38,
+    // r39). Checked here, with no await before the accept. A refused gate exits non-zero.
+    const off = !(d.on() && unlocked());
+    const a = off ? { ok: false, code: 'off' } : start ? reg.acceptGate(run, m.pid) : { ok: false, code: 'bad_pid' };
     if (!a.ok) {
-      reg.end(run, 'the tab could not start phone mode');
-      conn.send({ t: 'refused', code: a.code, error: 'phone mode could not start in this tab' });
+      reg.end(run, off ? 'phone mode was turned off on this Mac, so the conversation was not moved' : 'the tab could not start phone mode');
+      conn.send({ t: 'refused', code: a.code, error: off ? 'phone mode is off on this Mac' : 'phone mode could not start in this tab' });
       afterChange(run);
       conn.close('refused');
       return;
