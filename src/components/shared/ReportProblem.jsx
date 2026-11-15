@@ -37,8 +37,7 @@ export default function ReportProblem() {
     let closing = false; // a click outside is closing it: the focus that click moves is the person's, never pulled back
     const onDown = (e) => {
       if (boxRef.current?.contains(e.target) || btnRef.current?.contains(e.target)) return;
-      closing = true;
-      setOpen(false);
+      closeOutside();
     };
     // While it is open, focus is the popover's: a click outside closes it (onDown) before anything else can take focus,
     // so focus anywhere else came from something asynchronous (a disabled control, a terminal's Improve resolving and
@@ -57,14 +56,32 @@ export default function ReportProblem() {
       }
       pullBack();
     };
+    // A click inside an embedded browser (<webview>) never reaches this document's mousedown; focus landing on the
+    // webview is the only sign of it, so that is an outside click: it closes (Codex PR 18 r3, as BrowserPane does).
+    const isGuest = (el) => el?.tagName === 'WEBVIEW' || el?.tagName === 'IFRAME';
+    const closeOutside = () => { closing = true; setOpen(false); };
     const onFocusIn = (e) => {
       if (closing || boxRef.current?.contains(e.target) || btnRef.current?.contains(e.target)) return;
+      if (isGuest(e.target)) { closeOutside(); return; }
       pullBack();
+    };
+    // A webview whose page is still starting moves focus without a focus event; the window's blur says it. Read at the
+    // blur itself: a guest still loading can hand focus straight back to this window a moment later (seen in the
+    // harness), so a deferred look misses the click. A Cmd+Tab away leaves focus on the box, so it never closes.
+    let blurTimer = null;
+    const onBlur = () => {
+      if (closing) return;
+      if (isGuest(document.activeElement)) { closeOutside(); return; }
+      clearTimeout(blurTimer);
+      blurTimer = setTimeout(() => { if (!closing && isGuest(document.activeElement)) closeOutside(); }, 0);
     };
     document.addEventListener('mousedown', onDown, true);
     document.addEventListener('keydown', onKey, true);
     document.addEventListener('focusin', onFocusIn, true);
+    window.addEventListener('blur', onBlur);
     return () => {
+      clearTimeout(blurTimer);
+      window.removeEventListener('blur', onBlur);
       document.removeEventListener('mousedown', onDown, true);
       document.removeEventListener('keydown', onKey, true);
       document.removeEventListener('focusin', onFocusIn, true);
