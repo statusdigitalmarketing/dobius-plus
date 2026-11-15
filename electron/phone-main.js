@@ -135,6 +135,7 @@ export function createPhoneMain(m) {
     exe: m.exe,
     runnerPath: m.runnerPath,
     on: () => phoneModeOn(m.settings(), m.platform ?? process.platform, phoneLabsOn(m.userData)),
+    unlocked: () => phoneLabsOn(m.userData),
     tabs: () => m.tabs(),
     inputSeq: (id) => m.inputSeq(id),
     inputHeld: (id) => m.inputHeld(id),

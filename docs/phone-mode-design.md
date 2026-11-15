@@ -379,10 +379,14 @@ does. Only sending and answering change.
 ## Setting
 
 **Dark flag (Sam, 2026-11-15):** phone mode ships hidden. It is offered only while the file `<userData>/labs/phone-mode`
-exists (`phoneLabsOn` in electron/phone-main.js, re-read at most every 5 s): until then `phoneModeOn` is false whatever
+exists (`phoneLabsOn` in electron/phone-main.js; a no is cached 5 s, a yes is read from disk every time): until then `phoneModeOn` is false whatever
 the setting says, and Settings hides the toggle unless the setting is already on (so it can always be turned off).
 Unlock on a Mac: `mkdir -p ~/Library/Application\ Support/dobius-plus/labs && touch ~/Library/Application\ Support/dobius-plus/labs/phone-mode`;
-delete the file to hide it again. No deploy either way.
+delete the file to hide it again. No deploy either way. Deleting it is also the kill switch (Codex r38): a move in
+flight stops before the tab is restarted or the gate and runner are accepted, and a conversation already on the phone is
+given back to its tab (the runner's own Give back, else the run ends) with sends refused meanwhile. Turning the SETTING
+off is gentler on purpose (Codex r26): no new moves, and a conversation already on the phone keeps working until it
+comes back.
 
 Settings > Mobile Access > **Drive conversations from the phone (beta)**, off by default. macOS only in v1 (the launch is a
 zsh/bash script; the same rule `restarterFor` applies today). When off, `authed.features` does not offer `phone` and

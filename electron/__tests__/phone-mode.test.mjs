@@ -432,6 +432,80 @@ test('the setting turned off mid-run: no new move, but the run still takes messa
   } finally { await ctx.cleanup(); }
 });
 
+test('take: phone mode turned off while Claude is stopping: the tab is not restarted on the phone (Codex r38)', async () => {
+  let on = true;
+  const ctx = setup({ on: () => on, alive: () => { on = false; return false; } });
+  try {
+    await ctx.mode.init();
+    const r = await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
+    assert.equal(r.code, 'off', JSON.stringify(r));
+    assert.match(r.error, /claude --resume/);
+    assert.deepEqual(ctx.calls.restart, []);
+    assert.equal(ctx.mode.heldSessions().size, 0);
+  } finally { await ctx.cleanup(); }
+});
+
+test('the dark flag deleted mid-run: the conversation is given back and nothing new is sent (Codex r38)', async () => {
+  let unlocked = true;
+  const ctx = setup({ unlocked: () => unlocked });
+  try {
+    const { runId, runner } = await live(ctx);
+    unlocked = false;
+    assert.equal((await ctx.mode.send('T1', runId, 'after', 'send-locked')).code, 'off');
+    const [, m] = await Promise.all([ctx.mode._tick(), serve(runner)]);
+    assert.equal(m.t, 'give-back', 'asked the runner to give it back');
+    // A runner that cannot give back is ended instead.
+    await ctx.mode._tick();
+    const ctx2 = setup({ unlocked: () => unlocked });
+    try {
+      unlocked = true;
+      const live2 = await live(ctx2);
+      unlocked = false;
+      await Promise.all([ctx2.mode._tick(), serve(live2.runner, () => ({ ok: false, code: 'busy' }))]);
+      await sleep(20);
+      assert.equal(ctx2.mode.stateOf('T1').status, 'ending');
+    } finally { await ctx2.cleanup(); }
+  } finally { await ctx.cleanup(); }
+});
+
+test('the dark flag deleted before the gate or runner says hello: nothing starts (Codex r38)', async () => {
+  for (const when of ['gate', 'runner']) {
+    let on = true;
+    const ctx = setup({ on: () => on });
+    try {
+      await ctx.mode.init();
+      const r = await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
+      assert.equal(r.ok, true);
+      const dir = ctx.mode._runDir();
+      const gateToken = fs.readFileSync(ticketPath(dir, r.runId), 'utf8');
+      fs.unlinkSync(ticketPath(dir, r.runId));
+      ctx.sys.table.set(2100, { pid: 2100, pgid: 2000, ppid: 2000 });
+      if (when === 'gate') on = false;
+      const gate = client(socketPath(dir));
+      gate.send({ t: 'gate', token: gateToken, pid: 2100 });
+      const gok = await gate.next();
+      if (when === 'gate') {
+        assert.equal(gok.t, 'refused');
+        assert.equal(gok.code, 'off');
+      } else {
+        assert.equal(gok.t, 'gate-ok');
+        ctx.sys.table.set(2200, { pid: 2200, pgid: 2200, ppid: 2100, command: `/x/Dobius+ /x/phone-runner.mjs run ${r.runId}` });
+        gate.send({ t: 'runner-spawned', pid: 2200, lstart: T0 });
+        await sleep(30);
+        on = false;
+        const runner = client(socketPath(dir));
+        runner.send({ t: 'runner', token: gok.runnerToken, pid: 2200 });
+        const rr = await runner.next();
+        assert.equal(rr.t, 'refused');
+        assert.equal(rr.code, 'off');
+        runner.end();
+      }
+      gate.end();
+      assert.equal(ctx.mode.stateOf('T1').status, 'ending');
+    } finally { await ctx.cleanup(); }
+  }
+});
+
 test('a send the runner refuses can go again with the same id; one that timed out is not known until the runner answers (Codex r26, r28)', async () => {
   const ctx = setup({ commandMs: 300 });
   try {

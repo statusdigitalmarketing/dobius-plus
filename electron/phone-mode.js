@@ -82,6 +82,10 @@ export function createPhoneMode(d) {
   const sys = d.sys || realSys;
   const log = d.log || (() => {});
   const now = d.now || Date.now;
+  // The dark flag alone (phone-main.js phoneLabsOn), apart from the setting. Turning the SETTING off only stops new
+  // moves; deleting the flag file is the kill switch and sends every conversation on the phone back to its tab (Codex
+  // r38). Without the dep (tests) it reads as unlocked.
+  const unlocked = () => { try { return d.unlocked ? d.unlocked() === true : true; } catch { return false; } };
   // isLive is asked only when the generation map is full (2000 tabs moved in one launch).
   const reg = createPhoneRegistry({ isLive: (id) => { try { return d.tabs().some((t) => t.id === id); } catch { return true; } } });
   const store = createRunStore(path.join(d.userData, 'phone-runs.json'), log);
@@ -321,6 +325,7 @@ export function createPhoneMode(d) {
     if (d.alive(info.pid)) return cancel('failed', `Claude did not stop within ${STOP_MS / 1000} seconds, so nothing else was changed`);
     if (d.inputSeq(tabId) !== inputSeq) return cancel('typed', `Claude stopped, but something was typed in the tab, so it was not moved. ${manual}`);
     if (!stillOk()) return cancel('revoked', `Claude stopped, but this phone is no longer paired, so it was not moved. ${manual}`);
+    if (!d.on()) return cancel('off', `Claude stopped, but phone mode was turned off, so it was not moved. ${manual}`); // Codex r38
     let restarted = false;
     try {
       restarted = d.restart(tabId, cwd, {
@@ -415,6 +420,14 @@ export function createPhoneMode(d) {
     }
     const run = r.run;
     dropTokenFile(ticketPath(runDir, run.runId), log); // already consumed by the gate; a leftover would be a bug
+    // Turned off between the take and the gate's hello: nothing starts (Codex r38). A refused gate exits non-zero.
+    if (!d.on()) {
+      reg.end(run, 'phone mode was turned off on this Mac, so the conversation was not moved');
+      conn.send({ t: 'refused', code: 'off', error: 'phone mode is off on this Mac' });
+      afterChange(run);
+      conn.close('refused');
+      return;
+    }
     // The new shell's startup files or prompt hooks can change CLAUDE_CONFIG_DIR after the spawn chose the account: the
     // gate reports what it inherited and must match what the conversation ran on, or nothing starts (Codex P1, impl
     // round 16). The gate exits non-zero on a refusal, so the launch's own `claude --resume` does not run either.
@@ -469,9 +482,10 @@ export function createPhoneMode(d) {
     const verified = !!row && run.runnerPid === m.pid && sameStart(row.lstart, run.runnerStart)
       && Number.isSafeInteger(run.ptyPid) && descends(rows, m.pid, run.ptyPid);
     if (verified) learnShellStart(run, rows, m.pid);
-    const a = reg.acceptRunner(run, m.pid, verified);
+    // Turned off while the runner was starting: it is refused and the tab gets the conversation back (Codex r38).
+    const a = d.on() && unlocked() ? reg.acceptRunner(run, m.pid, verified) : { ok: false, code: 'off' };
     if (!a.ok) {
-      reg.end(run, a.code === 'not_verified' ? 'the phone side could not be confirmed as this tab\'s' : 'the phone session had already ended');
+      reg.end(run, a.code === 'off' ? 'phone mode was turned off on this Mac' : a.code === 'not_verified' ? 'the phone side could not be confirmed as this tab\'s' : 'the phone session had already ended');
       conn.send({ t: 'refused', code: a.code, error: 'phone mode stopped' });
       afterChange(run);
       conn.close('refused');
@@ -541,6 +555,16 @@ export function createPhoneMode(d) {
     const t = now();
     if (run.status === 'starting' && t - run.startedAt > HELLO_MS) endRun(run, 'phone mode did not start in time');
     if (t - run.startedAt > TICKET_MS) dropTokenFile(ticketPath(runDir, run.runId), log);
+    if (run.status !== 'ending' && !run.released && !unlocked() && !run.lockedOut) {
+      // The kill switch: give the conversation back the way the phone's Give back does (the runner ends its turn and
+      // the tab resumes it), or end the run when the runner cannot be asked.
+      run.lockedOut = true;
+      const conn = conns.get(run.runId);
+      const off = 'phone mode was turned off on this Mac';
+      if (conn && ['idle', 'working', 'waiting'].includes(run.status)) {
+        void command(run, conn, { t: 'give-back' }).then((r) => { if (!r?.ok && run.status !== 'ending') endRun(run, off); }, () => endRun(run, off));
+      } else endRun(run, off);
+    }
     if (run.status !== 'ending') {
       if (t - (run.aliveAt ?? 0) > ALIVE_MS) { run.aliveAt = t; record(run); }
       return;
@@ -623,10 +647,12 @@ export function createPhoneMode(d) {
   const SEND_NOT_TAKEN = new Set(['not_live', 'busy', 'bad_request']);
 
   // Not gated on the setting: turning it off stops new moves (take), but a conversation already on the phone must
-  // still take messages, answers, Stop and Give back, or the person is stuck with it there (Codex r26).
+  // still take messages, answers, Stop and Give back, or the person is stuck with it there (Codex r26). The dark flag
+  // is different: without it the run is being given back (settleOne), so nothing new is sent (Codex r38).
   function liveRun(tabId, runId) {
     const run = reg.runOfTab(tabId);
     if (!run || run.released || run.runId !== runId) return { error: fail('stale_run', 'that phone session is over') };
+    if (!unlocked() || run.lockedOut) return { error: fail('off', 'phone mode was turned off on this Mac; the conversation is going back to the tab') };
     if (!['idle', 'working', 'waiting'].includes(run.status)) return { error: fail('not_live', run.status === 'ending' ? 'the phone session is ending' : 'the phone session is still starting') };
     const conn = conns.get(run.runId);
     if (!conn) return { error: fail('not_live', 'the phone session is not connected') };
