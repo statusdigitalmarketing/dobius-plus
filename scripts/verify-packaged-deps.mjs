@@ -3,7 +3,7 @@
 // out and the app died at launch with ERR_MODULE_NOT_FOUND). release.sh runs it while the release is still a draft.
 //
 // From each production dependency it follows `dependencies` (not optional or peer ones) the way Node resolves them:
-// <dir>/node_modules/<name>, then each parent's node_modules up to the app root (Codex r1: a missing transitive
+// <dir>/node_modules/<name>, then each ancestor folder's node_modules up to the app root (Codex r1: a missing transitive
 // dependency such as chokidar's readdirp also kills the app at launch). A manifest asarUnpack moved out of the asar is
 // only listed in the header, so its file must also exist under app.asar.unpacked (Codex r1).
 //
@@ -32,16 +32,15 @@ function manifest(rel) {
   try { return { json: JSON.parse(text) }; } catch (e) { return { error: `not valid JSON (${e.message})` }; }
 }
 
-// Node's lookup from a package directory ('' is the app root).
+// Node's lookup from a package directory ('' is the app root): every ancestor folder, one level at a time, except
+// folders that are themselves named node_modules (Codex r2: a scope folder's own node_modules counts).
 function resolve(name, fromDir) {
-  let dir = fromDir;
-  for (;;) {
-    const rel = path.posix.join(dir, 'node_modules', name, 'package.json');
-    if (files.has(rel)) return rel;
+  for (let dir = fromDir; ; dir = path.posix.dirname(dir) === '.' ? '' : path.posix.dirname(dir)) {
+    if (path.posix.basename(dir) !== 'node_modules') {
+      const rel = path.posix.join(dir, 'node_modules', name, 'package.json');
+      if (files.has(rel)) return rel;
+    }
     if (!dir) return null;
-    const up = dir.split('/node_modules/');
-    up.pop();
-    dir = up.length ? up.join('/node_modules/') : '';
   }
 }
 
