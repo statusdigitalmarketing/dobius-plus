@@ -6,6 +6,7 @@
 // it), keydown stops at the dialog root so window shortcuts never fire while typing, focus returns to the button.
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../../store/store';
+import { isWindows } from '../../../shared/platform.js';
 
 const MAX = 4000;
 
@@ -212,7 +213,7 @@ export default function ReportProblem() {
                 />
               )}
               <div className="flex items-center justify-between">
-                <span style={{ fontSize: 11, color: 'var(--dim)' }}>⌘↩ to send</span>
+                <span style={{ fontSize: 11, color: 'var(--dim)' }}>{isWindows() ? 'Ctrl+Enter to send' : '⌘↩ to send'}</span>
                 <div className="flex gap-2">
                   <button type="button" className="rounded px-2.5" style={{ height: 22, fontSize: 12, border: '1px solid var(--border)', cursor: 'default' }} onClick={close}>Cancel</button>
                   <button type="button" className="rounded px-2.5" disabled={!text.trim()} aria-disabled={sending}

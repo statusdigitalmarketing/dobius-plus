@@ -202,6 +202,16 @@ try {
   step('a snoozed tab comes back with its output', !!marked && !!back, marked ? '' : 'marker never printed');
   await page.screenshot({ path: path.join(out, '7-snooze-back.png') });
 
+  // Report a problem names the Windows send key (Max, 2.2.33: it showed the Mac's command-return).
+  await page.locator('button[aria-label="Report a problem"]').first().click({ timeout: 10000 });
+  const hint = await waitFor(async () => page.evaluate(() => {
+    const d = document.querySelector('[role="dialog"][aria-label="Report a problem"]');
+    return d ? d.innerText : null;
+  }), 10000, 500);
+  step('Report a problem says Ctrl+Enter to send', !!hint && hint.includes('Ctrl+Enter to send') && !hint.includes('\u2318'), hint ? '' : 'panel did not open');
+  await page.screenshot({ path: path.join(out, '8-report-problem.png') });
+  await page.keyboard.press('Escape');
+
   // Close every window: the app must quit by itself on Windows.
   for (const ctx of browser.contexts()) for (const p of ctx.pages()) await p.evaluate(() => window.close()).catch(() => {});
   const quit = await waitFor(async () => exited, 30000, 500);
