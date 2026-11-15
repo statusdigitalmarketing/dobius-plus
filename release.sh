@@ -37,7 +37,7 @@ security find-identity -v -p codesigning | grep -q "$IDENTITY" || { echo "ERROR:
 xcrun --find notarytool >/dev/null || { echo "ERROR: notarytool missing" >&2; exit 1; }
 # node_modules must match package.json BEFORE the version bump: a dependency merged from another worktree and never
 # installed here passed npm test and failed the esbuild step after 2.2.33 was already bumped and pushed.
-npm ls --depth=0 >/dev/null 2>&1 || { echo "ERROR: node_modules does not match package.json (npm ls); run npm install" >&2; exit 1; }
+npm ls --depth=0 --include=dev >/dev/null 2>&1 || { echo "ERROR: node_modules does not match package.json (npm ls); run npm install" >&2; exit 1; }
 export APPLE_ID="sahil.nihal09@gmail.com"
 export APPLE_TEAM_ID="Z349CC556Z"
 APPLE_APP_SPECIFIC_PASSWORD="$(security find-generic-password -s dobius-notary-password -w)" || { echo "ERROR: notary password not in Keychain (service dobius-notary-password)" >&2; exit 1; }
