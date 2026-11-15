@@ -1201,3 +1201,9 @@
 - **FIX**: `scripts/whats-new-check.mjs` `machineNamedMac(line)` refuses any standalone "Mac"/"mac" word in a notes line (after removing "Add a Mac"), so release.sh stops on it. Write "this computer" or "the computer".
 - **CONTEXT**: A reviewer's wording note that repeats across releases is a missing check, not a typo. Turn it into a test the release refuses on, the first time it repeats.
 - **DETECTION**: `node scripts/whats-new-check.mjs patch` (and `grep -n "[Mm]ac\b" electron/whats-new/*.md` for older notes)
+
+### Testing - 2026-11-15
+- **MISTAKE**: `electron/__tests__/phone-main.test.mjs` was never in `npm test`'s chain, so the round 36 "mode unreadable refuses the move" change broke its account-refusal test (the stub screen had no mode line) and the 1014-pass suite stayed green.
+- **FIX**: Added `test:phonemain` (with the electron stub loader) to `test:chain`, and gave the test a readable mode.
+- **CONTEXT**: A test file that no script runs is worse than none: it reads as coverage. When adding a test file, add its script to the chain in the same commit.
+- **DETECTION**: `for f in electron/__tests__/*.test.mjs; do grep -q "$(basename $f)" package.json || echo "not run: $f"; done`

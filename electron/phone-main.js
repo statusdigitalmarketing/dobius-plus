@@ -5,11 +5,29 @@
  * (electron/__tests__/phone-main.test.mjs); the rest is a direct mapping onto functions the account move already uses.
  */
 import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { createPhoneMode } from './phone-mode.js';
 
-/** Phone mode is offered on macOS only (the launch is a zsh or bash script) and only with the setting on. */
-export function phoneModeOn(settings, platform = process.platform) {
-  return platform === 'darwin' && settings?.phoneMode === true;
+/**
+ * Phone mode ships dark (Sam, 2026-11-15): it is offered only once `<userData>/labs/phone-mode` exists, so a release
+ * carries it to no one until that file is made (`touch`; delete it to hide it again, no deploy). Checked at most every
+ * 5 s, because phoneModeOn is asked on every phone request.
+ */
+export const PHONE_LABS_FILE = path.join('labs', 'phone-mode');
+const LABS_TTL_MS = 5_000;
+const labs = { dir: null, at: -Infinity, on: false };
+export function phoneLabsOn(userData, now = Date.now()) {
+  if (labs.dir === userData && now - labs.at < LABS_TTL_MS) return labs.on;
+  let on = false;
+  try { on = !!userData && fs.statSync(path.join(userData, PHONE_LABS_FILE)).isFile(); } catch { on = false; }
+  Object.assign(labs, { dir: userData, at: now, on });
+  return on;
+}
+
+/** Phone mode is offered on macOS only (the launch is a zsh or bash script), only once unlocked, and with the setting on. */
+export function phoneModeOn(settings, platform = process.platform, unlocked = false) {
+  return platform === 'darwin' && unlocked === true && settings?.phoneMode === true;
 }
 
 /**
@@ -113,7 +131,7 @@ export function createPhoneMain(m) {
     log: m.log,
     exe: m.exe,
     runnerPath: m.runnerPath,
-    on: () => phoneModeOn(m.settings()),
+    on: () => phoneModeOn(m.settings(), process.platform, phoneLabsOn(m.userData)),
     tabs: () => m.tabs(),
     inputSeq: (id) => m.inputSeq(id),
     inputHeld: (id) => m.inputHeld(id),

@@ -144,7 +144,7 @@ import { hasPushSubscribers } from './push.js';
 import { initPhoneAlerts, phoneAlerts } from './phone-alerts-main.js';
 import { alertSettings } from './phone-notifier.js';
 import { shapePhoneAccounts } from './phone-accounts.js';
-import { createPhoneMain, phoneModeOn } from './phone-main.js';
+import { createPhoneMain, phoneModeOn, phoneLabsOn } from './phone-main.js';
 import { createPicker, runClaude } from './today-pick.js';
 import { createSnoozes, cardPrint } from './today-snooze.js';
 import { localDay } from '../shared/task-due.js';
@@ -3523,7 +3523,7 @@ async function setupPhoneMode() {
   });
   phoneMain = pm;
   // Before the first await: the gate must hold an earlier run's sessions from the moment Dobius is ready.
-  setPhoneMode(pm, () => phoneModeOn(getSettings()));
+  setPhoneMode(pm, () => phoneModeOn(getSettings(), process.platform, phoneLabsOn(userData)));
   setHeldSessions(() => pm.heldSessions(), { pending: (sid) => pm.heldUntilSwept(sid), settled: () => pm.whenSwept() });
   setKillSignal((id) => (pm.isPhoneTab(id) ? 'SIGKILL' : undefined));
   setPhoneTabCheck((id) => pm.isPhoneTab(id));
@@ -5796,6 +5796,9 @@ let savedBeforeQuit = false;
 // RELAUNCH_ARG makes a Windows copy wait for the single-instance lock instead of handing over.
 // No update is installed: autoInstallOnAppQuit is off, and an install in flight or attempted refuses this.
 let restartRequested = false;
+// Phone mode's dark flag (phone-main.js phoneLabsOn): Settings shows its toggle only once it is unlocked.
+ipcMain.handle('phoneMode:unlocked', () => phoneLabsOn(app.getPath('userData')));
+
 ipcMain.handle('app:restartInfo', () => {
   let autoResume = true;
   try { autoResume = getAutoResume().enabled !== false; } catch (err) { console.warn('[restart] could not read auto-resume:', err?.message || err); }

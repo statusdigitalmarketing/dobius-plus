@@ -49,6 +49,12 @@ export default function Settings() {
 
   // Mobile server state
   const [mobileStatus, setMobileStatus] = useState(null);
+  const [phoneUnlocked, setPhoneUnlocked] = useState(false); // phone mode's dark flag
+  useEffect(() => {
+    let live = true;
+    window.electronAPI?.phoneModeUnlocked?.().then((v) => { if (live) setPhoneUnlocked(v === true); }).catch(() => {});
+    return () => { live = false; };
+  }, []);
   const [qrTarget, setQrTarget] = useState('app'); // what scanning the pairing QR opens: the iPhone app or a browser
   const [mobileDevices, setMobileDevices] = useState([]);
   const [mobileBusy, setMobileBusy] = useState(false);
@@ -740,8 +746,9 @@ export default function Settings() {
           />
         </SettingRow>
 
-        {/* Phone mode (docs/phone-mode-design.md, "Setting"): macOS only, off by default. */}
-        {!isWindows() && (
+        {/* Phone mode (docs/phone-mode-design.md, "Setting"): macOS only, off by default, and hidden until unlocked
+            (<userData>/labs/phone-mode). Still shown while it is on, so it can always be turned off. */}
+        {!isWindows() && (phoneUnlocked || settings.phoneMode === true) && (
         <SettingRow
           label="Drive conversations from the phone (beta)"
           description="Adds Move to phone to a tab's chat on your phone. Claude's questions, permission prompts and plans then come to the phone as cards, and the Mac tab shows that the conversation is on your phone. Press Enter in that tab to bring it back. Turning this off leaves a conversation already on the phone there until you bring it back."

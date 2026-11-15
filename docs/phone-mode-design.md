@@ -378,6 +378,12 @@ does. Only sending and answering change.
 
 ## Setting
 
+**Dark flag (Sam, 2026-11-15):** phone mode ships hidden. It is offered only while the file `<userData>/labs/phone-mode`
+exists (`phoneLabsOn` in electron/phone-main.js, re-read at most every 5 s): until then `phoneModeOn` is false whatever
+the setting says, and Settings hides the toggle unless the setting is already on (so it can always be turned off).
+Unlock on a Mac: `mkdir -p ~/Library/Application\ Support/dobius-plus/labs && touch ~/Library/Application\ Support/dobius-plus/labs/phone-mode`;
+delete the file to hide it again. No deploy either way.
+
 Settings > Mobile Access > **Drive conversations from the phone (beta)**, off by default. macOS only in v1 (the launch is a
 zsh/bash script; the same rule `restarterFor` applies today). When off, `authed.features` does not offer `phone` and
 `phoneTake` answers `opError: off`. A conversation already on the phone keeps working until it comes back: its

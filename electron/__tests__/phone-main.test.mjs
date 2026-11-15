@@ -5,10 +5,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { phoneModeOn, pinForBinding, pressureLevel, tuiSessionIdsOf, accountProblem, createPhoneMain } from '../phone-main.js';
+import { phoneModeOn, phoneLabsOn, PHONE_LABS_FILE, pinForBinding, pressureLevel, tuiSessionIdsOf, accountProblem, createPhoneMain } from '../phone-main.js';
 
 test('on only on macOS with the setting exactly true', () => {
-  assert.equal(phoneModeOn({ phoneMode: true }, 'darwin'), true);
+  assert.equal(phoneModeOn({ phoneMode: true }, 'darwin'), false, 'dark until unlocked');
+  assert.equal(phoneModeOn({ phoneMode: true }, 'darwin', true), true);
+  assert.equal(phoneModeOn({ phoneMode: true }, 'win32', true), false);
+  assert.equal(phoneModeOn({ phoneMode: false }, 'darwin', true), false);
   assert.equal(phoneModeOn({ phoneMode: true }, 'win32'), false);
   assert.equal(phoneModeOn({ phoneMode: 'true' }, 'darwin'), false);
   assert.equal(phoneModeOn({}, 'darwin'), false);
@@ -72,6 +75,8 @@ test("the account check: the running Claude's binding must be the tab's, spelled
 test('take refuses a Claude started by hand on another account, before stopping anything (Codex impl r15)', async () => {
   const base = Buffer.byteLength(os.tmpdir()) > 40 ? '/tmp' : os.tmpdir();
   const userData = fs.realpathSync(fs.mkdtempSync(path.join(base, 'pmm-')));
+  fs.mkdirSync(path.join(userData, 'labs'));
+  fs.writeFileSync(path.join(userData, PHONE_LABS_FILE), ''); // phone mode's dark flag: unlocked for this test
   const S = '0b5c2a6e-1111-4222-8333-444455556666';
   const calls = { stop: 0, spawn: 0 };
   const accounts = [{ type: 'claude', id: 'a', dir: '/p/a' }, { type: 'claude', id: 'b', dir: '/p/b' }];
@@ -80,7 +85,7 @@ test('take refuses a Claude started by hand on another account, before stopping 
     settings: () => ({ phoneMode: true }), accounts: () => accounts, envFor: (a) => ({ CLAUDE_CONFIG_DIR: a.dir }),
     tabs: () => [{ id: 'T1', pid: process.ppid, cwd: userData, claudeConfigDir: '/p/a' }],
     inputSeq: () => 1, inputHeld: () => false, activity: () => ({ status: 'done' }),
-    screen: async () => ({ lines: [], modes: {} }), promptBox: () => '',
+    screen: async () => ({ lines: [], modes: {} }), promptBox: () => '', promptMode: () => 'default',
     // The test process stands in for the tab's Claude: a real pid with a real start time.
     claudeInfo: async () => ({ pid: process.pid, soleChild: true }),
     scan: async () => ({ groups: [{ configDir: scanDir, envUnset: false, pids: [process.pid] }] }),
@@ -109,4 +114,22 @@ test('take refuses a Claude started by hand on another account, before stopping 
     await ok.close();
     fs.rmSync(userData, { recursive: true, force: true });
   }
+});
+
+test('phone mode ships dark: unlocked only while <userData>/labs/phone-mode exists, re-read after 5 s', async () => {
+  const { default: fs } = await import('node:fs');
+  const { default: os } = await import('node:os');
+  const { default: path } = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'labs-'));
+  try {
+    assert.equal(phoneLabsOn(dir, 1000), false);
+    fs.mkdirSync(path.join(dir, 'labs'));
+    fs.writeFileSync(path.join(dir, PHONE_LABS_FILE), '');
+    assert.equal(phoneLabsOn(dir, 2000), false, 'cached for 5 s');
+    assert.equal(phoneLabsOn(dir, 7000), true);
+    fs.rmSync(path.join(dir, PHONE_LABS_FILE));
+    fs.mkdirSync(path.join(dir, PHONE_LABS_FILE));
+    assert.equal(phoneLabsOn(dir, 13000), false, 'a folder of that name is not the flag');
+    assert.equal(phoneLabsOn(null, 20000), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
