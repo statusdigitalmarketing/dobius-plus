@@ -198,9 +198,6 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
   // keeps a reply that started before the change.
   const groupsAgain = useRef(false);
   const groupsReadAt = useRef(0); // when the list read that produced `groups` started
-  // The tab and view before a double-click's first click switched to the row: closing the row puts you back there, not
-  // on its neighbour (Max, 2026-11-09).
-  const beforeClick = useRef(null);
   const refresh = useCallback(() => {
     if (!window.electronAPI?.dataGetAllProjectTabs) { setGroups([]); return; }
     if (groupsInFlight.current) { groupsAgain.current = true; return; }
@@ -473,33 +470,15 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
                   return (
                     <button
                       key={t.id}
-                      onClick={() => handleClick(g.path, t)}
-                      // A tab open in this window: right-click gives the tab bar's own menu, double-click closes it
-                      // (Brett, task 1220331878170954; Cmd+Shift+T brings a closed tab back). The terminal view comes
+                      // A double-click does nothing (Brett, Asana 1220545658471567, reversing 1220331878170954 where it
+                      // closed the tab): its second click is ignored, so a closed row is not resumed twice either.
+                      onClick={(e) => { if (e.detail > 1) return; handleClick(g.path, t); }}
+                      // A tab open in this window: right-click gives the tab bar's own menu. The terminal view comes
                       // forward first so Rename and Split have somewhere to show.
                       onContextMenu={live ? (e) => {
                         e.preventDefault();
                         setActiveView('terminal');
                         requestTabBar({ kind: 'menu', tabId: t.id, x: e.clientX, y: e.clientY });
-                      } : undefined}
-                      onMouseDown={live ? (e) => {
-                        if (e.button === 0 && e.detail === 1) {
-                          const s = useStore.getState();
-                          beforeClick.current = { row: t.id, tabId: s.activeTabId, view: s.activeView };
-                        }
-                      } : undefined}
-                      onDoubleClick={live ? () => {
-                        const b = beforeClick.current;
-                        beforeClick.current = null;
-                        // Back to where this double-click started, before the close (closing the tab on screen would
-                        // pick its neighbour). The row's own tab, or one already gone: nothing to go back to.
-                        if (b && b.row === t.id) {
-                          if (b.tabId && b.tabId !== t.id && useStore.getState().terminalTabs.some((x) => x.id === b.tabId)) showTab(b.tabId);
-                          // The view too, even when the row was the tab already shown (a pinned tab's cancelled close
-                          // must not leave the Dashboard switched to the terminal).
-                          if (b.view) setActiveView(b.view);
-                        }
-                        requestTabBar({ kind: 'close', tabId: t.id });
                       } : undefined}
                       className="w-full flex items-start gap-2 px-3 py-1.5 rounded"
                       data-testid="sidebar-tab-row"
@@ -512,7 +491,7 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
                       onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = selected ? 'var(--accent-muted)' : 'var(--surface-hover, var(--border))'; }}
                       onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = restBg; }}
                       title={live
-                        ? 'Switch to this tab. Right-click for options, double-click to close.'
+                        ? 'Switch to this tab. Right-click for options.'
                         : t.live
                           ? 'Focus the window running this tab'
                           : (g.path === currentProjectPath ? 'Resume this session' : 'Open this project window')}
