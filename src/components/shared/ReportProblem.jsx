@@ -5,6 +5,7 @@
 // Overlay rules (NOTES 2026-10-19): role="dialog" (the terminal's paste listener and the What's new popup both respect
 // it), keydown stops at the dialog root so window shortcuts never fire while typing, focus returns to the button.
 import { useEffect, useRef, useState } from 'react';
+import { useStore } from '../../store/store';
 
 const MAX = 4000;
 
@@ -12,7 +13,8 @@ export default function ReportProblem() {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState('');
   const [includeLog, setIncludeLog] = useState(true);
-  const [state, setState] = useState({ phase: 'idle' }); // idle | sending | sent | copied | error
+  const [state, setState] = useState({ phase: 'idle' }); // idle | sending | sent | copied | error (error may carry `report`)
+  const setReportProblemOpen = useStore((s) => s.setReportProblemOpen);
   const btnRef = useRef(null);
   const boxRef = useRef(null);
   const areaRef = useRef(null);
@@ -23,6 +25,12 @@ export default function ReportProblem() {
     requestAnimationFrame(() => btnRef.current?.focus());
   };
 
+  // Menu accelerators skip the DOM, so ProjectView's handlers read this flag and hold off while the popover is open.
+  useEffect(() => {
+    setReportProblemOpen(open);
+    return () => setReportProblemOpen(false);
+  }, [open, setReportProblemOpen]);
+
   useEffect(() => {
     if (!open) return undefined;
     requestAnimationFrame(() => areaRef.current?.focus());
@@ -30,13 +38,15 @@ export default function ReportProblem() {
       if (boxRef.current?.contains(e.target) || btnRef.current?.contains(e.target)) return;
       setOpen(false);
     };
-    // Escape also closes it when focus fell to the page (a button that went disabled while sending drops focus).
+    // Focus that fell to the page while open: no key reaches the window's shortcut handlers (Cmd+K types `clear` into
+    // the terminal), and Escape still closes. Keys inside the box are the box's own (its onKeyDown stops them).
     const onKey = (e) => {
-      if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
       const a = document.activeElement;
-      if (a && a !== document.body && !boxRef.current?.contains(a)) return;
-      e.preventDefault();
+      if (boxRef.current?.contains(a)) return;
+      if (a && a !== document.body) return;
       e.stopPropagation();
+      if (e.key !== 'Escape' || e.isComposing) return;
+      e.preventDefault();
       setOpen(false);
       setState((st) => (st.phase === 'sending' ? st : { phase: 'idle' }));
       requestAnimationFrame(() => btnRef.current?.focus());
@@ -76,9 +86,9 @@ export default function ReportProblem() {
       const why = r.reason === 'no-gh'
         ? 'GitHub CLI (gh) is not installed on this computer'
         : r.reason === 'no-access' ? 'this computer’s GitHub login cannot see the reports repo' : 'GitHub did not accept it';
-      setState({ phase: copied ? 'copied' : 'error', message: copied
-        ? `Not sent: ${why}. The report is copied, so paste it to Sam.`
-        : `Not sent: ${why}, and it could not be copied.` });
+      setState(copied
+        ? { phase: 'copied', message: `Not sent: ${why}. The report is copied, so paste it to Sam.` }
+        : { phase: 'error', message: `Not sent: ${why}. Copy the report below and send it to Sam.`, report: `${r.report.title}\n\n${r.report.body}` });
       return;
     }
     setState({ phase: 'error', message: 'Write what went wrong first.' });
@@ -138,28 +148,42 @@ export default function ReportProblem() {
             <>
               <textarea
                 ref={areaRef}
+                autoFocus
                 value={text}
                 maxLength={MAX}
                 rows={5}
-                disabled={sending}
+                readOnly={sending}
                 placeholder="What went wrong, and what were you doing?"
                 aria-label="What went wrong"
-                onChange={(e) => { setText(e.target.value); if (state.phase === 'error' || state.phase === 'copied') setState({ phase: 'idle' }); }}
+                onChange={(e) => { if (sending) return; setText(e.target.value); if (state.phase === 'copied' || (state.phase === 'error' && !state.report)) setState({ phase: 'idle' }); }}
                 className="w-full resize-none rounded p-2"
                 style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--fg)', fontSize: 13, lineHeight: '16px', outline: 'none' }}
               />
               <label className="flex items-center gap-2" style={{ fontSize: 12, color: 'var(--dim)', cursor: 'default' }}>
-                <input type="checkbox" checked={includeLog} disabled={sending} onChange={(e) => setIncludeLog(e.target.checked)} />
+                <input type="checkbox" checked={includeLog} aria-disabled={sending} onChange={(e) => { if (!sending) setIncludeLog(e.target.checked); }} />
                 Include recent errors from this computer
               </label>
               {(state.phase === 'error' || state.phase === 'copied') && (
                 <p role="alert" style={{ fontSize: 12, lineHeight: '15px', color: state.phase === 'copied' ? 'var(--fg)' : '#f85149' }}>{state.message}</p>
               )}
+              {state.phase === 'error' && state.report && (
+                // The clipboard refused: the whole report stays here, selected, to copy by hand (Codex PR 18 r1).
+                <textarea
+                  readOnly
+                  value={state.report}
+                  rows={4}
+                  aria-label="The report, to copy"
+                  data-testid="report-text"
+                  onFocus={(e) => e.target.select()}
+                  className="w-full resize-none rounded p-2"
+                  style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--dim)', fontSize: 11, lineHeight: '14px', outline: 'none' }}
+                />
+              )}
               <div className="flex items-center justify-between">
                 <span style={{ fontSize: 11, color: 'var(--dim)' }}>⌘↩ to send</span>
                 <div className="flex gap-2">
                   <button type="button" className="rounded px-2.5" style={{ height: 22, fontSize: 12, border: '1px solid var(--border)', cursor: 'default' }} onClick={close}>Cancel</button>
-                  <button type="button" className="rounded px-2.5" disabled={!text.trim() || sending}
+                  <button type="button" className="rounded px-2.5" disabled={!text.trim()} aria-disabled={sending}
                     style={{ height: 22, width: 64, fontSize: 12, background: 'var(--accent)', color: 'var(--bg)', opacity: !text.trim() || sending ? 0.5 : 1, cursor: 'default' }}
                     onClick={send}>{sending ? 'Sending' : 'Send'}</button>
                 </div>

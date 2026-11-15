@@ -254,6 +254,9 @@ export const useStore = create((set, get) => ({
   // the picker, so Cmd+W never closes the tab behind an open menu (Codex sidebar round 2).
   tabMenuOpen: false,
   setTabMenuOpen: (open) => set({ tabMenuOpen: !!open }),
+  // The status bar's Report a problem popover holds the keyboard the same way (Codex PR 18 r1).
+  reportProblemOpen: false,
+  setReportProblemOpen: (open) => set({ reportProblemOpen: !!open }),
 
   // Tab actions
   addTab: (projectPath) => {
