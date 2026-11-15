@@ -43,16 +43,16 @@ import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser, ensureShim } from './gws-accounts.js';
 import { gwsSetupStatus, installGws, useGwsAt, findClientFiles, useClientFile, refreshGwsEnv, setHintDir } from './gws-setup.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalProcessShared, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, CLAUDE_UNKNOWN, terminalRunsClaude, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, terminalClosing, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary, terminalBracketedPaste } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalProcessShared, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, CLAUDE_UNKNOWN, terminalRunsClaude, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, terminalClosing, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary, terminalBracketedPaste, setHeldSessions, setKillSignal } from './terminal-manager.js';
 import { isTerminalReply } from './terminal-reply.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { createSnoozeStore } from './tab-snooze.js';
-import { terminalTextTail, terminalScreenText, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, submitPending } from './chat-service.js';
+import { terminalTextTail, terminalScreenText, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, submitPending, setPhoneTabCheck } from './chat-service.js';
 import { launchCommandFor, claudeLaunchOptions, normalizeNewTabModel, normalizeNewTabPermissionMode, CLAUDE_AUTH_ENV } from '../shared/new-tab.js';
 import { sanitizeAccountPin } from '../shared/tab-label.js';
 import { renderScreenLines } from './screen-render.js';
-import { promptBoxText } from './bridge-open-tab.js';
+import { promptBoxText, promptFooterMode } from './bridge-open-tab.js';
 import { readModelCatalog, currentFromRecord, pickerCommand } from './model-picker.js';
 import { claudeJsonCandidates } from './account-identity.js';
 import {
@@ -99,7 +99,7 @@ import {
   getWindowEntryByWcId, primaryDockTarget, dockingTabs, markTearOffIdentityDocked, tearOffKeyInUse, reserveTearOffKey,
   openVisualWindow, closeVisualWindow,
 } from './window-manager.js';
-import { initAutoUpdater, installInFlight } from './auto-updater.js';
+import { initAutoUpdater, installInFlight, onBeforeInstall } from './auto-updater.js';
 import { initWhatsNew, whatsNewRestoreDone } from './whats-new.js';
 import { initWindowScreen } from './window-screen.js';
 import { provisionCert, certCapableName, certValidTo, getMagicDNSName, hasAnyCert } from './tailscale.js';
@@ -107,6 +107,7 @@ import {
   stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
   deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem, broadcastToPhones, tabLabelForNotify, setVoiceOrchestratorRoute, setVoiceOrchestratorLabel, routeVoice,
+  setPhoneMode, pushPhoneState,
 } from './mobile-server.js';
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setTabSendService, setCodexStatusHandler, setTeamBridge, setProjectBridge } from './voice-bridge.js';
 import { sendToTab } from './tab-send.js';
@@ -143,6 +144,7 @@ import { hasPushSubscribers } from './push.js';
 import { initPhoneAlerts, phoneAlerts } from './phone-alerts-main.js';
 import { alertSettings } from './phone-notifier.js';
 import { shapePhoneAccounts } from './phone-accounts.js';
+import { createPhoneMain, phoneModeOn, phoneLabsOn } from './phone-main.js';
 import { createPicker, runClaude } from './today-pick.js';
 import { createSnoozes, cardPrint } from './today-snooze.js';
 import { localDay } from '../shared/task-due.js';
@@ -881,6 +883,7 @@ function setupTerminalHandlers() {
     let session = null;
     if (meta.kind !== 'browser') {
       if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId) || !ownsTerminal(event.sender.id, tabId)) return null;
+      if (isPhoneTab(tabId)) return null; // its conversation is on the phone: give it back first
       // Read before the window kills the PTY: which Claude conversation it is on and where it lives.
       try {
         const r = await resolveSessionForTab(tabId, { thorough: true });
@@ -893,6 +896,7 @@ function setupTerminalHandlers() {
     if (session) {
       try { preview = await getLastAssistantMessage(session.sessionId, session.cwd); } catch (err) { console.warn('[snooze] preview failed:', err?.message || err); }
     }
+    if (meta.kind !== 'browser' && isPhoneTab(tabId)) return null; // moved to the phone during the lookups
     const added = snoozeStore.add({
       projectPath: meta.projectPath, label: meta.label, labelLocked: meta.labelLocked, kind: meta.kind, url: meta.url,
       viewMode: meta.viewMode, claudeAccountPin: meta.claudeAccountPin, pinned: meta.pinned === true, until,
@@ -3323,6 +3327,33 @@ let headroom = null;
 // Input a window still holds for a tab (an image paste being saved): set when
 // the bridge deps exist.
 let heldInputFor = () => false;
+// The tab's screen as a move reads it: the prompt box and what is typed in it (account move and phone mode).
+async function moveScreenOf(id) {
+  // A long-running Claude turned bracketed paste on long before this tail
+  // begins, and promptBoxText requires it: without saying so here, the box
+  // of every tab that has been working for a while reads as unreadable (a
+  // possible draft). The caller has checked a claude runs in the tab.
+  // (claudePromptBox does the same for the Chat model picker.)
+  const lines = await renderScreenLines(`\x1b[?2004h${trimToEscapeBoundary(getTerminalBuffer(id) || '', 262144)}`, { cols: terminalCols(id) });
+  // Claude's dim placeholder or ghost suggestion is not unsent text.
+  return lines ? { lines: lines.map((l, i) => (lines.dimFrom[i] >= 0 ? l.slice(0, lines.dimFrom[i]) : l)), modes: lines.modes } : null;
+}
+// A transcript for the session under any project: a resume from a subfolder keeps its transcript where it began.
+async function hasTranscriptAnywhere(sessionId) {
+  const root = path.join(defaultClaudeDir(), 'projects');
+  const dirs = await fs.promises.readdir(root);
+  const hits = await mapLimit(dirs, 16, (dir) => fs.promises.access(path.join(root, dir, `${sessionId}.jsonl`)).then(() => true, (err) => {
+    // Only "not there" means no transcript: a folder that cannot be read is
+    // unknown, and treating it as empty would drop a real resume.
+    if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return false;
+    throw err;
+  }));
+  return hits.includes(true);
+}
+// Phone mode (electron/phone-mode.js via phone-main.js), built by setupPhoneMode; null until then and on Windows.
+let phoneMain = null;
+const isPhoneTab = (id) => { try { return phoneMain?.isPhoneTab(id) === true; } catch { return true; } };
+const phoneSessionOfTab = (id) => { try { return phoneMain?.sessionOfTab(id) || null; } catch { return null; } };
 // Any of these in Dobius's own environment signs in every Claude it starts the
 // same way, whatever CLAUDE_CONFIG_DIR says. By name only: no value is kept.
 const AUTH_OVERRIDE_NAMES = CLAUDE_AUTH_ENV;
@@ -3349,18 +3380,7 @@ function setupHeadroomHandlers() {
     alive: (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } },
     claim: (sessionId, tabId) => claimSessionResume(sessionId, tabId),
     release: (sessionId, tabId) => releaseSessionResume(sessionId, tabId),
-    // Under any project: a resume from a subfolder keeps its transcript where it began.
-    hasTranscript: async (sessionId) => {
-      const root = path.join(defaultClaudeDir(), 'projects');
-      const dirs = await fs.promises.readdir(root);
-      const hits = await mapLimit(dirs, 16, (dir) => fs.promises.access(path.join(root, dir, `${sessionId}.jsonl`)).then(() => true, (err) => {
-        // Only "not there" means no transcript: a folder that cannot be read is
-        // unknown, and treating it as empty would drop a real resume.
-        if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return false;
-        throw err;
-      }));
-      return hits.includes(true);
-    },
+    hasTranscript: (sessionId) => hasTranscriptAnywhere(sessionId),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     processAuthOverride,
     isDir: (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } },
@@ -3388,16 +3408,7 @@ function setupHeadroomHandlers() {
     inputSeq: (id) => terminalInputSeq(id),
     inputAgeMs: (id) => terminalInputAgeMs(id),
     inputHeld: (id) => heldInputFor(id),
-    screen: async (id) => {
-      // A long-running Claude turned bracketed paste on long before this tail
-      // begins, and promptBoxText requires it: without saying so here, the box
-      // of every tab that has been working for a while reads as unreadable (a
-      // possible draft). The caller has checked a claude runs in the tab.
-      // (claudePromptBox does the same for the Chat model picker.)
-      const lines = await renderScreenLines(`\x1b[?2004h${trimToEscapeBoundary(getTerminalBuffer(id) || '', 262144)}`, { cols: terminalCols(id) });
-      // Claude's dim placeholder or ghost suggestion is not unsent text.
-      return lines ? { lines: lines.map((l, i) => (lines.dimFrom[i] >= 0 ? l.slice(0, lines.dimFrom[i]) : l)), modes: lines.modes } : null;
-    },
+    screen: (id) => moveScreenOf(id),
     promptBox: (lines, modes) => promptBoxText(lines, modes),
     // Off with the usage reporter off: old reports would stand in for figures
     // nobody refreshes, and the panel's switch is hidden then too.
@@ -3440,9 +3451,11 @@ function setupHeadroomHandlers() {
 
 // How a move restarts a tab: a new PTY owned by `sender`, the window that owns
 // the tab (the dialog's window, or for an automatic move the tab's owner).
-function restarterFor(sender) {
+// phoneOk: phone mode's own restart of a tab it is moving (every other caller is refused for a tab on the phone).
+function restarterFor(sender, { phoneOk = false } = {}) {
   const cannotRestart = (id, pin) => {
     if (!/\/(zsh|bash)$/.test(process.env.SHELL || '/bin/zsh')) return 'a conversation can only be resumed through zsh or bash';
+    if (!phoneOk && isPhoneTab(id)) return "that tab's conversation is on the phone";
     if (sender.isDestroyed() || terminalOwners.get(id) !== sender.id || tearOffGrants.has(id) || dockingTabs.has(id)) return 'the tab is moving to another window';
     return resolveClaudeAccountPin(pin, loadConfig().accounts) === undefined ? 'that account is gone, or two accounts share its id' : null;
   };
@@ -3455,6 +3468,72 @@ function restarterFor(sender) {
     return true;
   };
   return { cannotRestart, restart };
+}
+
+// Phone mode (docs/phone-mode-design.md): macOS only. Built and started once; the setting only decides whether a new
+// move is offered and accepted. Resolves when its startup sweep is done (or failed), so auto-resume can wait on it.
+async function setupPhoneMode() {
+  if (process.platform !== 'darwin' || phoneMain) return;
+  const userData = app.getPath('userData');
+  const pm = createPhoneMain({
+    userData,
+    exe: process.execPath,
+    // Packaged: the bundle with the Agent SDK in it, unpacked from app.asar (scripts/build-phone-runner.mjs). In dev the
+    // source runner, which loads the SDK from node_modules.
+    runnerPath: app.isPackaged
+      ? path.join(process.resourcesPath, 'app.asar.unpacked', 'dist-phone', 'phone-runner.mjs')
+      : path.join(__dirname, 'phone-runner.mjs'),
+    log: (line) => logLine('phone', String(line).slice(0, 2000)),
+    settings: () => getSettings(),
+    accounts: () => loadConfig().accounts || [],
+    envFor: (a) => claudeEnvForAccount(a),
+    tabs: () => listTerminals(),
+    inputSeq: (id) => terminalInputSeq(id),
+    inputHeld: (id) => heldInputFor(id),
+    activity: (id) => terminalStatus.statusFor(id),
+    screen: (id) => moveScreenOf(id),
+    promptBox: (lines, modes) => promptBoxText(lines, modes),
+    promptMode: (lines, modes) => promptFooterMode(lines, modes),
+    // Strict, and never the tab's own process (`exec claude`): stopping that would close the tab. Only the shell's
+    // direct children are looked at, so the runner's own Claude is never taken for the tab's.
+    claudeInfo: async (id) => { const i = await getTerminalClaudeInfo(id, { strict: true }); return i?.ptySelf ? null : i; },
+    scan: () => scanClaudeProcesses(),
+    presence: (info, configDir) => presenceOf(info, configDir),
+    hasTranscript: (sessionId) => hasTranscriptAnywhere(sessionId),
+    processCwd: (pid) => getProcessCwd(pid),
+    isDir: (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } },
+    // What closing its PTY would send. A stopped Claude must not keep a typed auto-resume's stamp (see endTypedResumes).
+    stop: (pid) => { process.kill(pid, 'SIGHUP'); endTypedResumes(); },
+    alive: (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } },
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    ownerOf: (tabId) => (TERMINAL_ID_RE.test(tabId) && !tabId.startsWith('term-mobile-') ? ownerWindowOf(tabId) : null),
+    movable: (tabId, sender, pin) => restarterFor(sender, { phoneOk: true }).cannotRestart(tabId, pin),
+    spawn: (tabId, cwd, sender, pin, phone) => {
+      if (restarterFor(sender, { phoneOk: true }).cannotRestart(tabId, pin)) return false;
+      // Keep the project the link already names, as the account move does: auto-resume looks there after a relaunch.
+      setSessionTabLink(phone.sessionId, tabId, getSessionTabMap()?.[phone.sessionId]?.projectPath || phone.cwd);
+      createTerminal(tabId, cwd, sender, resolveAccountEnvForCwd(cwd, { claudeAccountPin: pin }), { phone });
+      return true;
+    },
+    notify: (tabId, state) => {
+      pushPhoneState(tabId, state);
+      const wc = ownerWindowOf(tabId);
+      if (wc) wc.send('phone:state', tabId, state);
+    },
+  });
+  phoneMain = pm;
+  // Before the first await: the gate must hold an earlier run's sessions from the moment Dobius is ready.
+  setPhoneMode(pm, () => phoneModeOn(getSettings(), process.platform, phoneLabsOn(userData)));
+  setHeldSessions(() => pm.heldSessions(), { pending: (sid) => pm.heldUntilSwept(sid), settled: () => pm.whenSwept() });
+  setKillSignal((id) => (pm.isPhoneTab(id) ? 'SIGKILL' : undefined));
+  setPhoneTabCheck((id) => pm.isPhoneTab(id));
+  onBeforeInstall(() => pm.quitSweep());
+  // A tab that closed (not one respawned under its id): phone mode ends its run and confirms the processes gone.
+  addTerminalObserver({
+    onExit: (id) => { try { pm.tabClosed(id); } catch (err) { console.warn('[phone] tab close:', err?.message || err); } },
+    onKill: (id, info) => { if (!info?.respawn) { try { pm.tabClosed(id); } catch (err) { console.warn('[phone] tab close:', err?.message || err); } } },
+  });
+  try { await pm.init(); } catch (err) { logLine('phone', `start failed: ${err?.message || err}`); }
 }
 
 // The window that owns a desktop tab, or null (a phone terminal, a window gone).
@@ -3858,6 +3937,10 @@ function setupSessionTabCapture() {
       const stampedTabs = new Set(Object.values(getSessionTabMap() || {}).filter((l) => l?.lastRunningAt && l.tabId).map((l) => l.tabId));
       for (const t of liveTabs) {
         probedAt.set(t.id, Date.now());
+        // A tab whose conversation is on the phone runs it, though its shell's child is the phone gate (Codex P2, impl
+        // round 16: the stamp was cleared and the tab came back as a shell after a relaunch).
+        const onPhone = phoneSessionOfTab(t.id);
+        if (onPhone) { infoByTab.set(t.id, { sessionId: onPhone, phone: true }); continue; }
         const got = await getTerminalClaudeInfo(t.id, { unknown: true, rootCheck: stampedTabs.has(t.id) });
         if (got === CLAUDE_UNKNOWN) unknownTabs.add(t.id);
         infoByTab.set(t.id, got === CLAUDE_UNKNOWN ? null : got);
@@ -4572,6 +4655,7 @@ function setupWindowHandlers() {
     claudeInTab: (id) => terminalRunsClaude(id, { skipStopped: true }),
     frontKind: bridgeOpenDeps.frontKind,
     inputBusy: bridgeOpenDeps.inputBusy,
+    phoneTab: (id) => isPhoneTab(id),
     paste: bridgeOpenDeps.paste,
     submit: bridgeOpenDeps.submit,
     write: bridgeOpenDeps.write,
@@ -5257,6 +5341,9 @@ function setupCrashLogging() {
 
 app.whenReady().then(() => {
   installErrorLog();
+  // Phone mode first: its claim gate holds an earlier run's sessions from here on, before any window, History or
+  // auto-resume can ask for one. The startup sweep runs in the background.
+  void setupPhoneMode().catch((err) => { logLine('phone', `setup failed: ${err?.message || err}`); });
   // Faults (and native crash reports from the last run) become GitHub issues
   // in the private reports repo, filed with this Mac's own gh login.
   startErrorReporter({ userDataDir: app.getPath('userData'), version: app.getVersion(), isPackaged: app.isPackaged, getSettings });
@@ -5709,6 +5796,9 @@ let savedBeforeQuit = false;
 // RELAUNCH_ARG makes a Windows copy wait for the single-instance lock instead of handing over.
 // No update is installed: autoInstallOnAppQuit is off, and an install in flight or attempted refuses this.
 let restartRequested = false;
+// Phone mode's dark flag (phone-main.js phoneLabsOn): Settings shows its toggle only once it is unlocked.
+ipcMain.handle('phoneMode:unlocked', () => phoneLabsOn(app.getPath('userData')));
+
 ipcMain.handle('app:restartInfo', () => {
   let autoResume = true;
   try { autoResume = getAutoResume().enabled !== false; } catch (err) { console.warn('[restart] could not read auto-resume:', err?.message || err); }
@@ -5927,6 +6017,13 @@ app.on('before-quit', (e) => {
         // kept whatever stamp they had (bug report 2026-11-14). Bounded so a quit never starts dozens of ps at once.
         await mapLimit(liveTabs, QUIT_PROBE_CONCURRENCY, async (t) => {
           if (reconcileAborted) return;
+          const onPhone = phoneSessionOfTab(t.id);
+          if (onPhone) {
+            probedTabs += 1;
+            infoByTab.set(t.id, { sessionId: onPhone, phone: true });
+            if (tabToSid.get(t.id) === onPhone && getSessionTabMap()?.[onPhone]?.tabId === t.id) touchSessionTabLink(onPhone, quitStampAt ?? Date.now());
+            return;
+          }
           const got = await getTerminalClaudeInfo(t.id, { unknown: true, rootCheck: stampedTabs.has(t.id) });
           if (reconcileAborted) return;
           probedTabs += 1;
@@ -6084,6 +6181,7 @@ app.on('will-quit', (e) => {
   didTeardown = true;
   try { killAuthChildren(); } catch { /* noop */ }
   headroom?.flushSync();
+  try { phoneMain?.quitSweep(); } catch (err) { console.warn('[phone] quit sweep failed:', err?.message || err); }
   killAll();
   stopWatching();
   stopAllBuildWatchers();

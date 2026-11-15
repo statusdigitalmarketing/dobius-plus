@@ -158,7 +158,8 @@ function sweepTyped(deps) {
  *       keys, input, screen, stop }, paste(tabId, text), submit(tabId), write(tabId, data) (counted as Dobius's own, not
  *       a person's), inputBusy(tabId), claudeInTab(tabId) (a claude process anywhere in the tab; true when unsure),
  *       frontKind(tabId) ('shell' | 'codex' | 'other', what leads the terminal), onSubmit(tabId) (Enter was pressed
- *       on a message), sleep(ms), now()
+ *       on a message), sleep(ms), now(), phoneTab(tabId) (optional: the tab's conversation is on the phone, so
+ *       nothing may be typed into it)
  * Resolves { status, body } for the HTTP reply.
  */
 export async function sendToTab(deps, tabId, message, { claudeOnly = false } = {}) {
@@ -169,6 +170,7 @@ export async function sendToTab(deps, tabId, message, { claudeOnly = false } = {
   // No size limit here: /tabSend keeps the bridge's own (an /openTab card's 32KB cap is not this route's).
   message = typeof message === 'string' ? stripControls(message) : '';
   if (!message.trim()) return fail(400, 'message is empty');
+  if (deps.phoneTab?.(tabId)) return fail(409, "that tab's conversation is on the phone; nothing was typed", { reason: 'phone' });
   // openTabsStarting: a tab /openTab is creating can already be listed before it is marked as its own.
   if (sending.has(tabId) || openTabBusy.has(tabId) || openTabsStarting() > 0) return fail(409, 'another message is being sent to that tab right now; nothing was typed, try again');
   sending.add(tabId);
@@ -263,6 +265,7 @@ async function send(deps, tabId, message, claudeOnly = false) {
     if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return fail(409, 'the tab closed or its shell changed; nothing was typed');
     // Any input of a person's since the send began (a wheel turn can recall an old prompt whose redraw is still to come).
     if (watch.keys() !== 0 || watch.input() !== 0 || deps.inputBusy(tabId) || (deps.needs(tabId) && !needsAtStart)) return fail(409, 'someone used the tab, or Claude is asking something; nothing was typed, try again');
+    if (deps.phoneTab?.(tabId)) return fail(409, "that tab's conversation is on the phone; nothing was typed", { reason: 'phone' });
     // Recorded BEFORE the wait below, and kept until Enter is pressed: whatever ends this attempt, a later send must know
     // a paste of ours may be on its way (Codex rounds 3 and 5). A resend keeps the original record.
     if (!resend) {

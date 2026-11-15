@@ -1136,8 +1136,80 @@
 - **CONTEXT**: Any perf guard that runs in the release preflight on this Mac must not use wall time. Sabotage-check each bound against the exact regression it guards, inside the real test run (the same bound measured 3.5x standalone and 1.8x in-test).
 - **DETECTION**: `grep -rn "Date.now() - t0\|performance.now() - " electron/__tests__ | grep -i "assert"`
 
+### Testing - 2026-11-14
+- **MISTAKE**: A source check in `electron/__tests__/held-settled.test.mjs` sliced `fire` from `indexOf('const release = slot.release;')`. Round 22 changed that line, `indexOf` returned -1, `slice(-1)` kept one character, and every assertion on the slice (no bare giveUp, every return releases the gate) passed on nothing. It surfaced only because a new regex on the same slice failed.
+- **FIX**: Assert the marker was found (`at > 0`) and that the slice has a plausible length before asserting anything about its contents. Sabotage the exact line each assertion guards, after every edit to the code under test, not only when the test is written.
+- **CONTEXT**: Source-pattern tests are only as good as their anchors. A `str.slice(str.indexOf(x))` with a missing `x` silently becomes the last character, and "no match of a forbidden pattern" checks then pass vacuously.
+- **DETECTION**: `grep -n "slice(.*indexOf(" electron/__tests__/*.mjs` (each should be followed by an assertion that the index is not -1)
+
+### Dependencies - 2026-11-14
+- **MISTAKE**: After `npm install -D @anthropic-ai/claude-agent-sdk` in the phone worktree, `npm test` died in commit-log's neighbour suite with `Error: posix_spawnp failed.` from node-pty's `unixTerminal.js`. The install had reinstalled node-pty: `build/Release` (made by electron-rebuild) was gone and the prebuilt `spawn-helper` had no execute bit.
+- **FIX**: `npx electron-rebuild` after ANY npm install or uninstall, before running tests or the app (the project CLAUDE.md says so for native modules; this is what skipping it looks like).
+- **CONTEXT**: The error names neither the install nor node-pty's helper, so it reads like a test bug. terminal-manager.js repairs the helper's mode at app start, but only for `build/Release`, not for the test runs.
+- **DETECTION**: `ls -la node_modules/node-pty/build/Release/spawn-helper` (missing or not -rwx means rebuild)
+
+### Dependencies - 2026-11-14
+- **MISTAKE**: The SDK was installed with `npm install --omit=optional` to keep its platform binaries out. That also removed `@rollup/rollup-darwin-arm64`, so `npm run build` and `npm run build:mobile` (Vite) failed with `Cannot find module @rollup/rollup-darwin-arm64` hours later.
+- **FIX**: `npm install --no-save --ignore-scripts @rollup/rollup-darwin-arm64@<rollup's own version>` restores only that package. Better: never install with `--omit=optional` in a checkout that builds; the SDK being a devDependency already keeps it out of the app.
+- **CONTEXT**: Vite, esbuild and Tailwind all load per-platform native binaries that npm marks optional. The failure shows up at the next build, not at the install.
+- **DETECTION**: `node -e 'const l=require("./package-lock.json").packages,f=require("fs");for(const[k,v]of Object.entries(l))if(k.startsWith("node_modules/")&&v.optional&&(!v.os||v.os.includes("darwin"))&&(!v.cpu||v.cpu.includes("arm64"))&&!f.existsSync(k))console.log(k)'`
+
+### Architecture - 2026-11-14
+- **MISTAKE**: Phone mode's give-back resumed the TUI with a bare `claude --resume <id>`, so a tab started with `--permission-mode default` came back in the user's default (auto) mode. Only the ship-test caught it; the unit tests asserted the exact resume line and so pinned the bug.
+- **FIX**: Carry the stopped TUI's own `--permission-mode` / `--model` (runner's `carryOverFlags`) into the phone launch as `$8`/`$9`, allowlisted in JS and again in the shell (`PHONE_RESUME_MODES`, pinned equal to `CARRY_MODES` by a test).
+- **CONTEXT**: Any path that stops a Claude and restarts it for the person must restore the flags it was stopped with, not just the session id.
+- **DETECTION**: `grep -n "claude --resume \"\$2\"" shared/new-tab.js`
+
+### Testing - 2026-11-14
+- **MISTAKE**: Edited `shared/new-tab.js` and rebuilt `dist-mobile` while a phone-mode ship-test ran in the dev harness. Vite watches the whole repo: a renderer-imported file it cannot Fast Refresh, or any html under `dist-mobile`, reloads the project window, which kills every tab's PTY and ends the run (looks like "Claude is not running in that tab").
+- **FIX**: Finish or give back the phone run before editing anything the renderer imports (`src/`, `shared/`) or running `npm run build:mobile`; restart Claude in the tab afterwards. A packaged harness build has no Vite and is immune.
+- **CONTEXT**: Dev harness only. Useful by accident: the run's cleanup after a lost PTY was seen working (no runner or Claude left, session released).
+- **DETECTION**: `grep -n "page reload\|Could not Fast Refresh" <harness>/harness.log`
+
+### UI/UX - 2026-11-14
+- **MISTAKE**: Changed `reconcileEchoes` to mark a confirmed phone message hidden (`done`) instead of removing it, but the ChatView prune still ended `return kept.length === cur.length ? cur : kept`. Same length meant the update was thrown away, so in the ship-test the first of two same-word sends sat on "Sending..." though its row was on screen. The unit tests passed because the prune lived inline in ChatView, untested. A first version also restarted its "used rows" set every poll, so a confirmed message's row was handed to the waiting one on the NEXT poll (found only by watching several polls in the harness).
+- **FIX**: Moved the prune into `pruneEchoes` / `ageEchoes` in mobile/phone-mode.js and decide "changed" by array identity from the helper, not by length. Confirmed messages stay as hidden placeholders while one with the same words waits, so their rows stay theirs across polls and visits.
+- **CONTEXT**: Any state update that short-circuits on `length` breaks the moment an item is replaced instead of removed. Test multi-poll behaviour (call the reducer twice on the same rows), not one call.
+- **DETECTION**: `grep -n "kept.length === cur.length" mobile/*.jsx`
+
+### Architecture - 2026-11-14
+- **MISTAKE**: Phone message bubbles were cleared by matching transcript TEXT (rounds 27 to 29 kept tightening it: baselines, one row per message, hidden placeholders). Codex r30 broke it again: another phone sending the same words writes a genuinely new row that no text rule can tell from ours, so an unconfirmed message lost its bubble and Send again.
+- **FIX**: A transcript row may only clear a message the Mac already said it took (ack, or `duplicate` on Send again). A message whose answer was lost keeps its bubble until its OWN sendId settles it via Send again, or Remove. Deleted the placeholder machinery that existed only to make text matching safe.
+- **CONTEXT**: When identity is not in the data (rows have no sendId), no heuristic over that data is safe; route the decision through the party that has the identity. Each round of "tighter matching" was patching the wrong layer.
+- **DETECTION**: `grep -n "acked === true" mobile/phone-mode.js` (reconcileEchoes must keep this gate)
+
+### Architecture - 2026-11-14
+- **MISTAKE**: The runner answered a phone `send` as soon as `queue.push()` accepted it, and the phone treated that ack as delivery (dropped the message from storage). Codex r34: hold a permission open, send A, give back; A was acked, never reached the transcript, and vanished. In the harness the real CLI had even logged A as a queued record, then was stopped before reading it.
+- **FIX**: Two facts, two signals. The ack means queued. Each queued SDKUserMessage carries a client `uuid`; Claude names what it read in `user_message_uuids` on its reply frames, the runner reports `delivered` to main, and at the end reports `notSent` (still in its queue) and `unsure` (reached Claude unread). Main keeps the ended list per tab after the run is forgotten; the phone keeps a message in storage until it is read, and turns losses back into Not sent / Not confirmed.
+- **CONTEXT**: "Accepted into my buffer" is never "delivered" when another process consumes the buffer asynchronously and can be stopped. Look for a consumer-side receipt (here the SDK's client uuid echo) before inventing a heuristic; keep a counted fallback only for producers that lack it.
+- **DETECTION**: `grep -n "user_message_uuids\|t: 'delivered'" electron/phone-runner.mjs electron/phone-mode.js`
+
+### Security - 2026-11-14
+- **MISTAKE**: Phone mode took the permission mode only from the stopped TUI's argv. A tab launched with `--permission-mode acceptEdits` and switched to manual with Shift+Tab ran on the phone in accept edits: `mkdir` went through with no permission card, looser than what the person had on screen.
+- **FIX**: Read the mode Claude shows under its prompt box (`promptFooterMode`, the 4 rows below the box: "manual mode on", "auto mode on", "accept edits on", "plan mode on", "bypass permissions on"). When it cannot be read, use argv only if it is strict (plan, default, dontAsk), else manual. The restart uses the shown mode too.
+- **CONTEXT**: argv is the mode a process STARTED in, not the mode it is in. Anything that hands a session to another surface must carry the live state, and when it cannot see it, fail to the stricter side.
+- **DETECTION**: `grep -n "carryFlags\|promptFooterMode" electron/phone-mode.js electron/bridge-open-tab.js`
+
+### Testing - 2026-11-14
+- **MISTAKE**: Backed up `electron/phone-mode.js` and `mobile/phone-mode.js` for sabotage tests as `$S/$(basename f).bak`. Same basename, so the second backup overwrote the first, and the first restore copied the phone helper over main's file (git diff showed 661 deletions). The sabotage results run after that were against the wrong file.
+- **FIX**: Back up by full path (`cp f "$S/$(echo f | tr / _).bak"`), and `cmp` every file against its backup after the restores. Recovered main's file from an earlier copy and re-applied the change.
+- **CONTEXT**: Any loop that saves files by basename collides when two directories share a file name (phone-mode.js exists in electron/ and mobile/).
+- **DETECTION**: `git diff --stat | tail -1` after a sabotage pass: deletions far above the change size mean a clobber.
+
 ### Process - 2026-11-14
 - **MISTAKE**: Release notes for 2.2.32 said "When the Mac is offline". Notes show on Windows too, and Max's Claude had already flagged Mac wording in the 2.2.30 notes, so the same note came back a second time before anything checked for it. (2.2.30's "Your Macs" and "Add a Mac" name phone screens and stay.) The first check (PR #16) missed "that Mac", possessives, quoted and zero-width-split spellings, and wrongly refused "MAC address"; my own 2.2.33 draft then tripped it with "on the Mac".
 - **FIX**: `scripts/whats-new-check.mjs` `machineNamedMac(line)` refuses any standalone "Mac"/"mac" word in a notes line (after removing "Add a Mac"), so release.sh stops on it. Write "this computer" or "the computer".
 - **CONTEXT**: A reviewer's wording note that repeats across releases is a missing check, not a typo. Turn it into a test the release refuses on, the first time it repeats.
 - **DETECTION**: `node scripts/whats-new-check.mjs patch` (and `grep -n "[Mm]ac\b" electron/whats-new/*.md` for older notes)
+
+### Testing - 2026-11-15
+- **MISTAKE**: `electron/__tests__/phone-main.test.mjs` was never in `npm test`'s chain, so the round 36 "mode unreadable refuses the move" change broke its account-refusal test (the stub screen had no mode line) and the 1014-pass suite stayed green.
+- **FIX**: Added `test:phonemain` (with the electron stub loader) to `test:chain`, and gave the test a readable mode.
+- **CONTEXT**: A test file that no script runs is worse than none: it reads as coverage. When adding a test file, add its script to the chain in the same commit.
+- **DETECTION**: `for f in electron/__tests__/*.test.mjs; do grep -q "$(basename $f)" package.json || echo "not run: $f"; done`
+
+### Testing: 2026-11-15
+- **MISTAKE**: `phone-main.test.mjs` built `createPhoneMain` with the real `sysctl kern.memorystatus_vm_pressure_level` reading and the real `process.platform`, so the account-binding test failed with code `memory` the moment this Mac hit warning pressure, and with `off` on Linux (Codex r37).
+- **FIX**: `createPhoneMain` takes `m.platform` and `m.readPressure`; the test passes `platform: 'darwin'` and `readPressure: async () => 1`.
+- **CONTEXT**: Any test that reaches a host reading (memory, platform, uptime) through a factory must inject it, or it passes on a quiet Mac and fails on a busy one.
+- **DETECTION**: `grep -n "createPhoneMain(" electron/__tests__/*.mjs` and confirm each call passes platform and readPressure.

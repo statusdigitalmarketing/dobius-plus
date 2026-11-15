@@ -659,3 +659,21 @@ test('the start-Claude check is fast on inputs built to be slow', async () => {
   assert.equal(startsClaude('a'.repeat(5000)), false);
   assert.ok(Date.now() - t0 < 200, `took ${Date.now() - t0} ms`);
 });
+
+test('a tab whose conversation is on the phone: refused before anything is typed, also when it moves during the checks', async () => {
+  const a = fakeTab();
+  a.deps.phoneTab = () => true;
+  const r1 = await sendToTab(a.deps, 'tab', 'hello');
+  assert.equal(r1.status, 409);
+  assert.equal(r1.body.reason, 'phone');
+  assert.equal(a.t.pasted, null);
+  const b = fakeTab();
+  let asked = 0;
+  b.deps.phoneTab = () => (asked += 1) > 1; // free on arrival, on the phone by the time of the paste
+  const r2 = await sendToTab(b.deps, 'tab', 'hello');
+  assert.equal(r2.status, 409);
+  assert.equal(r2.body.reason, 'phone');
+  assert.equal(b.t.pasted, null);
+  assert.equal(b.t.submitted, 0);
+  assert.equal(asked, 2);
+});

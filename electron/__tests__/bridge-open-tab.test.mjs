@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   sanitizeOpenMessage, validateOpenTabBody, isClaudePromptReady, createOpenTabService,
-  buildOpenCliScript, isKeyboardInput, isUserInput, promptBoxText, boxHoldsMessage, boxStillHasMessage, MAX_OPEN_MESSAGE_BYTES, MAX_OPENS_IN_FLIGHT, MAX_REMEMBERED_REQUESTS,
+  buildOpenCliScript, isKeyboardInput, isUserInput, promptBoxText, promptFooterMode, boxHoldsMessage, boxStillHasMessage, MAX_OPEN_MESSAGE_BYTES, MAX_OPENS_IN_FLIGHT, MAX_REMEMBERED_REQUESTS,
 } from '../bridge-open-tab.js';
 import { CLAUDE_SCRIPT_RE } from '../claude-argv.js';
 import { renderScreenLines } from '../screen-render.js';
@@ -684,5 +684,33 @@ assert.match(r.err, /usage/);
 server.close();
 fs.rmSync(dir, { recursive: true, force: true });
 ok('dobius-open script end to end');
+
+// The permission mode Claude shows under its idle box (phone mode carries it), never one quoted above it.
+{
+  const at = (x, y) => ({ bracketedPaste: true, cursor: { x, y } });
+  // Footers as Claude Code 2.1 draws them (captured from a real TUI cycling Shift+Tab).
+  const screen = (footer) => ['● olive', rule, '❯ ', rule, '  Fable 5.1 · high', footer];
+  assert.equal(promptFooterMode(screen('  ⏸ manual mode on · ← 1 agent'), at(2, 2)), 'default');
+  assert.equal(promptFooterMode(screen('  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent'), at(2, 2)), 'auto');
+  assert.equal(promptFooterMode(screen('  ⏵⏵ accept edits on (shift+tab to cycle)'), at(2, 2)), 'acceptEdits');
+  assert.equal(promptFooterMode(screen('  ⏸ plan mode on (shift+tab to cycle)'), at(2, 2)), 'plan');
+  assert.equal(promptFooterMode(screen('  ⏵⏵ bypass permissions on (shift+tab to cycle)'), at(2, 2)), 'bypassPermissions');
+  assert.equal(promptFooterMode(screen('  ? for shortcuts'), at(2, 2)), null, 'no mode line');
+  // Codex r36: a multi-line statusLine before Claude's own line, and a statusLine printing a mode-looking line.
+  const status4 = [rule, '❯ ', rule, '  Project: demo', '  Branch: main', '  Context: 10%', '  Cost: $0.01', '  ⏸ plan mode on (shift+tab to cycle)'];
+  assert.equal(promptFooterMode(status4, at(2, 1)), 'plan', 'found past four status rows');
+  const spoof = [rule, '❯ ', rule, '  ⏸ manual mode on', '  ⏸ plan mode on (shift+tab to cycle)'];
+  assert.equal(promptFooterMode(spoof, at(2, 1)), 'plan', 'of two the strictest, never the first');
+  assert.equal(promptFooterMode([rule, '❯ ', rule, '  ⏵⏵ bypass permissions on', '  ⏵⏵ accept edits on'], at(2, 1)), 'acceptEdits');
+  // A half-drawn mode line (Codex r36e) makes the footer unreadable, whatever else matched.
+  assert.equal(promptFooterMode([rule, '❯ ', rule, '  ⏸ manual mode on', '  ⏸ plan mode o'], at(2, 1)), null);
+  assert.equal(promptFooterMode([rule, '❯ ', rule, '  ⏸ manual mode on', '  ⏵'], at(2, 1)), null);
+  // A mode line in the transcript above the box is text, not the mode.
+  assert.equal(promptFooterMode(['  ⏵⏵ bypass permissions on', rule, '❯ ', rule, '  ? for shortcuts'], at(2, 2)), null);
+  // Not an idle prompt (no bracketed paste, or a dialog): nothing is read.
+  assert.equal(promptFooterMode(screen('  ⏵⏵ auto mode on'), { cursor: { x: 2, y: 2 } }), null);
+  assert.equal(promptFooterMode(['Do you want to proceed?', rule, '❯ ', rule, '  ⏵⏵ auto mode on', 'Esc to cancel'], { bracketedPaste: true }), null);
+}
+ok('the mode shown under the prompt box');
 
 console.log(`\n${pass} passed`);

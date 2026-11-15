@@ -36,7 +36,8 @@ import {
 } from './terminal-manager.js';
 import { stripAnsi, spinnerStatus } from './selector-parser.js';
 import { terminalTextTail, terminalScreenText, submitPromptDetailed, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
-import { TAB_OPS, ACK_FEATURES, handleTabOp } from './mobile-tab-ops.js';
+import { TAB_OPS, ACK_FEATURES, handleTabOp, phoneViewGate, validReqId } from './mobile-tab-ops.js';
+import { PHONE_OPS, handlePhoneOp } from './phone-mode-ws.js';
 import { TODAY_FEATURES, handleTodayMessage } from './mobile-today.js';
 import { handleTasksMessage } from './mobile-tasks.js';
 import { loadAllSessions, loadTranscript, listProjects, getTranscriptSig, findLooseEnds, loadSkills, loadTranscriptImage } from './data-service.js';
@@ -690,6 +691,37 @@ async function routeToConductor(transcript) {
 // question showing, a send already in flight) is reported, never handed to the Conductor as well: one agent per
 // command. No pin, or the pinned tab gone: the Conductor as before.
 let voiceOrchestratorRoute = null;
+// Phone mode (docs/phone-mode-design.md): main hands over the instance (macOS only) and whether the setting is on.
+// Until then every phone* request answers `opError: off` and no write is gated. With the setting off, `phone` is not
+// offered and no new move is accepted, but `phoneGen` still is: writes keep their generation, because a conversation
+// already on the phone stays there until it comes back (Codex r26).
+let phoneMode = null;
+let phoneModeOn = () => false;
+export function setPhoneMode(pm, isOn) {
+  phoneMode = pm || null;
+  phoneModeOn = typeof isOn === 'function' ? isOn : () => false;
+}
+const activePhoneMode = () => {
+  try { return phoneMode && phoneModeOn() ? phoneMode : null; } catch { return null; }
+};
+/** The tab's phone generation for an attached phone view, or undefined on a Mac without phone mode. */
+const phoneGenOf = (id) => { try { return phoneMode?.gen(id); } catch { return undefined; } };
+/**
+ * The generation gate for a phone write (mobile-tab-ops.js phoneViewGate). It asks the phone mode instance even with
+ * the setting off: a conversation already on the phone stays there until it comes back, and its tab must stay closed
+ * to writes meanwhile.
+ */
+const phoneGate = (id, m) => phoneViewGate(phoneMode, id, m && typeof m === 'object' ? m : {});
+/**
+ * Phone mode's state for a tab, to every socket that authorized it (phone-mode.js `notify`). Pushed with the setting
+ * off too: a state change then can only be a conversation that moved before it was turned off, and the phone must
+ * learn when that one comes back.
+ */
+export function pushPhoneState(id, state) {
+  if (!phoneMode || typeof id !== 'string' || !state || typeof state !== 'object') return;
+  for (const s of socketsForTab(id)) wsSend(s, { type: 'phoneState', ...state, id });
+}
+
 export function setVoiceOrchestratorRoute(fn) { voiceOrchestratorRoute = typeof fn === 'function' ? fn : null; }
 // Where a voice command would go right now, for the phone's "Goes to:" line: the pinned team orchestrator as
 // { id, label }, or null. Read only, nothing is sent.
@@ -927,12 +959,26 @@ function handleTabWrite(socket, msg) {
     stillOk: () => knownToken(socket._authToken),
     writeRawInput,
     submitPrompt: submitPromptDetailed,
+    // Phone mode: a key typed against an older tab generation, or one that would land on the gate while the tab is on
+    // the phone, is refused on arrival and again at the write (mobile-tab-ops.js phoneViewGate).
+    viewGate: (id, m) => phoneGate(id, m),
     onAccepted: (op, id, m) => afterTabWriteAccepted(socket, op, id, m),
   }).catch((err) => console.error('[mobile] tab op failed:', err?.message || err));
 }
 
 function handleAuthedMessage(socket, msg, subs) {
   if (TAB_OPS.has(msg.type)) { handleTabWrite(socket, msg); return; }
+  if (PHONE_OPS.has(msg.type)) {
+    handlePhoneOp(msg, {
+      pm: () => phoneMode,
+      on: () => { try { return !!phoneModeOn(); } catch { return false; } },
+      send: (obj) => wsSend(socket, obj),
+      isLive: (id) => !!terminalInstance(id),
+      authed: socket._authedTabs,
+      stillOk: () => knownToken(socket._authToken),
+    }).catch((err) => console.error('[mobile] phone op failed:', err?.message || err));
+    return;
+  }
   if (handleTodayMessage(msg, (obj) => wsSend(socket, obj), () => knownToken(socket._authToken), { token: socket._authToken })) return;
   // Commands, To-do and Asana (electron/mobile-tasks.js). Projects come from the same allowlist createTerminal uses; a
   // Run's new terminal is authorized for THIS socket, as a phone-created terminal is.
@@ -977,7 +1023,7 @@ function handleAuthedMessage(socket, msg, subs) {
       // Prefix an SGR reset so a tail that begins mid-styled-run cannot leave
       // the phone's fresh xterm stuck in a stale color/attribute state.
       if (buffer) wsSend(socket, { type: 'output', id, data: `\x1b[0m${buffer}`, replay: true });
-      wsSend(socket, { type: 'attached', id });
+      wsSend(socket, { type: 'attached', id, gen: phoneGenOf(id) });
       break;
     }
 
@@ -1015,7 +1061,11 @@ function handleAuthedMessage(socket, msg, subs) {
       // goes stale on any input or output since.
       if (typeof msg.id !== 'string') break;
       const id = msg.id;
-      answerSelector(id, msg.data, msg.token, () => knownToken(socket._authToken))
+      // Phone mode: the same generation check as a typed key, on arrival and at the write.
+      const selGate = () => phoneGate(id, msg);
+      const refusedSel = selGate();
+      if (refusedSel) { wsSend(socket, { type: 'selectorKeyResult', id, ok: false, stale: true, token: '', code: refusedSel }); break; }
+      answerSelector(id, msg.data, msg.token, () => knownToken(socket._authToken) && !selGate())
         .then((r) => {
           wsSend(socket, { type: 'selectorKeyResult', id, ok: !!r.ok, stale: !!r.stale, token: r.token || '' });
           if (!r.ok) return;
@@ -1051,7 +1101,8 @@ function handleAuthedMessage(socket, msg, subs) {
         // smaller geometry, which mangles the desktop xterm. Phone-only PTYs
         // (e.g. ones created via `createTerminal` from mobile) still get
         // resized normally.
-        if (socket._authedTabs.has(msg.id) && !terminalHasDesktopAttached(msg.id) && knownToken(socket._authToken)) {
+        if (socket._authedTabs.has(msg.id) && !terminalHasDesktopAttached(msg.id) && knownToken(socket._authToken)
+            && !phoneGate(msg.id, msg)) {
           resizeTerminal(msg.id, msg.cols, msg.rows);
         }
       }
@@ -1059,7 +1110,13 @@ function handleAuthedMessage(socket, msg, subs) {
 
     case 'kill':
       // A revoked phone's queued kill must not stop anything (the socket is closing, its frames may still be read).
-      if (typeof msg.id === 'string' && socket._authedTabs.has(msg.id) && knownToken(socket._authToken)) killTerminal(msg.id);
+      // A kill from a view of an earlier generation, or of a tab now on the phone, is refused like any other write
+      // (Codex P1, impl round 14: a kill delayed past a move would close the tab under the phone's run).
+      if (typeof msg.id === 'string' && socket._authedTabs.has(msg.id) && knownToken(socket._authToken)) {
+        const why = phoneGate(msg.id, msg);
+        if (why) wsSend(socket, { type: 'opError', op: 'kill', code: why, id: msg.id, reqId: validReqId(msg.reqId) ? (msg.reqId ?? null) : null });
+        else killTerminal(msg.id);
+      }
       break;
 
     case 'listProjects':
@@ -1616,6 +1673,10 @@ async function doStartMobileServer(stillCurrent) {
       }
       const text = voiceLine(transcript);
       if (!text) return res.status(400).json({ ok: false, error: 'transcript required' });
+      // The phone's own generation gate, on arrival; tab-send refuses a phone tab again right before it pastes
+      // (Codex P1, impl round 14).
+      const why = phoneGate(directTabId, req.body);
+      if (why) return res.status(409).json({ ok: false, code: why, error: why === 'on_phone' ? 'that conversation is on the phone' : 'the tab changed; look again' });
       // The guarded path (a dialog, a draft or someone typing stops it): a "1" said at a permission prompt must not
       // approve it.
       const r = await sendViaTabSend(directTabId, text, { claudeOnly: true });
@@ -1864,7 +1925,7 @@ async function doStartMobileServer(stillCurrent) {
           if (!set) { set = new Set(); activeSocketsByToken.set(authedToken, set); }
           set.add(socket);
           // platform: the phone words its messages for a PC and shows Windows folders as Windows writes them (Max, 2026-11-09).
-          wsSend(socket, { type: 'authed', version: app.getVersion(), platform: process.platform === 'win32' ? 'windows' : 'mac', features: [...ACK_FEATURES, ...TODAY_FEATURES] });
+          wsSend(socket, { type: 'authed', version: app.getVersion(), platform: process.platform === 'win32' ? 'windows' : 'mac', features: [...ACK_FEATURES, ...TODAY_FEATURES, ...(phoneMode ? ['phoneGen'] : []), ...(activePhoneMode() ? ['phone'] : [])] });
         } else {
           noteRefusal(msg.type === 'auth' ? 'phone key not paired with this Mac' : 'first message was not a sign-in', req);
           socket.close(4003, 'unauthorized');

@@ -5,6 +5,7 @@ echo "=== Dobius+ Build & Install ==="
 
 echo "1. Building Vite frontend..."
 npm run build
+npm run build:phone
 
 echo "2. Building Electron app..."
 rm -rf dist-electron
