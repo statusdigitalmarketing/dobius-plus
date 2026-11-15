@@ -11,17 +11,19 @@ import { createPhoneMode } from './phone-mode.js';
 
 /**
  * Phone mode ships dark (Sam, 2026-11-15): it is offered only once `<userData>/labs/phone-mode` exists, so a release
- * carries it to no one until that file is made (`touch`; delete it to hide it again, no deploy). Checked at most every
- * 5 s, because phoneModeOn is asked on every phone request.
+ * carries it to no one until that file is made (`touch`; delete it to hide it again, no deploy). Only a NO is cached
+ * (5 s, since phoneModeOn is asked on every phone request): a yes is read from the disk every time, so deleting the
+ * file stops the next take at once (Codex r37).
  */
 export const PHONE_LABS_FILE = path.join('labs', 'phone-mode');
 const LABS_TTL_MS = 5_000;
-const labs = { dir: null, at: -Infinity, on: false };
+const labs = { dir: null, at: -Infinity };
 export function phoneLabsOn(userData, now = Date.now()) {
-  if (labs.dir === userData && now - labs.at < LABS_TTL_MS) return labs.on;
+  if (labs.dir === userData && now - labs.at < LABS_TTL_MS) return false;
   let on = false;
   try { on = !!userData && fs.statSync(path.join(userData, PHONE_LABS_FILE)).isFile(); } catch { on = false; }
-  Object.assign(labs, { dir: userData, at: now, on });
+  if (on) Object.assign(labs, { dir: null, at: -Infinity });
+  else Object.assign(labs, { dir: userData, at: now });
   return on;
 }
 
@@ -89,9 +91,10 @@ const PRESSURE_TTL_MS = 10_000; // one sysctl per 10 s at most, and only when a 
  */
 export function createPhoneMain(m) {
   let pressure = { at: 0, level: null };
-  const readPressure = () => new Promise((resolve) => {
+  // m.readPressure only in tests: the real reading made a test depend on this Mac's memory at the time.
+  const readPressure = m.readPressure ?? (() => new Promise((resolve) => {
     execFile('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_vm_pressure_level'], { timeout: 1000, encoding: 'utf8' }, (err, out) => resolve(err ? null : pressureLevel(out)));
-  });
+  }));
   // The Mac's own pressure reading: warning or worse refuses a new move. Read on demand, cached briefly; a failed read
   // is not pressure (the setting is the user's choice and the check is a courtesy, not a guard).
   let pressureRead = null;
@@ -131,7 +134,7 @@ export function createPhoneMain(m) {
     log: m.log,
     exe: m.exe,
     runnerPath: m.runnerPath,
-    on: () => phoneModeOn(m.settings(), process.platform, phoneLabsOn(m.userData)),
+    on: () => phoneModeOn(m.settings(), m.platform ?? process.platform, phoneLabsOn(m.userData)),
     tabs: () => m.tabs(),
     inputSeq: (id) => m.inputSeq(id),
     inputHeld: (id) => m.inputHeld(id),

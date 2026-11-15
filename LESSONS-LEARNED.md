@@ -1207,3 +1207,9 @@
 - **FIX**: Added `test:phonemain` (with the electron stub loader) to `test:chain`, and gave the test a readable mode.
 - **CONTEXT**: A test file that no script runs is worse than none: it reads as coverage. When adding a test file, add its script to the chain in the same commit.
 - **DETECTION**: `for f in electron/__tests__/*.test.mjs; do grep -q "$(basename $f)" package.json || echo "not run: $f"; done`
+
+### Testing: 2026-11-15
+- **MISTAKE**: `phone-main.test.mjs` built `createPhoneMain` with the real `sysctl kern.memorystatus_vm_pressure_level` reading and the real `process.platform`, so the account-binding test failed with code `memory` the moment this Mac hit warning pressure, and with `off` on Linux (Codex r37).
+- **FIX**: `createPhoneMain` takes `m.platform` and `m.readPressure`; the test passes `platform: 'darwin'` and `readPressure: async () => 1`.
+- **CONTEXT**: Any test that reaches a host reading (memory, platform, uptime) through a factory must inject it, or it passes on a quiet Mac and fails on a busy one.
+- **DETECTION**: `grep -n "createPhoneMain(" electron/__tests__/*.mjs` and confirm each call passes platform and readPressure.

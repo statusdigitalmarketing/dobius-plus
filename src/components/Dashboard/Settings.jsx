@@ -51,9 +51,13 @@ export default function Settings() {
   const [mobileStatus, setMobileStatus] = useState(null);
   const [phoneUnlocked, setPhoneUnlocked] = useState(false); // phone mode's dark flag
   useEffect(() => {
+    // Re-read while Settings stays open, so deleting the flag file hides the toggle without closing it (Codex r37).
     let live = true;
-    window.electronAPI?.phoneModeUnlocked?.().then((v) => { if (live) setPhoneUnlocked(v === true); }).catch(() => {});
-    return () => { live = false; };
+    const read = () => window.electronAPI?.phoneModeUnlocked?.().then((v) => { if (live) setPhoneUnlocked(v === true); }).catch(() => {});
+    read();
+    const t = setInterval(read, 5000);
+    window.addEventListener('focus', read);
+    return () => { live = false; clearInterval(t); window.removeEventListener('focus', read); };
   }, []);
   const [qrTarget, setQrTarget] = useState('app'); // what scanning the pairing QR opens: the iPhone app or a browser
   const [mobileDevices, setMobileDevices] = useState([]);

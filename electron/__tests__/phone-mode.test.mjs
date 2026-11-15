@@ -207,6 +207,18 @@ test('take: the mode must read the same on two looks in a row, each with no draf
   }
 });
 
+test('take: phone mode turned off during the checks stops nothing (Codex r37)', async () => {
+  let on = true;
+  const ctx = setup({ on: () => on, processCwd: async () => { on = false; return process.cwd(); } });
+  try {
+    await ctx.mode.init();
+    const r = await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
+    assert.equal(r.code, 'off', JSON.stringify(r));
+    assert.deepEqual(ctx.calls.stop, []);
+    assert.equal(ctx.mode.heldSessions().size, 0);
+  } finally { await ctx.cleanup(); }
+});
+
 test('descends walks parents in one listing', () => {
   const rows = [{ pid: 3, ppid: 2 }, { pid: 2, ppid: 1 }, { pid: 9, ppid: 1 }];
   assert.equal(descends(rows, 3, 1), true);

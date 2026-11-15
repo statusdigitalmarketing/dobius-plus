@@ -293,6 +293,7 @@ export function createPhoneMode(d) {
     if (reg.gen(tabId) !== gen) return fail('stale_view', 'the tab changed; look again');
     if (d.inputSeq(tabId) !== inputSeq || d.inputHeld(tabId)) return fail('typed', 'something was typed in the tab, so it was left alone');
     if (!stillOk()) return fail('revoked', 'this phone is no longer paired with the Mac');
+    if (!d.on()) return fail('off', 'phone mode is off on this Mac'); // turned off during the checks above (Codex r37)
     const b = reg.begin(tabId, sessionId);
     if (!b.ok) return fail(b.code, b.code === 'too_many' ? 'four conversations are already on the phone' : 'that conversation is busy');
     const run = b.run;

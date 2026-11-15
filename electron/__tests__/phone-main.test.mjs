@@ -81,7 +81,8 @@ test('take refuses a Claude started by hand on another account, before stopping 
   const calls = { stop: 0, spawn: 0 };
   const accounts = [{ type: 'claude', id: 'a', dir: '/p/a' }, { type: 'claude', id: 'b', dir: '/p/b' }];
   const make = (scanDir) => createPhoneMain({
-    userData, exe: '/x/Dobius+', runnerPath: '/x/phone-runner.mjs', log: () => {},
+    userData, exe: '/x/Dobius+', runnerPath: '/x/phone-runner.mjs', log: () => {}, platform: 'darwin', // any host (Codex r37)
+    readPressure: async () => 1, // never this Mac's real memory pressure
     settings: () => ({ phoneMode: true }), accounts: () => accounts, envFor: (a) => ({ CLAUDE_CONFIG_DIR: a.dir }),
     tabs: () => [{ id: 'T1', pid: process.ppid, cwd: userData, claudeConfigDir: '/p/a' }],
     inputSeq: () => 1, inputHeld: () => false, activity: () => ({ status: 'done' }),
@@ -125,9 +126,10 @@ test('phone mode ships dark: unlocked only while <userData>/labs/phone-mode exis
     assert.equal(phoneLabsOn(dir, 1000), false);
     fs.mkdirSync(path.join(dir, 'labs'));
     fs.writeFileSync(path.join(dir, PHONE_LABS_FILE), '');
-    assert.equal(phoneLabsOn(dir, 2000), false, 'cached for 5 s');
+    assert.equal(phoneLabsOn(dir, 2000), false, 'a no is cached for 5 s');
     assert.equal(phoneLabsOn(dir, 7000), true);
     fs.rmSync(path.join(dir, PHONE_LABS_FILE));
+    assert.equal(phoneLabsOn(dir, 7001), false, 'a yes is never cached: deleting the file locks it at once (Codex r37)');
     fs.mkdirSync(path.join(dir, PHONE_LABS_FILE));
     assert.equal(phoneLabsOn(dir, 13000), false, 'a folder of that name is not the flag');
     assert.equal(phoneLabsOn(null, 20000), false);
