@@ -1183,3 +1183,15 @@
 - **FIX**: Two facts, two signals. The ack means queued. Each queued SDKUserMessage carries a client `uuid`; Claude names what it read in `user_message_uuids` on its reply frames, the runner reports `delivered` to main, and at the end reports `notSent` (still in its queue) and `unsure` (reached Claude unread). Main keeps the ended list per tab after the run is forgotten; the phone keeps a message in storage until it is read, and turns losses back into Not sent / Not confirmed.
 - **CONTEXT**: "Accepted into my buffer" is never "delivered" when another process consumes the buffer asynchronously and can be stopped. Look for a consumer-side receipt (here the SDK's client uuid echo) before inventing a heuristic; keep a counted fallback only for producers that lack it.
 - **DETECTION**: `grep -n "user_message_uuids\|t: 'delivered'" electron/phone-runner.mjs electron/phone-mode.js`
+
+### Security - 2026-11-14
+- **MISTAKE**: Phone mode took the permission mode only from the stopped TUI's argv. A tab launched with `--permission-mode acceptEdits` and switched to manual with Shift+Tab ran on the phone in accept edits: `mkdir` went through with no permission card, looser than what the person had on screen.
+- **FIX**: Read the mode Claude shows under its prompt box (`promptFooterMode`, the 4 rows below the box: "manual mode on", "auto mode on", "accept edits on", "plan mode on", "bypass permissions on"). When it cannot be read, use argv only if it is strict (plan, default, dontAsk), else manual. The restart uses the shown mode too.
+- **CONTEXT**: argv is the mode a process STARTED in, not the mode it is in. Anything that hands a session to another surface must carry the live state, and when it cannot see it, fail to the stricter side.
+- **DETECTION**: `grep -n "carryFlags\|promptFooterMode" electron/phone-mode.js electron/bridge-open-tab.js`
+
+### Testing - 2026-11-14
+- **MISTAKE**: Backed up `electron/phone-mode.js` and `mobile/phone-mode.js` for sabotage tests as `$S/$(basename f).bak`. Same basename, so the second backup overwrote the first, and the first restore copied the phone helper over main's file (git diff showed 661 deletions). The sabotage results run after that were against the wrong file.
+- **FIX**: Back up by full path (`cp f "$S/$(echo f | tr / _).bak"`), and `cmp` every file against its backup after the restores. Recovered main's file from an earlier copy and re-applied the change.
+- **CONTEXT**: Any loop that saves files by basename collides when two directories share a file name (phone-mode.js exists in electron/ and mobile/).
+- **DETECTION**: `git diff --stat | tail -1` after a sabotage pass: deletions far above the change size mean a clobber.

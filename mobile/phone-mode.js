@@ -28,7 +28,7 @@ export function readPhoneState(msg, tabId) {
   if (msg.on !== true) return { on: false, gen, ended };
   return {
     on: true, gen, ended,
-    delivered: Array.isArray(msg.delivered) ? msg.delivered.filter((x) => typeof x === 'string').slice(-64) : [],
+    delivered: Array.isArray(msg.delivered) ? msg.delivered.filter((x) => typeof x === 'string').slice(-(64 + ASK_MAX)) : [],
     runId: typeof msg.runId === 'string' ? msg.runId : null,
     sessionId: typeof msg.sessionId === 'string' ? msg.sessionId : null,
     status: STATUSES.has(msg.status) ? msg.status : 'starting',
@@ -232,6 +232,18 @@ export function applyRunState(echoes, s, now = Date.now()) {
     return { ...e, delivered: true, at: now };
   });
   return changed ? next : echoes;
+}
+
+/** The most sendIds one state request asks about (the Mac refuses more: electron/phone-protocol.js ASK_MAX). */
+export const ASK_MAX = 32;
+
+/**
+ * A phoneStateGet for this tab that also asks about this page's own messages still waiting (Codex r35): the Mac's live
+ * list holds only the newest 64 reads, so a phone that was away while others were read would wait on its own forever.
+ */
+export function phoneStateRequest(tabId, echoes) {
+  const ask = (echoes || []).filter((e) => e && e.sendId && !e.delivered).map((e) => e.sendId).slice(-ASK_MAX);
+  return ask.length ? { type: 'phoneStateGet', id: tabId, ask } : { type: 'phoneStateGet', id: tabId };
 }
 
 /** Phone messages on this tab Claude is not known to have read (each kept in the outbox until it is). */

@@ -55,7 +55,7 @@ export async function handlePhoneOp(msg, deps) {
     try { onPhone = !!pm.isPhoneTab?.(r.id); } catch { onPhone = false; }
     if (!onPhone) return fail('off');
   }
-  if (r.type === 'phoneStateGet') return deps.send({ type: 'phoneState', ...pm.stateOf(r.id), id: r.id, reqId });
+  if (r.type === 'phoneStateGet') return deps.send({ type: 'phoneState', ...pm.stateOf(r.id, r.ask), id: r.id, reqId });
   let res;
   try {
     if (r.type === 'phoneTake') res = await pm.take(r.id, { sessionId: r.sessionId, gen: r.gen, stillOk: deps.stillOk });

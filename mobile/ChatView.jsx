@@ -8,7 +8,7 @@ import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, 
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 import { remarkCommandBoxes, CMD_TAG } from './command-blocks.js';
 import PhoneCards from './PhoneCards';
-import { phoneOffered, phoneKnown, sendOutcome, applyRunState, pruneEchoes, ageEchoes, waitingCount, MAX_OUTSTANDING, OUTBOX_TABS, outboxFull, echoBaseline, loadOutbox, saveOutbox, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
+import { phoneOffered, phoneKnown, sendOutcome, applyRunState, phoneStateRequest, pruneEchoes, ageEchoes, waitingCount, MAX_OUTSTANDING, OUTBOX_TABS, outboxFull, echoBaseline, loadOutbox, saveOutbox, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
 // blocks, lists were showing as raw pipes/asterisks: Sam's v1.0.53 report);
@@ -671,6 +671,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // them (its next state settles them), otherwise as not confirmed.
   const outboxKey = pairingKey(connection.pairing, OUTBOX_KEY);
   const [echoes, setEchoes] = useState(() => loadPhoneOutbox(outboxKey, tabId));
+  const echoesRef = useRef(echoes);
+  echoesRef.current = echoes;
   // Every sendId this page loaded or sent: a save writes or removes only these, never another open page's (Codex r31).
   const ownedRef = useRef(null);
   if (ownedRef.current === null) ownedRef.current = new Set(echoes.map((e) => e.sendId).filter(Boolean));
@@ -851,7 +853,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         if (tabId && (phoneKnown(connection.features) || phoneRef.current?.on)) {
           noPhoneRef.current = false;
           connection.send({ type: 'authorizeTab', id: tabId });
-          connection.send({ type: 'phoneStateGet', id: tabId });
+          connection.send(phoneStateRequest(tabId, echoesRef.current));
         } else {
           noPhoneRef.current = true;
           setPhone(null);
@@ -1004,7 +1006,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         // dropped it without a word. Say so instead of leaving the echo bubble
         // looking delivered.
         const note = msg.uncertain ? SEND_UNCERTAIN : SEND_REFUSED[msg.code];
-        if (msg.code === 'stale_view' || msg.code === 'on_phone') connection.send({ type: 'phoneStateGet', id: tabId });
+        if (msg.code === 'stale_view' || msg.code === 'on_phone') connection.send(phoneStateRequest(tabId, echoesRef.current));
         if (note) {
           setSendNote(note);
           clearTimeout(sendNoteTimer.current);
@@ -1020,7 +1022,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   useEffect(() => {
     if (!tabId || !phoneKnown(connection.features)) return;
     connection.send({ type: 'authorizeTab', id: tabId });
-    connection.send({ type: 'phoneStateGet', id: tabId });
+    connection.send(phoneStateRequest(tabId, echoesRef.current));
   }, [connection, tabId]);
 
   // Tell the screen around this chat (its header and menu) what phone mode is doing here.
@@ -1041,7 +1043,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     const failed = !msg || msg.type === 'opError';
     const why = !msg ? PHONE_NO_ANSWER : failed ? refusalText(msg.code, msg.message) : '';
     // A refusal for an old view: read the tab again so the next try names the generation it has now.
-    if (msg?.type === 'opError' && msg.code === 'stale_view' && tabId) connection.send({ type: 'phoneStateGet', id: tabId });
+    if (msg?.type === 'opError' && msg.code === 'stale_view' && tabId) connection.send(phoneStateRequest(tabId, echoesRef.current));
     if (entry.op === 'phoneTake') setMoveSheet((cur) => (cur ? (failed ? { busy: false, note: why } : null) : cur));
     else if (entry.op === 'phoneAnswer') { setCardBusy(false); setCardNote(why); }
     else if (entry.op === 'phoneSend') {
@@ -1085,7 +1087,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     const p = phoneRef.current;
     if (p && p.gen !== null) return { ok: true, gen: p.gen };
     if (noPhoneRef.current && connection.status === 'authed') return { ok: true, gen: undefined };
-    if (tabId && connection.status === 'authed') connection.send({ type: 'phoneStateGet', id: tabId });
+    if (tabId && connection.status === 'authed') connection.send(phoneStateRequest(tabId, echoesRef.current));
     return { ok: false };
   };
   const NOT_READY = 'Not sent: still connecting to the Mac. Send it again in a moment.';
@@ -1093,14 +1095,14 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   const openMoveSheet = () => {
     if (!phoneOffered(connection.features) || phoneOn) return;
     setMoveSheet({ busy: false, note: '' });
-    if (tabId) connection.send({ type: 'phoneStateGet', id: tabId });
+    if (tabId) connection.send(phoneStateRequest(tabId, echoesRef.current));
   };
   const doMove = () => {
     if (moveSheet?.busy) return;
     if (!sessionId) { setMoveSheet({ busy: false, note: 'This tab has no Claude conversation to move yet.' }); return; }
     const gen = phoneRef.current?.gen;
     if (gen === null || gen === undefined) {
-      if (tabId) connection.send({ type: 'phoneStateGet', id: tabId });
+      if (tabId) connection.send(phoneStateRequest(tabId, echoesRef.current));
       setMoveSheet({ busy: false, note: 'Still reading the tab. Try again in a moment.' });
       return;
     }

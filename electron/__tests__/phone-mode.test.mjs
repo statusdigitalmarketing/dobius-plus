@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
-import { createPhoneMode, descends, HELLO_MS, SHELL_KILL_MS } from '../phone-mode.js';
+import { createPhoneMode, descends, carryFlags, HELLO_MS, SHELL_KILL_MS } from '../phone-mode.js';
 import { socketPath, ticketPath, donePath } from '../phone-socket.js';
 
 const S = '0b5c2a6e-1111-4222-8333-444455556666';
@@ -147,6 +147,26 @@ async function serve(runner, reply = (m) => ({ ok: true })) {
   runner.send({ t: 'reply', reqId: m.reqId, ...reply(m) });
   return m;
 }
+
+test('carryFlags: the shown mode wins for both sides; with none shown the phone never runs looser than asking (round 34 ship-test)', () => {
+  // Launched skipping permissions, then switched to manual with Shift+Tab: both sides follow the screen.
+  assert.deepEqual(carryFlags({ permissionMode: 'bypassPermissions', model: 'opus' }, 'default'), { permissionMode: 'default', model: 'opus', phoneMode: 'default' });
+  assert.deepEqual(carryFlags({ permissionMode: null, model: null }, 'auto'), { permissionMode: 'auto', model: null, phoneMode: 'auto' });
+  // Nothing shown: the TUI comes back as launched, the phone asks first unless the flag already asks as much.
+  assert.deepEqual(carryFlags({ permissionMode: 'bypassPermissions', model: null }, null), { permissionMode: 'bypassPermissions', model: null, phoneMode: 'default' });
+  assert.equal(carryFlags({ permissionMode: 'acceptEdits' }, null).phoneMode, 'default');
+  assert.equal(carryFlags({ permissionMode: 'plan' }, null).phoneMode, 'plan');
+  assert.equal(carryFlags({ permissionMode: null }, null).phoneMode, 'default');
+});
+
+test('take: the mode shown on screen goes to the phone and comes back to the TUI', async () => {
+  const ctx = setup({ promptMode: () => 'plan' });
+  try {
+    const { rok } = await live(ctx);
+    assert.equal(rok.permissionMode, 'plan');
+    assert.equal(ctx.calls.restart[0].phone.permissionMode, 'plan', 'the TUI restarts in the shown mode, not its launch flag');
+  } finally { await ctx.cleanup(); }
+});
 
 test('descends walks parents in one listing', () => {
   const rows = [{ pid: 3, ppid: 2 }, { pid: 2, ppid: 1 }, { pid: 9, ppid: 1 }];
@@ -300,7 +320,8 @@ test('full run: handshake, carried flags, cards, sends once per id, give back, d
     assert.equal(restart.phone.sessionId, S);
     assert.equal(restart.phone.runner, '/x/phone-runner.mjs');
     assert.deepEqual([restart.phone.permissionMode, restart.phone.model], ['acceptEdits', 'opus'], 'the TUI comes back with its flags');
-    assert.deepEqual(rok, { t: 'runner-ok', permissionMode: 'acceptEdits', model: 'opus', resendNote: false });
+    // No mode shown on screen in this setup: the phone side asks first rather than take the looser launch flag.
+    assert.deepEqual(rok, { t: 'runner-ok', permissionMode: 'default', model: 'opus', resendNote: false });
     const rec = JSON.parse(fs.readFileSync(path.join(ctx.userData, 'phone-runs.json'), 'utf8'));
     assert.deepEqual(rec.map((x) => [x.runId, x.pgid, x.claudePid]), [[runId, 2200, 2300]]);
     assert.ok(ctx.mode.isPhoneTab('T1'));
@@ -449,6 +470,30 @@ test('a runner that drops without a word leaves every message Claude was not see
     runner.end();
     await sleep(80);
     assert.deepEqual(ctx.mode.stateOf('T1').ended, [{ runId, lost: [{ sendId: 'send-b', why: 'unsure' }] }]);
+  } finally { await ctx.cleanup(); }
+});
+
+test('a phone away while 64 other messages were read still learns its own were read, by asking (Codex r35)', async () => {
+  const ctx = setup();
+  try {
+    const { runId, runner } = await live(ctx);
+    const reqs = [];
+    for (let i = 0; i < 100; i++) {
+      const [, m] = await Promise.all([ctx.mode.send('T1', runId, `m${i}`, `send-${i}`), serve(runner)]);
+      reqs.push(m.reqId);
+    }
+    const [, held] = await Promise.all([ctx.mode.send('T1', runId, 'held', 'send-held'), serve(runner)]);
+    runner.send({ t: 'delivered', reqIds: reqs });
+    await sleep(50);
+    assert.ok(held.reqId, 'queued, not read');
+    const plain = ctx.mode.stateOf('T1').delivered;
+    assert.equal(plain.length, 64);
+    assert.equal(plain.includes('send-0'), false, 'pushed out of the newest 64');
+    const asked = ctx.mode.stateOf('T1', ['send-0', 'send-1', 'send-held', 'send-never']).delivered;
+    assert.deepEqual(asked.filter((x) => !plain.includes(x)).sort(), ['send-0', 'send-1']);
+    assert.equal(asked.includes('send-held') || asked.includes('send-never'), false, 'only what Claude read');
+    assert.equal(ctx.mode.stateOf('T1', Array.from({ length: 40 }, (_, i) => `send-${i}`)).delivered.length, 64 + 32,
+      'at most ASK_MAX asked ids are looked up');
   } finally { await ctx.cleanup(); }
 });
 

@@ -62,7 +62,7 @@ const PRESSURE_TTL_MS = 10_000; // one sysctl per 10 s at most, and only when a 
 /**
  * Build phone mode from main's helpers. `m`:
  *   userData, exe, runnerPath, log, settings(), accounts(), envFor(account)
- *   tabs(), inputSeq(id), inputHeld(id), activity(id), screen(id), promptBox(lines, modes)
+ *   tabs(), inputSeq(id), inputHeld(id), activity(id), screen(id), promptBox(lines, modes), promptMode(lines, modes)
  *   claudeInfo(id) (strict, never the PTY's own process), scan(), presence(info, configDir), hasTranscript(sessionId)
  *   processCwd(pid), isDir(p), stop(pid), alive(pid), sleep(ms)
  *   ownerOf(tabId) -> webContents or null, movable(tabId, sender, pin) -> refusal string or null
@@ -120,6 +120,7 @@ export function createPhoneMain(m) {
     activity: (id) => m.activity(id),
     screen: (id) => m.screen(id),
     promptBox: (lines, modes) => m.promptBox(lines, modes),
+    promptMode: (lines, modes) => m.promptMode?.(lines, modes) ?? null,
     claudeInfo: (id) => m.claudeInfo(id),
     presence: (info, tabId) => presenceFor(tabId, info, true),
     accountProblem: (tabId, pid) => accountProblem(seen.get(tabId), pid, spawnedBinding(tabId), m.accounts(), m.envFor),

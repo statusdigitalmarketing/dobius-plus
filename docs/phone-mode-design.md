@@ -143,9 +143,12 @@ supported way to drive Claude Code with structured input and callbacks.
   binaries (the optional dependencies) are excluded from the app bundle; we never run them.
 - `resume: sessionId`, `cwd`, `settingSources: ['user', 'project', 'local']` and the `claude_code` system prompt
   preset, so CLAUDE.md, hooks, plugins, MCP servers and permission rules load as in the TUI.
-- `permissionMode` and `model` are carried over from the stopped process's argv (`--permission-mode`,
-  `--dangerously-skip-permissions`, `--model`), each checked against a fixed allowlist. A mode changed inside the TUI
-  with Shift+Tab is not visible in argv; the phone session starts in the argv mode (accepted, see Limits).
+- `model` is carried over from the stopped process's argv (`--model`). The permission mode is the one Claude shows
+  under its prompt box when the phone takes the tab (`promptFooterMode` in bridge-open-tab.js reads the footer rows:
+  manual, auto, accept edits, plan, bypass permissions), so a Shift+Tab change inside the TUI is kept. When the footer
+  cannot be read, the argv mode (`--permission-mode`, `--dangerously-skip-permissions`) is used only if it is one of
+  the strict ones (plan, default, dontAsk); a looser argv mode starts the phone session in manual, because Shift+Tab
+  may have tightened it unseen. Each value is checked against a fixed allowlist.
 - `CLAUDE_CODE_ENTRYPOINT=remote_mobile` unless the shell already set one. The SDK would otherwise tag the session
   `sdk-ts`, and both `claude --resume`'s picker and Dobius's History hide `sdk-*` sessions. This is Happy's fix
   (slopus/happy#1202).
@@ -319,7 +322,9 @@ instead, and only into an empty box. The Mac's `ack` says only that the runner q
 Queued for after this turn). Read by Claude is a second fact (Codex r34): each queued message carries a client `uuid`,
 Claude names the ones it read in `user_message_uuids` on its reply, and the runner tells main (`delivered`, by request
 id; on a Claude that names none, two results after the SDK took it). The phone learns it from `phoneState.delivered`
-(the live run's newest 64 sendIds). When a run ends, the runner reports which messages never left its queue
+(the live run's newest 64 sendIds). A phone that was away while more than 64 others were read would never see its
+own there (Codex r35), so every `phoneStateGet` also carries `ask`: up to 32 of that page's own sendIds still waiting,
+and main adds each one the run's registry records as delivered (it keeps 4096 per run). When a run ends, the runner reports which messages never left its queue
 (`notSent`) and which reached Claude unread (`unsure`); main keeps that list per tab for a day after the run is
 forgotten (`phoneState.ended`, 4 runs, 64 ids each, memory only), and the phone turns those back into Not sent or Not
 confirmed. A queued message missing from a complete list was read; a run the Mac no longer knows leaves its queued
@@ -386,7 +391,9 @@ on screen with Send again (see "Phone protocol additions").
 
 When the conversation comes back, the TUI resumes with the permission mode and model it was stopped with
 (`--permission-mode`, `--model`, the same allowlist the runner uses, checked again in the shell). Without them a tab
-started in manual mode came back in the user's default mode (ship-test, 2026-11-14).
+started in manual mode came back in the user's default mode (ship-test, 2026-11-14). The mode is the one shown on
+screen when the phone took it, falling back to argv; a tab launched in accept edits and switched to manual with
+Shift+Tab gets permission cards on the phone and comes back in manual (ship-test, 2026-11-14).
 
 ## Safety and stability
 
@@ -444,7 +451,8 @@ started in manual mode came back in the user's default mode (ship-test, 2026-11-
 - Images from the phone are sent as file paths in the text, as today.
 - Slash commands that need the TUI (/login, /model picker, /resume) do not work from the phone. Text commands that
   Claude Code accepts in a prompt (/compact) do.
-- A permission mode changed with Shift+Tab inside the TUI is not carried over; the argv mode is.
+- The permission mode comes from the TUI's footer. If a future Claude Code changes that footer's wording, the phone
+  session falls back to manual unless argv named a strict mode, and the restart to the argv mode.
 - After Dobius quits or restarts, a phone-mode tab comes back on the Mac (the normal auto-resume).
 - Windows: not offered.
 - Phone-created terminals (`term-mobile-*`) are not offered (no window to restart them in).

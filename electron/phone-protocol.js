@@ -13,6 +13,7 @@ export const PLAN_MODES = new Set(['default', 'acceptEdits']);
 const RUN_ID = /^[0-9a-f]{32}$/;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SEND_ID = /^[A-Za-z0-9_-]{1,64}$/;
+export const ASK_MAX = 32; // sendIds one phoneStateGet may ask about
 // A tool use id (SDK `toolUseID`, scoped by agent id for subagents): printable, no spaces, bounded.
 const REQUEST_ID = /^[\x21-\x7e]{1,200}$/;
 
@@ -87,8 +88,15 @@ export function validatePhoneRequest(m) {
       }
       return { ok: true, value: { type: m.type, id, runId: m.runId } };
     }
-    case 'phoneStateGet':
-      return { ok: true, value: { type: m.type, id } };
+    case 'phoneStateGet': {
+      // `ask`: the phone's own messages it has not seen read yet (Codex r35). The live run's newest 64 reads can pass
+      // over a phone that was away, so it asks for its own by sendId; at most ASK_MAX, checked like a send's.
+      if (m.ask === undefined) return { ok: true, value: { type: m.type, id } };
+      if (!Array.isArray(m.ask) || m.ask.length > ASK_MAX || !m.ask.every((x) => typeof x === 'string' && SEND_ID.test(x))) {
+        return bad('bad_request', `ask must be at most ${ASK_MAX} send ids`);
+      }
+      return { ok: true, value: { type: m.type, id, ask: [...new Set(m.ask)] } };
+    }
     default:
       return bad('bad_request', 'unknown request');
   }

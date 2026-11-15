@@ -3,7 +3,7 @@
 // Run: node --test electron/__tests__/mobile-phone-mode.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { phoneOffered, phoneKnown, sendOutcome, reconcileEchoes, applyRunState, pruneEchoes, ageEchoes, ECHO_TTL_MS, waitingCount, MAX_OUTSTANDING, OUTBOX_TABS, outboxFull, echoBaseline, loadOutbox, saveOutbox, ARRIVAL_SKEW_MS, freshId, readPhoneState, questionAnswer, togglePick, permissionAnswer, planAnswer, refusalText } from '../../mobile/phone-mode.js';
+import { phoneOffered, phoneKnown, sendOutcome, reconcileEchoes, applyRunState, phoneStateRequest, ASK_MAX, pruneEchoes, ageEchoes, ECHO_TTL_MS, waitingCount, MAX_OUTSTANDING, OUTBOX_TABS, outboxFull, echoBaseline, loadOutbox, saveOutbox, ARRIVAL_SKEW_MS, freshId, readPhoneState, questionAnswer, togglePick, permissionAnswer, planAnswer, refusalText } from '../../mobile/phone-mode.js';
 import { validateAnswer, validatePhoneRequest } from '../phone-protocol.js';
 import { answerMisfit } from '../phone-runner-core.mjs';
 
@@ -284,4 +284,17 @@ test('expired entries of tabs never opened again are removed by the next scan (C
   st.setItem('unrelated', 'kept');
   assert.equal(outboxFull(st, BASE, 'new', now), false);
   assert.deepEqual(st.keys(), ['unrelated'], 'only what is not ours stays');
+});
+
+test('phoneStateRequest asks about this page\'s newest waiting messages, and readPhoneState keeps the answers (Codex r35)', () => {
+  assert.deepEqual(phoneStateRequest('T', []), { type: 'phoneStateGet', id: 'T' });
+  const echoes = [
+    { sendId: 'read', delivered: true }, { content: 'no id' }, null,
+    ...Array.from({ length: 40 }, (_, i) => ({ sendId: `w${i}`, acked: i % 2 === 0, fail: i === 3 ? 'unconfirmed' : null })),
+  ];
+  const r = phoneStateRequest('T', echoes);
+  assert.equal(ASK_MAX, 32);
+  assert.deepEqual(r.ask, Array.from({ length: 32 }, (_, i) => `w${i + 8}`));
+  const delivered = Array.from({ length: 96 }, (_, i) => `d${i}`);
+  assert.equal(readPhoneState({ type: 'phoneState', id: 'T', on: true, delivered: [...delivered, 'extra'] }, 'T').delivered.length, 96);
 });

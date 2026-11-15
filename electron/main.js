@@ -52,7 +52,7 @@ import { terminalTextTail, terminalScreenText, submitPromptToTab, writeRawInput,
 import { launchCommandFor, claudeLaunchOptions, normalizeNewTabModel, normalizeNewTabPermissionMode, CLAUDE_AUTH_ENV } from '../shared/new-tab.js';
 import { sanitizeAccountPin } from '../shared/tab-label.js';
 import { renderScreenLines } from './screen-render.js';
-import { promptBoxText } from './bridge-open-tab.js';
+import { promptBoxText, promptFooterMode } from './bridge-open-tab.js';
 import { readModelCatalog, currentFromRecord, pickerCommand } from './model-picker.js';
 import { claudeJsonCandidates } from './account-identity.js';
 import {
@@ -3493,6 +3493,7 @@ async function setupPhoneMode() {
     activity: (id) => terminalStatus.statusFor(id),
     screen: (id) => moveScreenOf(id),
     promptBox: (lines, modes) => promptBoxText(lines, modes),
+    promptMode: (lines, modes) => promptFooterMode(lines, modes),
     // Strict, and never the tab's own process (`exec claude`): stopping that would close the tab. Only the shell's
     // direct children are looked at, so the runner's own Claude is never taken for the tab's.
     claudeInfo: async (id) => { const i = await getTerminalClaudeInfo(id, { strict: true }); return i?.ptySelf ? null : i; },

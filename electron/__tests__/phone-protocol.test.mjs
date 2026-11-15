@@ -21,6 +21,13 @@ test('tab id is required and bounded', () => {
   assert.equal(validatePhoneRequest({ type: 'phoneStateGet', id: '' }).ok, false);
   assert.equal(validatePhoneRequest({ type: 'phoneStateGet', id: 'x'.repeat(4097) }).ok, false);
   assert.deepEqual(validatePhoneRequest({ type: 'phoneStateGet', id: ID }), { ok: true, value: { type: 'phoneStateGet', id: ID } });
+  // Codex r35: the phone may ask about at most 32 of its own sendIds, each shaped like a send's.
+  assert.deepEqual(validatePhoneRequest({ type: 'phoneStateGet', id: ID, ask: ['a', 'b', 'a'] }).value, { type: 'phoneStateGet', id: ID, ask: ['a', 'b'] });
+  assert.equal(validatePhoneRequest({ type: 'phoneStateGet', id: ID, ask: Array.from({ length: 32 }, (_, i) => `s${i}`) }).ok, true);
+  assert.equal(validatePhoneRequest({ type: 'phoneStateGet', id: ID, ask: Array.from({ length: 33 }, (_, i) => `s${i}`) }).ok, false);
+  assert.equal(validatePhoneRequest({ type: 'phoneStateGet', id: ID, ask: 'a' }).ok, false);
+  assert.equal(validatePhoneRequest({ type: 'phoneStateGet', id: ID, ask: ['a b'] }).ok, false);
+  assert.equal(validatePhoneRequest({ type: 'phoneStateGet', id: ID, ask: [7] }).ok, false);
 });
 
 test('phoneSend: non-blank text within the cap and a send id', () => {

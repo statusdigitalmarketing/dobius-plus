@@ -199,6 +199,31 @@ function caretInBox(cursor, top, bottom, firstRow) {
  * draws under its box (a status line) can draw boxes too.
  */
 export function promptBoxText(lines, modes) {
+  return findPromptBox(lines, modes)?.text ?? null;
+}
+
+// Claude's own permission-mode line under its input box, as Claude Code 2.1 draws it ("⏸ manual mode on",
+// "⏵⏵ accept edits on (shift+tab to cycle)"), and the mode each names.
+const FOOTER_MODE_RE = /^\s*(?:⏵⏵|⏸)\s+(manual mode|auto mode|accept edits|plan mode|bypass permissions) on\b/;
+const FOOTER_MODES = { 'manual mode': 'default', 'auto mode': 'auto', 'accept edits': 'acceptEdits', 'plan mode': 'plan', 'bypass permissions': 'bypassPermissions' };
+const FOOTER_ROWS = 4; // rows under the box searched (a status line may come first)
+
+/**
+ * The permission mode Claude shows under its idle input box right now (it changes with Shift+Tab, which no flag or
+ * record reflects), or null when the screen is not an idle prompt or shows no mode line. Only rows directly under the
+ * box are read, never the transcript above it.
+ */
+export function promptFooterMode(lines, modes) {
+  const box = findPromptBox(lines, modes);
+  if (!box) return null;
+  for (const row of lines.slice(box.bottom + 1, box.bottom + 1 + FOOTER_ROWS)) {
+    const m = FOOTER_MODE_RE.exec(String(row || ''));
+    if (m) return FOOTER_MODES[m[1]];
+  }
+  return null;
+}
+
+function findPromptBox(lines, modes) {
   if (!Array.isArray(lines) || !modes?.bracketedPaste) return null;
   let last = lines.length - 1;
   while (last >= 0 && !String(lines[last] || '').trim()) last -= 1;
@@ -232,7 +257,7 @@ export function promptBoxText(lines, modes) {
       // row starting with ">" or "│" in the flat prompt is message text.
       const lead = k0 => (flat ? (k0 ? /^\s*[❯>]?\s?/ : /^\s*/) : (k0 ? /^\s*│?\s*>?\s?/ : /^\s*│?\s*/));
       const rows = lines.slice(top + 1, j).map((r, k) => String(r).replace(lead(k === 0), '').replace(flat ? /\s+$/ : /\s*│?\s*$/, ''));
-      return rows.join('\n');
+      return { text: rows.join('\n'), bottom: j };
     }
   }
   return null;

@@ -19,6 +19,7 @@ import {
   ensureRunDir, ticketPath, donePath, writeTokenFile, dropTokenFile, startPhoneSocket,
 } from './phone-socket.js';
 import { carryOverFlags } from './phone-runner-core.mjs';
+import { ASK_MAX } from './phone-protocol.js';
 
 export const HELLO_MS = 30_000; // the gate's and the runner's hellos must arrive within this of the restart
 export const TICKET_MS = 60_000; // an unredeemed ticket file is deleted after this
@@ -44,6 +45,18 @@ const CARD_KINDS = new Set(['question', 'permission', 'plan']);
 const STATUSES = new Set(['idle', 'working', 'waiting']);
 const sameStart = (a, b) => typeof a === 'string' && typeof b === 'string' && a.replace(/\s+/g, ' ') === b.replace(/\s+/g, ' ');
 const plain = (s, n = 300) => String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').slice(0, n);
+
+/**
+ * The modes a move carries. The TUI comes back with the mode shown on screen when it was stopped, else its launch flag
+ * (unchanged from before). The phone side runs the shown mode; with none shown it never runs looser than asking first:
+ * the launch flag only when it asks at least as much (plan, default, dontAsk), otherwise default.
+ */
+const STRICT_MODES = new Set(['plan', 'default', 'dontAsk']);
+export function carryFlags(flags, shownMode) {
+  const permissionMode = shownMode || flags?.permissionMode || null;
+  const phoneMode = shownMode || (STRICT_MODES.has(flags?.permissionMode) ? flags.permissionMode : 'default');
+  return { permissionMode, model: flags?.model ?? null, phoneMode };
+}
 
 /** True when `pid` has `ancestor` among its parents in one ps listing (bounded walk). */
 export function descends(rows, pid, ancestor) {
@@ -107,11 +120,21 @@ export function createPhoneMode(d) {
     if (endedByTab.size > ENDED_TABS) endedByTab.delete(endedByTab.keys().next().value);
   }
 
-  /** The phone's view of a tab: the registry's state, the sendIds Claude read in the live run, and ended runs' losses. */
-  function stateOf(tabId) {
+  /**
+   * The phone's view of a tab: the registry's state, the sendIds Claude read in the live run, and ended runs' losses.
+   * `ask` (Codex r35): sendIds the asking phone still waits on. The live run's list holds only its newest reads, so a
+   * phone that was away while others were read learns its own from the registry (every sendId of the run, bounded).
+   */
+  function stateOf(tabId, ask) {
     const s = { ...reg.stateOf(tabId) };
     const run = reg.runOfTab(tabId);
-    if (s.on && run?.delivered?.length) s.delivered = [...run.delivered];
+    if (s.on && run) {
+      const read = new Set(run.delivered || []);
+      for (const id of (Array.isArray(ask) ? ask.slice(0, ASK_MAX) : [])) {
+        if (reg.sendStateOf(run, id) === 'delivered') read.add(id);
+      }
+      if (read.size) s.delivered = [...read];
+    }
     const ended = endedOf(tabId);
     if (ended.length) {
       s.ended = ended.map((e) => ({
@@ -231,6 +254,9 @@ export function createPhoneMode(d) {
     const sc = await d.screen(tabId).catch(() => null);
     const box = sc ? d.promptBox(sc.lines, sc.modes) : null;
     if (d.inputHeld(tabId) || typeof box !== 'string' || box.trim()) return fail('draft', "there is unsent text in the tab's prompt, or it could not be read");
+    // The mode Claude shows now: Shift+Tab changes it with no flag or record saying so, so the launch flags alone could
+    // run the phone side looser than what the person was looking at (round 34 ship-test).
+    const shownMode = sc && d.promptMode ? d.promptMode(sc.lines, sc.modes) : null;
     const argv = await d.processArgv(info.pid).catch(() => null);
     const pcwd = await d.processCwd(info.pid).catch(() => null);
     const cwd = pcwd && d.isDir(pcwd) ? pcwd : null;
@@ -246,7 +272,7 @@ export function createPhoneMode(d) {
     if (!b.ok) return fail(b.code, b.code === 'too_many' ? 'four conversations are already on the phone' : 'that conversation is busy');
     const run = b.run;
     Object.assign(run, {
-      carry: carryOverFlags(argv), resendNote: waitingOnPerson, ptyPid: null, ptyStart: null, cwd, aliveAt: now(), binding,
+      carry: carryFlags(carryOverFlags(argv), shownMode), resendNote: waitingOnPerson, ptyPid: null, ptyStart: null, cwd, aliveAt: now(), binding,
       startedAt: now(), endingAt: null, gateStart: null, closedAt: null,
     });
     const manual = `The conversation is safe: run claude --resume ${sessionId} in ${cwd}, in this tab.`;
@@ -429,7 +455,7 @@ export function createPhoneMode(d) {
     conn.data.runId = run.runId;
     conn.data.role = 'runner';
     conns.set(run.runId, conn);
-    conn.send({ t: 'runner-ok', permissionMode: run.carry?.permissionMode ?? null, model: run.carry?.model ?? null, resendNote: run.resendNote === true });
+    conn.send({ t: 'runner-ok', permissionMode: run.carry?.phoneMode ?? 'default', model: run.carry?.model ?? null, resendNote: run.resendNote === true });
     notify(run);
   }
 

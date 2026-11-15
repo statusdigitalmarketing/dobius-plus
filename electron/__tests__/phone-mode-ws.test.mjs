@@ -117,3 +117,14 @@ test('phoneStateGet answers with the tab state for this tab id', async () => {
   await h.run({ type: 'phoneStateGet', id: T, reqId: 'q' });
   assert.deepEqual(h.sent[0], { type: 'phoneState', id: T, on: true, gen: 2, runId: RUN, reqId: 'q' });
 });
+
+test('phoneStateGet hands the phone\'s asked sendIds to stateOf, and refuses a bad list (Codex r35)', async () => {
+  let got;
+  let h = harness({ pm: { stateOf: (id, ask) => { got = [id, ask]; return { on: false }; } } });
+  await h.run({ type: 'phoneStateGet', id: T, reqId: 'q', ask: ['s-1', 's-2', 's-1'] });
+  assert.deepEqual(got, [T, ['s-1', 's-2']]);
+  assert.equal(h.sent[0].type, 'phoneState');
+  h = harness({ pm: { stateOf: () => { throw new Error('not reached'); } } });
+  await h.run({ type: 'phoneStateGet', id: T, reqId: 'q', ask: ['bad id'] });
+  assert.deepEqual([h.sent[0].type, h.sent[0].code], ['opError', 'bad_request']);
+});
