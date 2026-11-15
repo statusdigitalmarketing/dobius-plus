@@ -7,6 +7,8 @@ import { pairingKey } from './pairings';
 import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache, stepSummary } from '../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 import { remarkCommandBoxes, CMD_TAG } from './command-blocks.js';
+import PhoneCards from './PhoneCards';
+import { phoneOffered, phoneKnown, sendOutcome, applyRunState, phoneStateRequest, pruneEchoes, ageEchoes, waitingCount, MAX_OUTSTANDING, OUTBOX_TABS, outboxFull, echoBaseline, loadOutbox, saveOutbox, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
 // blocks, lists were showing as raw pipes/asterisks: Sam's v1.0.53 report);
@@ -17,6 +19,20 @@ import { remarkCommandBoxes, CMD_TAG } from './command-blocks.js';
 // never eats typed-but-unsent text (Sam's report). One localStorage key holds
 // a { tabId: { text, at } } map, pruned to 40 entries / 7 days on write.
 const DRAFTS_KEY = 'dobius-mobile-drafts';
+// Phone mode messages not yet known to have arrived, one storage key each (mobile/phone-mode.js loadOutbox / saveOutbox).
+const OUTBOX_KEY = 'dobius-mobile-phone-msg';
+// The words of a message as the transcript shows them. Normalizes the `!` composer prefix on BOTH sides: the transcript
+// records a bash command as <bash-input>cmd</bash-input>, which the server collapses to "! cmd", while the user may have
+// typed "!cmd" or "!  cmd". Without this the echo never matched and the bubble sat on "sending…" for a command that had
+// already run.
+const normEcho = (t) => {
+  const s2 = String(t).trim();
+  return s2.startsWith('!') ? `! ${s2.slice(1).trim()}` : s2;
+};
+function loadPhoneOutbox(base, tabId) {
+  if (!tabId) return [];
+  try { return loadOutbox(localStorage, base, tabId); } catch (err) { console.warn('[phone] outbox not read:', err?.message || err); return []; }
+}
 // Older messages load a page at a time when the reader reaches the top (Sam:
 // "when I scroll to the top I can't find older stuff"), never all at once.
 // The Mac caps one request at 2000 entries.
@@ -389,7 +405,7 @@ const Activity = memo(function Activity({ activity }) {
   );
 });
 
-const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending, command, detail, detailLabel, blocks: rawBlocks, startOpen, live }) {
+const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending, failed, onRetry, onRemove, command, detail, detailLabel, blocks: rawBlocks, startOpen, live }) {
   const blocks = useMemo(() => (role === 'assistant' ? normalizeBlocks(rawBlocks) : null), [role, rawBlocks]);
   const text = String(content ?? '');
   const shown = rowText(text, blocks); // what the reader sees, and what Copy copies
@@ -409,7 +425,13 @@ const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending,
       <div className={`chat-msg user${sending ? ' chat-echo' : ''}`}>
         <div className="chat-bubble">{body}{more}</div>
         {command && detail && <SkillPreview detail={detail} label={detailLabel || 'skill'} />}
-        {(queued || sending) && <div className="chat-msg-state">{sending ? 'Sending…' : 'Queued for after this turn'}</div>}
+        {failed ? (
+          <div className="chat-msg-state chat-msg-failed" role="status">
+            {failed === 'failed' ? 'Not sent' : 'Not confirmed by the Mac'}
+            {onRetry && <button type="button" className="chat-retry" onClick={onRetry}>Send again</button>}
+            {onRemove && <button type="button" className="chat-retry chat-remove" onClick={onRemove}>Remove</button>}
+          </div>
+        ) : (queued || sending) && <div className="chat-msg-state">{sending ? 'Sending…' : 'Queued for after this turn'}</div>}
       </div>
     );
   }
@@ -436,7 +458,14 @@ const SEND_REFUSED = {
   not_authorized: 'Not sent: the connection lost this tab. Send it again.',
   too_large: 'Not sent: the message is too long.',
   cancelled: 'Not sent: a cancel key dropped it.',
+  on_phone: 'Not sent: this conversation is on your phone now. Send it again.',
+  stale_view: 'Not sent: the tab changed since you looked. Check it and send again.',
 };
+// How long a phone mode request waits for the Mac's answer. A move stops the tab's Claude (up to 10 s) and waits for
+// the runner to start (up to 30 s), so it gets longer (electron/phone-mode.js STOP_MS, HELLO_MS).
+const PHONE_REPLY_MS = 15_000;
+const PHONE_TAKE_MS = 60_000;
+const PHONE_NO_ANSWER = 'No answer from the Mac. Check the tab before trying again.';
 // uncertain (stranded is always uncertain): the text reached the tab but its
 // Enter was withheld, so it may be in the input line or already sent.
 const SEND_UNCERTAIN = 'Maybe sent: it was pasted but the tab changed before Enter. Check the terminal before resending.';
@@ -473,10 +502,39 @@ function captureAnchor(body, keys) {
   return picked.length ? picked : null;
 }
 
-export default function ChatView({ connection, tab, onOpenTerminal }) {
+export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = null, onPhoneState = null }) {
   const sessionId = tab?.sessionId || null;
   const projectPath = tab?.sessionProject || null;
   const tabId = tab?.id || null;
+  // Phone mode (docs/phone-mode-design.md): the tab's Claude runs for this phone while `phone.on`. null = not known
+  // (the Mac does not offer it, or has not answered yet).
+  const [phone, setPhone] = useState(null);
+  const phoneRef = useRef(null);
+  phoneRef.current = phone;
+  const phoneOn = phone?.on === true;
+  // Every write to the tab names the generation this screen was showing (writeGen below), so a tap made before a
+  // trip to the phone and back is refused instead of landing on whatever the tab shows now.
+  const [moveSheet, setMoveSheet] = useState(null); // null | { busy, note }
+  const [cardBusy, setCardBusy] = useState(false);
+  const [cardNote, setCardNote] = useState('');
+  const [phoneNote, setPhoneNote] = useState('');
+  const phoneNoteTimer = useRef(null);
+  const phoneReqs = useRef(new Map()); // reqId -> { op, timer, ... }, the requests still waiting for an answer
+  // This socket's Mac has no phone mode for this tab (it does not offer it and nothing here is on the phone): writes
+  // to the tab go without a generation, as an older app's do. Until that or the tab's generation is known, a write
+  // waits, because a write with neither is taken as an older app's even after a trip to the phone and back.
+  const noPhoneRef = useRef(connection.status === 'authed' && !phoneKnown(connection.features));
+  const settleRef = useRef(null);
+  useEffect(() => () => {
+    for (const r of phoneReqs.current.values()) clearTimeout(r.timer);
+    phoneReqs.current.clear();
+    clearTimeout(phoneNoteTimer.current);
+  }, []);
+  const flashPhoneNote = useCallback((text) => {
+    setPhoneNote(text);
+    clearTimeout(phoneNoteTimer.current);
+    phoneNoteTimer.current = setTimeout(() => setPhoneNote(''), 5000);
+  }, []);
   // Tool images: requested over the socket only when a thumbnail shows, cached
   // per session. A Mac too old to answer just leaves the placeholder.
   // A fresh cache per (re)connection: images that failed while the socket was
@@ -609,7 +667,25 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // Claude's queue and never appeared here; the server now also surfaces
   // queued entries). An echo drops once the transcript shows the same text,
   // or after 90s (e.g. the tab was a bare shell that ran it as a command).
-  const [echoes, setEchoes] = useState([]);
+  // Phone messages from an earlier visit that Claude was not known to have read come back first: queued if the Mac took
+  // them (its next state settles them), otherwise as not confirmed.
+  const outboxKey = pairingKey(connection.pairing, OUTBOX_KEY);
+  const [echoes, setEchoes] = useState(() => loadPhoneOutbox(outboxKey, tabId));
+  const echoesRef = useRef(echoes);
+  echoesRef.current = echoes;
+  // Every sendId this page loaded or sent: a save writes or removes only these, never another open page's (Codex r31).
+  const ownedRef = useRef(null);
+  if (ownedRef.current === null) ownedRef.current = new Set(echoes.map((e) => e.sendId).filter(Boolean));
+  // Kept outside the view: leaving the tab unmounts it, and a message whose answer it never saw must not vanish
+  // (Codex r28). One key per message (saveOutbox), so two pages saving at once cannot lose each other's (Codex r32).
+  useEffect(() => {
+    if (!tabId) return;
+    try {
+      saveOutbox(localStorage, outboxKey, tabId, echoes, ownedRef.current);
+      // Settled ones are gone from storage now; keep owning only what is still on screen.
+      ownedRef.current = new Set(echoes.map((e) => e.sendId).filter(Boolean));
+    } catch (err) { console.warn('[phone] outbox not saved:', err?.message || err); }
+  }, [echoes, outboxKey, tabId]);
   // On-screen terminal keys row (esc/tab/arrows/^C) for full-TUI dialogs.
   const [showKeys, setShowKeys] = useState(false);
   const fileInputRef = useRef(null);
@@ -731,8 +807,10 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   keysRef.current = messageKeys;
   const messagesRef = useRef(messages); // the rows now, for timers
   messagesRef.current = messages;
-  const working = tab?.status === 'working';
-  const activity = working ? normalizeActivity(tab?.activity) : null;
+  // On the phone, the run's own status says whether Claude is working (the tab's activity line reads the Mac's TUI,
+  // which is not running then).
+  const working = phoneOn ? phone.status === 'working' : tab?.status === 'working';
+  const activity = working && !phoneOn ? normalizeActivity(tab?.activity) : null;
   if (activity && typeof tab?.activity?.rxAt === 'number') activity.rxAt = tab.activity.rxAt;
   useEffect(() => {
     setShellText(null);
@@ -766,6 +844,43 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
         if (skillsRequestedRef.current && skillsRef.current === null) {
           connection.send({ type: 'listSkills' });
         }
+        // A phone request still waiting went out on the old socket, and the Mac answers only there: it is lost.
+        const lost = [...phoneReqs.current.values()];
+        phoneReqs.current.clear();
+        for (const e of lost) settleRef.current?.(e, null);
+        // Phone mode may have changed while the socket was down: ask again. A Mac with the setting off still runs it
+        // (phoneGen) and still answers for a conversation that is on the phone, so it is asked too.
+        if (tabId && (phoneKnown(connection.features) || phoneRef.current?.on)) {
+          noPhoneRef.current = false;
+          connection.send({ type: 'authorizeTab', id: tabId });
+          connection.send(phoneStateRequest(tabId, echoesRef.current));
+        } else {
+          noPhoneRef.current = true;
+          setPhone(null);
+        }
+      } else if (msg.type === 'phoneState') {
+        const s = readPhoneState(msg, tabId);
+        if (s) {
+          if (phoneRef.current?.on && !s.on) flashPhoneNote('Back on the Mac');
+          if (!s.on) { setCardBusy(false); setCardNote(''); }
+          else setMoveSheet(null); // moved, whatever became of the request that asked
+          setPhone(s);
+          // Which phone messages Claude read, and after a run which it never got (Codex r34).
+          setEchoes((cur) => {
+            const n = applyRunState(cur, s);
+            return n === cur ? cur : pruneEchoes(n, messagesRef.current || [], normEcho);
+          });
+        }
+      } else if ((msg.type === 'ack' || msg.type === 'opError') && msg.id === tabId && msg.reqId != null
+          && phoneReqs.current.has(msg.reqId)) {
+        const entry = phoneReqs.current.get(msg.reqId);
+        phoneReqs.current.delete(msg.reqId);
+        settleRef.current?.(entry, msg);
+      } else if (msg.type === 'opError' && msg.op === 'phoneStateGet' && msg.id === tabId && msg.code === 'off'
+          && !phoneRef.current?.on) {
+        // This Mac runs no phone mode at all: writes go as an older app's.
+        noPhoneRef.current = true;
+        setPhone(null);
       } else if (msg.type === 'transcript' && msg.sessionId === wantRef.current
           && (msg.projectPath == null || msg.projectPath === projectPath)
           // A History reply for this session (plain rows) shares the socket
@@ -775,12 +890,8 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           // File identical to what we hold: keep messages as-is, but still
           // age out echo bubbles (their 90s TTL must not depend on the
           // transcript changing).
-          setEchoes((cur) => {
-            if (cur.length === 0) return cur;
-            const now = Date.now();
-            const kept = cur.filter((e) => now - e.at < 90_000);
-            return kept.length === cur.length ? cur : kept;
-          });
+          // A phone message that failed stays until it is sent again or the transcript shows it.
+          setEchoes((cur) => ageEchoes(cur));
           return;
         }
         // A reply for a smaller window than the one now asked for (a poll still
@@ -843,22 +954,9 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
         }
         // Prune echoes the transcript now covers (same trimmed text, queued or
         // real) and any older than 90s.
-        setEchoes((cur) => {
-          if (cur.length === 0) return cur;
-          // Normalize the `!` composer prefix on BOTH sides: the transcript
-          // records a bash command as <bash-input>cmd</bash-input>, which the
-          // server collapses to "! cmd", while the user may have typed
-          // "!cmd" or "!  cmd". Without this the echo never matched and the
-          // bubble sat on "sending…" for a command that had already run.
-          const norm = (t) => {
-            const s2 = String(t).trim();
-            return s2.startsWith('!') ? `! ${s2.slice(1).trim()}` : s2;
-          };
-          const seen = new Set(next.filter((m) => m.role === 'user').map((m) => norm(m.content)));
-          const now = Date.now();
-          const kept = cur.filter((e) => !seen.has(norm(e.content)) && now - e.at < 90_000);
-          return kept.length === cur.length ? cur : kept;
-        });
+        // A phone message (sendId) is matched to a row that was not there when it was sent, one row per message
+        // (Codex r27, r28, r29); see pruneEchoes.
+        setEchoes((cur) => pruneEchoes(cur, next, normEcho));
         if (next.length > 0) {
           emptyStreakRef.current = 0;
           sigRef.current = msg.sig || null;
@@ -908,6 +1006,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
         // dropped it without a word. Say so instead of leaving the echo bubble
         // looking delivered.
         const note = msg.uncertain ? SEND_UNCERTAIN : SEND_REFUSED[msg.code];
+        if (msg.code === 'stale_view' || msg.code === 'on_phone') connection.send(phoneStateRequest(tabId, echoesRef.current));
         if (note) {
           setSendNote(note);
           clearTimeout(sendNoteTimer.current);
@@ -916,7 +1015,126 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       }
     });
     return off;
-  }, [connection, projectPath, tabId]);
+  }, [connection, projectPath, tabId, flashPhoneNote]);
+
+  // First look at phone mode for this tab (the reconnect path above asks again). authorizeTab first: every phone
+  // request, phoneStateGet included, needs the tab authorized on this socket.
+  useEffect(() => {
+    if (!tabId || !phoneKnown(connection.features)) return;
+    connection.send({ type: 'authorizeTab', id: tabId });
+    connection.send(phoneStateRequest(tabId, echoesRef.current));
+  }, [connection, tabId]);
+
+  // Tell the screen around this chat (its header and menu) what phone mode is doing here.
+  useEffect(() => {
+    onPhoneState?.(tabId, phone);
+  }, [onPhoneState, tabId, phone]);
+  useEffect(() => () => onPhoneState?.(tabId, null), [onPhoneState, tabId]);
+
+  const showSendNote = (text) => {
+    setSendNote(text);
+    clearTimeout(sendNoteTimer.current);
+    sendNoteTimer.current = setTimeout(() => setSendNote(''), 6000);
+  };
+  // What became of one phone mode request: answered (`msg` an ack), refused (an opError), or lost (`msg` null: no
+  // answer in time, or the socket it went out on is gone).
+  settleRef.current = (entry, msg) => {
+    clearTimeout(entry.timer);
+    const failed = !msg || msg.type === 'opError';
+    const why = !msg ? PHONE_NO_ANSWER : failed ? refusalText(msg.code, msg.message) : '';
+    // A refusal for an old view: read the tab again so the next try names the generation it has now.
+    if (msg?.type === 'opError' && msg.code === 'stale_view' && tabId) connection.send(phoneStateRequest(tabId, echoesRef.current));
+    if (entry.op === 'phoneTake') setMoveSheet((cur) => (cur ? (failed ? { busy: false, note: why } : null) : cur));
+    else if (entry.op === 'phoneAnswer') { setCardBusy(false); setCardNote(why); }
+    else if (entry.op === 'phoneSend') {
+      // Each message keeps its own bubble and sendId: Send again on it goes with the same id, which the Mac delivers
+      // at most once (phone-mode.js sendOutcome). Several failed messages never share or overwrite one.
+      const outcome = sendOutcome(msg);
+      if (outcome === 'sent') {
+        // Queued on the Mac: it stays kept until the Mac says Claude read it (applyRunState), which may have come first.
+        setEchoes((cur) => cur.map((e) => (e.sendId === entry.sendId && !e.delivered ? { ...e, acked: true, fail: null } : e)));
+        return;
+      }
+      // A message the Mac already listed as read keeps that, whatever this late answer says.
+      setEchoes((cur) => cur.map((e) => (e.sendId === entry.sendId && !e.delivered ? { ...e, fail: outcome } : e)));
+      showSendNote(outcome === 'failed' ? `Not sent: ${why}` : 'The Mac did not confirm a message. Tap Send again on it: it is delivered at most once.');
+    } else if (failed) flashPhoneNote(why);
+  };
+
+  /**
+   * Sends one phone mode request; false when the socket is not ready. These are never queued, and not sent while the
+   * connection is being checked after a wake (a dead socket would swallow them).
+   */
+  const phoneRequest = (op, fields, extra = {}) => {
+    if (!tabId || connection.closed || connection.status !== 'authed' || connection._suspect) return false;
+    const reqId = freshId('ph');
+    const entry = { op, ...extra };
+    entry.timer = setTimeout(() => {
+      if (phoneReqs.current.get(reqId) !== entry) return;
+      phoneReqs.current.delete(reqId);
+      settleRef.current?.(entry, null);
+    }, op === 'phoneTake' ? PHONE_TAKE_MS : PHONE_REPLY_MS);
+    phoneReqs.current.set(reqId, entry);
+    connection.send({ type: op, id: tabId, reqId, ...fields });
+    return true;
+  };
+
+  /**
+   * The generation a write to the tab carries: { ok, gen }. ok is false while it is not known on a Mac that may have
+   * phone mode, and the write waits (the caller says so) rather than going out as an older app's.
+   */
+  const writeGen = () => {
+    const p = phoneRef.current;
+    if (p && p.gen !== null) return { ok: true, gen: p.gen };
+    if (noPhoneRef.current && connection.status === 'authed') return { ok: true, gen: undefined };
+    if (tabId && connection.status === 'authed') connection.send(phoneStateRequest(tabId, echoesRef.current));
+    return { ok: false };
+  };
+  const NOT_READY = 'Not sent: still connecting to the Mac. Send it again in a moment.';
+
+  const openMoveSheet = () => {
+    if (!phoneOffered(connection.features) || phoneOn) return;
+    setMoveSheet({ busy: false, note: '' });
+    if (tabId) connection.send(phoneStateRequest(tabId, echoesRef.current));
+  };
+  const doMove = () => {
+    if (moveSheet?.busy) return;
+    if (!sessionId) { setMoveSheet({ busy: false, note: 'This tab has no Claude conversation to move yet.' }); return; }
+    const gen = phoneRef.current?.gen;
+    if (gen === null || gen === undefined) {
+      if (tabId) connection.send(phoneStateRequest(tabId, echoesRef.current));
+      setMoveSheet({ busy: false, note: 'Still reading the tab. Try again in a moment.' });
+      return;
+    }
+    if (!phoneRequest('phoneTake', { sessionId, gen })) {
+      setMoveSheet({ busy: false, note: 'Not connected to the Mac right now. Try again once it is back.' });
+      return;
+    }
+    setMoveSheet({ busy: true, note: '' });
+  };
+  const giveBack = () => {
+    const p = phoneRef.current;
+    if (!p?.on || !p.runId) return;
+    if (!phoneRequest('phoneGiveBack', { runId: p.runId })) flashPhoneNote('Not connected to the Mac right now.');
+  };
+  const answerCard = (card, answer) => {
+    const p = phoneRef.current;
+    if (cardBusy || !p?.on || !p.runId) return;
+    if (phoneRequest('phoneAnswer', { runId: p.runId, requestId: card.requestId, answer })) {
+      setCardBusy(true);
+      setCardNote('');
+    } else setCardNote('Not connected to the Mac right now. Nothing was sent.');
+  };
+
+  // The menu around this chat asks for a move or a give back by bumping `phoneCmd.n`. Only a bump made while this
+  // view is mounted counts: one left over from before it opened is not replayed.
+  const phoneCmdSeen = useRef(phoneCmd?.n ?? 0);
+  useEffect(() => {
+    if (!phoneCmd || phoneCmd.n === phoneCmdSeen.current) return;
+    phoneCmdSeen.current = phoneCmd.n;
+    if (phoneCmd.kind === 'move') openMoveSheet();
+    else if (phoneCmd.kind === 'giveBack') giveBack();
+  }, [phoneCmd]); // eslint-disable-line react-hooks/exhaustive-deps -- runs once per bump, with this render's handlers
 
   // Auto-scroll to the newest message, but only if the user was already at the
   // bottom (don't yank them up while they scroll back through history).
@@ -1076,16 +1294,87 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       .slice(0, 6)
     : [];
 
+  // Send again on a phone message that failed: the same sendId, so one that did arrive is not delivered twice. Back on
+  // the Mac, its words go into the box to be sent from there. True when it went out.
+  const retryEcho = (e) => {
+    if (!phoneOn || phone.runId !== e.runId) {
+      // That phone session is over: the words go into the box, to be sent where the conversation is now. Only into an
+      // empty box, and the bubble stays until they are there (Codex r27).
+      if (input.trim()) { showSendNote('That phone session ended. Clear the box first, then tap Send again to put it there.'); return false; }
+      setEchoes((cur) => cur.filter((x) => x.sendId !== e.sendId));
+      setDraft(e.content);
+      showSendNote(phoneOn ? 'That message was for an earlier phone session: it is in the box.' : 'Back on the Mac: it is in the box, send it from there.');
+      return false;
+    }
+    if (!phoneRequest('phoneSend', { runId: e.runId, text: e.content, sendId: e.sendId }, { text: e.content, sendId: e.sendId })) {
+      showSendNote('Not sent: not connected to the Mac right now. Send it again in a moment.');
+      return false;
+    }
+    setSendNote('');
+    setEchoes((cur) => cur.map((x) => (x.sendId === e.sendId ? { ...x, fail: null, at: Date.now() } : x)));
+    atBottomRef.current = true;
+    return true;
+  };
+
   const send = () => {
     const text = input.trim();
     if (!text || !tabId) return;
+    if (phoneOn) {
+      // On the phone the message goes to the run, never typed into the tab. The same words as a message that failed
+      // are that message sent again, with its sendId.
+      const prior = echoes.find((e) => e.fail && e.sendId && e.content === text && e.runId === phone.runId);
+      if (prior) { if (retryEcho(prior)) setDraft(''); return; }
+      // The phone keeps every message the Mac has not answered, across visits, and keeps at most this many: past it a
+      // new one waits in the box rather than pushing an older one out unseen (Codex r29).
+      if (waitingCount(echoes) >= MAX_OUTSTANDING) {
+        showSendNote(`${MAX_OUTSTANDING} messages are still waiting to reach Claude. Send this one once Claude has them, or remove one that did not go.`);
+        return;
+      }
+      // Across tabs too: a tab's waiting messages are never pushed out of storage for another's (Codex r30).
+      let full = false;
+      try { full = outboxFull(localStorage, outboxKey, tabId); } catch (err) { console.warn('[phone] outbox not read:', err?.message || err); }
+      if (full) {
+        showSendNote(`Messages are waiting for the Mac on ${OUTBOX_TABS} other tabs. Send them again or remove them there first.`);
+        return;
+      }
+      const sendId = freshId('s');
+      if (!phone.runId || connection.status !== 'authed') {
+        showSendNote('Not sent: not connected to the Mac right now. Send it again in a moment.');
+        return;
+      }
+      // runId: Send again goes to the run it was written for, never to a later one on the same tab (Codex r27).
+      const base = echoBaseline(text, messagesRef.current || [], normEcho);
+      const echo = { content: text, at: Date.now(), since: Date.now(), sendId, runId: phone.runId, ...base };
+      // Kept in storage BEFORE it goes, so leaving the screen cannot lose it; if storage refuses, it stays in the box
+      // (Codex r33).
+      try { saveOutbox(localStorage, outboxKey, tabId, [echo], null); } catch (err) {
+        console.warn('[phone] outbox not saved:', err?.message || err);
+        showSendNote('Not sent: this phone could not save the message (its storage may be full). Remove some waiting messages, then send it again.');
+        return;
+      }
+      ownedRef.current.add(sendId);
+      if (!phoneRequest('phoneSend', { runId: phone.runId, text, sendId }, { text, sendId })) {
+        try { saveOutbox(localStorage, outboxKey, tabId, [], new Set([sendId])); } catch (err) { console.warn('[phone] outbox not cleaned:', err?.message || err); }
+        ownedRef.current.delete(sendId);
+        showSendNote('Not sent: not connected to the Mac right now. Send it again in a moment.');
+        return;
+      }
+      setSendNote('');
+      sentAtRef.current = Date.now();
+      setEchoes((cur) => [...cur, echo]);
+      setDraft('');
+      atBottomRef.current = true;
+      return;
+    }
     // submitPrompt: the server bracketed-pastes the text, then presses Enter as
     // a DISCRETE keypress after the paste settles. Sending `text\r` in one
     // chunk made Claude's Ink TUI treat the \r as pasted newline, so messages
     // sat in the input box unsubmitted (Sam's v1.0.51 bug 3).
+    const w = writeGen();
+    if (!w.ok) { showSendNote(NOT_READY); return; }
     const reqId = `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     lastSendRef.current = reqId;
-    connection.send({ type: 'submitPrompt', id: tabId, text, reqId });
+    connection.send({ type: 'submitPrompt', id: tabId, text, reqId, gen: w.gen });
     setSendNote(''); // a refusal note is about the PREVIOUS send
     sentAtRef.current = Date.now();
     setEchoes((cur) => [...cur, { content: text, at: Date.now() }]);
@@ -1110,14 +1399,20 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       return false;
     }
     const { token } = pressGuard.current.pressedCard(e, card);
+    const w = writeGen();
+    if (!w.ok) {
+      setSelNote('Still connecting to the Mac. Nothing was sent, tap again in a moment.');
+      setTimeout(() => setSelNote(''), 4000);
+      return false;
+    }
     if (token === null || token === undefined) {
-      connection.send({ type: 'input', id: tabId, data });
+      connection.send({ type: 'input', id: tabId, data, gen: w.gen });
       return true;
     }
     if (!token) return false;
     tappedRef.current = card;
     setSelBusy(true);
-    connection.send({ type: 'selectorKey', id: tabId, data, token });
+    connection.send({ type: 'selectorKey', id: tabId, data, token, gen: w.gen });
     return true;
   };
 
@@ -1177,11 +1472,15 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // bug 2 + Asana 1217257328849820).
   const startClaude = () => {
     if (!tabId) return;
-    connection.send({ type: 'submitPrompt', id: tabId, text: 'claude' });
+    const w = writeGen();
+    if (!w.ok) { showSendNote(NOT_READY); return; }
+    connection.send({ type: 'submitPrompt', id: tabId, text: 'claude', gen: w.gen });
   };
   const resumeClaude = () => {
     if (!tabId) return;
-    connection.send({ type: 'submitPrompt', id: tabId, text: 'claude --continue' });
+    const w = writeGen();
+    if (!w.ok) { showSendNote(NOT_READY); return; }
+    connection.send({ type: 'submitPrompt', id: tabId, text: 'claude --continue', gen: w.gen });
   };
 
   // Selector popup + input row are shared by BOTH states below: a sessionless
@@ -1333,8 +1632,41 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     return () => ro.disconnect();
   }, [sessionId]);
 
+  // While the conversation is on the phone: what the run is doing, and the way back.
+  const phoneStrip = phoneOn && (
+    <div className="phone-strip" role="status">
+      <span className={`phone-strip-dot ${phone.status}`} aria-hidden="true" />
+      <span className="phone-strip-text">
+        {STATUS_WORDS[phone.status]}
+        {phone.error && <span className="phone-strip-error">{phone.error}</span>}
+      </span>
+      <button type="button" className="phone-strip-back" onClick={giveBack} disabled={phone.status === 'ending'}>Give back to Mac</button>
+    </div>
+  );
+  const phoneCards = phoneOn && (
+    <PhoneCards pending={phone.pending} busy={cardBusy} note={cardNote} onAnswer={answerCard} />
+  );
+  // Claude's own prompts on the tab's screen mean nothing while the phone has it: the run's cards replace them.
+  const prompts = phoneOn ? phoneCards : selectorPopup;
+  const moveSheetEl = moveSheet && (
+    <div className="sheet-backdrop" onClick={() => { if (!moveSheet.busy) setMoveSheet(null); }}>
+      <div className="sheet phone-sheet" role="dialog" aria-modal="true" aria-labelledby="phone-move-title" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-handle" aria-hidden="true" />
+        <h2 className="phone-sheet-title" id="phone-move-title">Move this conversation to your phone?</h2>
+        <p className="phone-sheet-text">The Mac tab will show that this conversation is on your phone. Press Enter in that tab, or tap Give back to Mac, to move it back.</p>
+        {moveSheet.note && <p className="ask-note" role="alert">{moveSheet.note}</p>}
+        <div className="phone-actions">
+          <button type="button" className="phone-btn" disabled={moveSheet.busy} onClick={() => setMoveSheet(null)}>Cancel</button>
+          <button type="button" className="phone-btn primary" disabled={moveSheet.busy} onClick={doMove}>{moveSheet.busy ? 'Moving...' : 'Move'}</button>
+        </div>
+      </div>
+    </div>
+  );
+
   const inputRow = (
     <>
+      {phoneNote && <div className="phone-note" role="status">{phoneNote}</div>}
+      {phoneStrip}
       {uploadMsg && <div className="chat-upload-msg">{uploadMsg}</div>}
       {sendNote && <div className="chat-upload-msg" role="alert">{sendNote}</div>}
       {suggestions.length > 0 && (
@@ -1349,8 +1681,12 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       )}
       {/* On-screen terminal keys, for the full-TUI dialogs a popup cannot
           drive (/permissions and friends need arrows + enter + tab). */}
-      {showKeys && tabId && (
-        <SpecialKeys onKey={(seq) => connection.send({ type: 'input', id: tabId, data: seq })} />
+      {showKeys && tabId && !phoneOn && (
+        <SpecialKeys onKey={(seq) => {
+          const w = writeGen();
+          if (w.ok) connection.send({ type: 'input', id: tabId, data: seq, gen: w.gen });
+          else showSendNote(NOT_READY);
+        }} />
       )}
       {/* One rounded card on the keyboard, like Asana's comment box: the
           message on top across the full width, the tools underneath, Send on
@@ -1382,7 +1718,9 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
             const files = e.clipboardData?.files;
             if (files && files.length > 0) { e.preventDefault(); uploadFiles(files); }
           }}
-          placeholder={sessionId
+          placeholder={phoneOn
+            ? (working ? 'Queue for after this turn...' : 'Message Claude...')
+            : sessionId
             ? (tab && !tab.claudeLive
               ? 'Claude exited, to terminal...'
               : tab?.status === 'working' ? 'Queue for after this turn...' : 'Message Claude...')
@@ -1401,21 +1739,28 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
             )}
           </button>
-          <button
+          {!phoneOn && <button
             className={`chat-keys-toggle${showKeys ? ' on' : ''}`}
             onClick={() => setShowKeys((v) => !v)}
             aria-label="Toggle terminal keys"
             title="Arrow/Enter/Esc/Tab keys for interactive dialogs like /permissions"
           >
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2" /><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10" /></svg>
-          </button>
+          </button>}
           <span className="chat-composer-gap" />
-          {tab?.status === 'working' && !input.trim() ? (
+          {working && !input.trim() ? (
             <button
               key="stop"
               className="chat-stop"
               onKeyDown={(e) => { if (e.repeat) e.preventDefault(); }}
-              onClick={() => { if (tabId && Date.now() - sentAtRef.current > 800) connection.send({ type: 'input', id: tabId, data: '\x1b' }); }}
+              onClick={() => {
+                if (!tabId || Date.now() - sentAtRef.current <= 800) return;
+                // On the phone, Stop interrupts the run's turn; the tab's own Esc would be refused.
+                if (phoneOn) { if (phone.runId && !phoneRequest('phoneStop', { runId: phone.runId })) flashPhoneNote('Not connected to the Mac right now.'); return; }
+                const w = writeGen();
+                if (w.ok) connection.send({ type: 'input', id: tabId, data: '\x1b', gen: w.gen });
+                else showSendNote(NOT_READY);
+              }}
               aria-label="Stop Claude (escape)"
               title="Interrupt Claude / cancel queued messages. Tap again to clear its input."
             ><span /></button>
@@ -1455,8 +1800,9 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
             </div>
           )}
         </main>
-        {selectorPopup}
+        {prompts}
         {inputRow}
+        {moveSheetEl}
       </div>
     );
   }
@@ -1503,7 +1849,10 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           />
         ))}
         {echoes.map((e) => (
-          <Bubble key={`echo-${e.at}`} role="user" content={e.content} timestamp={e.at} sending />
+          <Bubble key={`echo-${e.sendId || e.at}`} role="user" content={e.content} timestamp={e.at}
+            sending={!e.sendId || (!e.acked && !e.delivered)} queued={!!e.acked && !e.delivered}
+            failed={e.fail || null} onRetry={e.fail ? () => retryEcho(e) : undefined}
+            onRemove={e.fail && e.sendId ? () => setEchoes((cur) => cur.filter((x) => x.sendId !== e.sendId)) : undefined} />
         ))}
         {sessionId && working && <Activity activity={tab?.waiting === 'background' ? { verb: 'Waiting on background task' } : activity} />}
       </main>
@@ -1514,8 +1863,9 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
         </button>
       )}
       </div>
-      {selectorPopup}
+      {prompts}
       {inputRow}
+      {moveSheetEl}
     </div>
     </ImageLoaded.Provider></ImageFetch.Provider>
   );

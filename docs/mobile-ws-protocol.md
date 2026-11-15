@@ -306,3 +306,51 @@ Every `terminalCreated` and every `error` from a Mac on 2.2.12 or later has a `n
 create only when that key matches; a reply WITHOUT the key comes from an older Mac and falls back to the pending flag.
 A phone Run terminal starts in the command's own folder when it exists (else the project folder).
 
+
+## Phone mode (beta, macOS)
+
+Design: `docs/phone-mode-design.md`. Advertised as `phone` in `authed.features` only while the Mac's setting
+(Settings > Mobile Access > Drive conversations from the phone) is on. `phoneGen` is advertised whenever the Mac runs
+phone mode at all (macOS), setting on or off: on such a Mac every write to a tab carries the `gen` from `phoneState`,
+because a conversation can still be on the phone after the setting is turned off. Only a Mac with neither feature takes
+writes with no `gen`. Handler: `electron/phone-mode-ws.js`; shapes:
+`electron/phone-protocol.js`; cards: `electron/phone-runner-core.mjs cardFor`.
+
+Every request needs the tab authorized on this socket (`authorizeTab`), a live tab, a pairing that is still valid and a
+valid `reqId` (or none). With the setting off, `phoneTake` is refused `off`, but a conversation already on the phone keeps working (send, answer, Stop, Give back) and `phoneStateGet` and the `phoneState` push still work, so the phone can bring it back. Each is answered `ack {op, id, reqId, runId?, gen?, duplicate?}` (`phoneStateGet`:
+`phoneState`) or `opError {op, code, id, reqId, message}`; `message` is plain words the phone can show.
+
+| Request | Fields | Effect |
+|---|---|---|
+| `phoneTake` | `id`, `sessionId`, `gen` (from `phoneState`) | Moves the tab's Claude to the phone. The ack carries the new `runId` |
+| `phoneSend` | `id`, `runId`, `text` (1 to 8 KB, not blank), `sendId` (1 to 64 of `[A-Za-z0-9_-]`) | Sends a message; the same `sendId` twice is sent once (`duplicate:true`). An id refused `not_live`, `busy` or `bad_request` was not taken and may be sent again; after `timeout` or `failed` it is not known, the id stays used, and a retry with it is delivered at most once. A retry that arrives while the first send is still waiting gets that send's outcome (`duplicate` once it was taken, a delivery of its own if it was refused); a retry after a `timeout` is answered `timeout` again until the runner's late answer settles it |
+| `phoneAnswer` | `id`, `runId`, `requestId`, `answer` | Answers one pending card |
+| `phoneStop` | `id`, `runId` | Interrupts the current turn |
+| `phoneGiveBack` | `id`, `runId` | Ends phone mode; the tab resumes the conversation on the Mac |
+| `phoneStateGet` | `id` | The tab's current `phoneState` |
+
+`answer` is `{kind:'question', answers:{[question text]: string}}` (every question on the card, nothing else; a
+several-choice question is the chosen labels joined by ", ", or the person's own words),
+`{kind:'permission', allow, always?, note?}` (`always` only when the card's `canAlways`), or
+`{kind:'plan', approve, mode? ('default' or 'acceptEdits', approve only), note?}`. Text up to 8 KB, at most 20 questions.
+
+Pushed to every socket that authorized the tab, whenever it changes, and the answer to `phoneStateGet`:
+`{type:'phoneState', id, gen, on:false}` or `{type:'phoneState', id, gen, on:true, runId, sessionId,
+status:'starting'|'idle'|'working'|'waiting'|'ending', pending:[card...], error?}`. `gen` is the tab's phone
+generation: a take names the one it was shown, so a take decided from an old view is refused `stale_view`.
+
+A card is one of:
+- `{requestId, kind:'question', tool, questions:[{index, question, header, multiSelect, options:[{label, description}]}], canAlways:false}`
+- `{requestId, kind:'plan', tool, summary (the plan, up to 16 KB), canAlways:false}`
+- `{requestId, kind:'permission', tool, title, description, displayName, reason, blockedPath, mcpServer, command (the tool's `command` string, up to 4 KB, else empty), input (JSON, up to 4 KB), canAlways, defaultToNo}`
+
+All card text is untrusted (it can come from a tool or an MCP server) and is shown as text, never markup.
+
+`opError` codes: `off`, `bad_request`, `bad_answer`, `unknown_tab`, `not_authorized`, `revoked`, `failed`, and from a
+take: `not_ready`, `busy`, `on_phone`, `claimed`, `memory`, `no_tab`, `cannot`, `no_claude`, `other`, `unreadable`,
+`no_transcript`, `working`, `draft`, `no_folder`, `typed`, `stale_view`; from a request on a run: `stale_run`,
+`not_live`, `not_pending`. Every take refusal's `message` says why in a sentence the phone shows as is.
+
+While a tab is on the phone, the tab's own writes from a phone (`input`, `submitPrompt`, selector answers, `resize`,
+`kill`) are refused `opError` code `on_phone`, and a write that names an older `gen` is refused `stale_view`. A voice
+command sent straight to that tab (`/voice/intent`, direct mode) is refused with HTTP 409.

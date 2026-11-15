@@ -114,8 +114,8 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
     };
   }, [checkOverflow, tabs.length]);
 
-  // The sidebar Tabs list asks for this bar's own menu (right-click) or close (double-click) on one of its tabs
-  // (Brett, task 1220331878170954). Only tabs this window holds; anything else is ignored.
+  // The sidebar Tabs list asks for this bar's own menu (right-click) on one of its tabs (Brett, task 1220331878170954;
+  // its double-click close was removed in 1220545658471567). Only tabs this window holds; anything else is ignored.
   const tabBarRequest = useStore((s) => s.tabBarRequest);
   const clearTabBarRequest = useStore((s) => s.clearTabBarRequest);
   useEffect(() => {
@@ -124,7 +124,6 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
     clearTabBarRequest();
     if (!tabs.some((t) => t.id === req.tabId)) return;
     if (req.kind === 'menu') setContextMenu({ x: req.x, y: req.y, tabId: req.tabId });
-    else if (req.kind === 'close' && tabs.length > 1) handleCloseTab({ stopPropagation: () => {} }, req.tabId);
   }, [tabBarRequest]); // eslint-disable-line react-hooks/exhaustive-deps -- acts once per request, on the tabs as they are now
 
   // The menu lives on body now, so it closes itself when the terminal view goes away (the Dashboard) or its tab does.

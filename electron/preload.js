@@ -354,6 +354,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updaterInstall: () => ipcRenderer.invoke('updater:install'),
   appRestart: () => ipcRenderer.invoke('app:restart'),
   appRestartInfo: () => ipcRenderer.invoke('app:restartInfo'),
+  phoneModeUnlocked: () => ipcRenderer.invoke('phoneMode:unlocked'),
   updaterGetPending: () => ipcRenderer.invoke('updater:getPending'),
   updaterGetStatus: () => ipcRenderer.invoke('updater:getStatus'),
   updaterGetLatestRelease: (force) => ipcRenderer.invoke('updater:getLatestRelease', force === true),

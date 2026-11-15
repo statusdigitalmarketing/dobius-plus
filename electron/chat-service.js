@@ -357,8 +357,16 @@ const withoutOutput = (base) => base.slice(0, base.lastIndexOf(':'));
  * `beforeWrite` runs after every check passes (main cancels a queued resume).
  * Returns { ok, stale?, token? } with the token for the next key on this prompt.
  */
-export async function answerSelector(id, data, token, stillOk = () => true, beforeWrite = () => {}) {
+// A tab whose conversation is on the phone (phone-mode.js isPhoneTab): no key or prompt is written to it from here,
+// whatever the caller checked (docs/phone-mode-design.md, the choke points).
+let phoneTabFn = () => false;
+const onPhone = (id) => { try { return phoneTabFn(id) === true; } catch { return true; } };
+export function setPhoneTabCheck(fn) { phoneTabFn = typeof fn === 'function' ? fn : () => false; }
+
+export async function answerSelector(id, data, token, stillOk0 = () => true, beforeWrite = () => {}) {
   if (typeof data !== 'string' || !data || data.length > 16 || typeof token !== 'string') return { ok: false };
+  if (onPhone(id)) return { ok: false, onPhone: true };
+  const stillOk = () => !onPhone(id) && stillOk0();
   const [base, fp] = token.split('|');
   if (!base || !fp) return { ok: false, stale: true };
   // The prompt's own timer ticking is the one kind of output allowed since
@@ -460,7 +468,9 @@ export function submitPromptToTab(id, text, stillOk = () => true, onStranded = (
  * the Enter was withheld: the text sits in the input line, see onStranded).
  * @returns {Promise<{ok: boolean, reason?: string}>}
  */
-export function submitPromptDetailed(id, text, stillOk = () => true, onStranded = () => {}) {
+export function submitPromptDetailed(id, text, stillOk0 = () => true, onStranded = () => {}) {
+  if (onPhone(id)) return Promise.resolve(refused('on_phone'));
+  const stillOk = () => !onPhone(id) && stillOk0();
   // Strip control chars except \t and \n (multi-line paste is legitimate); \r
   // goes too so the only Enter is the discrete one sent below.
   const clean = String(text).replace(/[\x00-\x08\x0B-\x1F\x7F]/g, '');

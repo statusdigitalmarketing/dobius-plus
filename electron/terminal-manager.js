@@ -195,7 +195,7 @@ export function trimToEscapeBoundary(buf, cap) {
 // Nothing is typed into the terminal, so it can never land in a user's line,
 // a startup prompt or a moved tab. claudeOpts ({ model, permissionMode }, shared/new-tab.js claudeLaunchOptions):
 // the new tab's Claude defaults, allowlisted again inside loginShellSpawn.
-export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCommand = null, resume = null, runScript = null, claudeOpts = null, requireCwd = false } = {}) {
+export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCommand = null, resume = null, runScript = null, claudeOpts = null, requireCwd = false, phone = null } = {}) {
   // A respawn under an existing id (e.g. "Continue on switched account") must
   // NOT strand what was attached to the old PTY. Carry over the live subscriber
   // set so an attached phone keeps streaming (killing the old PTY would orphan
@@ -232,7 +232,7 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
   }
 
   // A New Tab's tool belongs to its project: never start it in the fallback.
-  if (safeCwd !== cwd) { startCommand = null; resume = null; }
+  if (safeCwd !== cwd) { startCommand = null; resume = null; phone = null; }
   // A phone Run terminal must start in the card's folder or not at all: home's login profile would set up the command's
   // environment (Codex phone tasks round 9). Checked here, at the last moment (a phone Run id is always new, so no
   // earlier PTY was killed above); node-pty itself fails the spawn if the folder goes in the instant after.
@@ -331,7 +331,9 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
   // The folder that passed the move's checks must be the one this spawn set
   // (an account id remapped meanwhile is not).
   const carryOn = resume?.carryOn === true && typeof resume.configDir === 'string' && resume.configDir === (accountBinding.claudeConfigDir ?? '');
-  const start = loginShellSpawn(shell, startCommand, resume?.carryOn === true ? { ...resume, carryOn } : resume, runScript, claudeOpts);
+  // phone: the phone mode launch (gate, then the resume only if the gate says so, then done); shared/new-tab.js checks
+  // every field and ignores it otherwise, so a bad one starts a plain shell and the run times out waiting for the gate.
+  const start = loginShellSpawn(shell, startCommand, resume?.carryOn === true ? { ...resume, carryOn } : resume, runScript, claudeOpts, phone);
   const spawnedAt = Date.now();
   const term = pty.spawn(shell, start.args, {
     name: 'xterm-256color', cols: spawnCols, rows: spawnRows, cwd: safeCwd, env: { ...spawnEnv, ...start.env },
@@ -1093,8 +1095,49 @@ async function processSessionIds() {
 export async function liveClaudeSessionIds() {
   const ids = await processSessionIds();
   for (const sid of activeReservations()) ids.add(sid);
+  for (const sid of heldElsewhere()) ids.add(sid);
   return [...ids];
 }
+
+// Sessions another owner holds for as long as it runs them: phone mode's claims, which have no expiry
+// (docs/phone-mode-design.md "While on the phone"). A failed read holds nothing new; the process table still counts.
+let heldSessionsFn = () => new Set();
+const heldElsewhere = () => { try { const s = heldSessionsFn(); return s instanceof Set ? s : new Set(); } catch { return new Set(); } };
+let heldSettle = { pending: () => false, settled: () => Promise.resolve() };
+/**
+ * `opts.pending(sessionId)`: the session is held only until the owner finishes starting up; `opts.settled()` settles
+ * when it has. waitHeldSettled uses them so a one-shot launch resume is not refused by a hold that is about to lift.
+ */
+export function setHeldSessions(fn, opts = {}) {
+  heldSessionsFn = typeof fn === 'function' ? fn : () => new Set();
+  heldSettle = {
+    pending: typeof opts.pending === 'function' ? opts.pending : () => false,
+    settled: typeof opts.settled === 'function' ? opts.settled : () => Promise.resolve(),
+  };
+}
+/**
+ * Wait, at most `maxMs`, while `sessionId` is held only until the hold's owner has started (phone mode's launch sweep).
+ * Returns at once when it is not. Past the cap the caller claims anyway and is refused: the safe side.
+ */
+export function heldSettlePending(sessionId) {
+  try { return heldSettle.pending(sessionId) === true; } catch { return false; }
+}
+export async function waitHeldSettled(sessionId, maxMs = 60_000) {
+  if (!heldSettlePending(sessionId)) return;
+  let timer = null;
+  try {
+    await Promise.race([
+      Promise.resolve().then(() => heldSettle.settled()).catch(() => {}),
+      new Promise((resolve) => { timer = setTimeout(resolve, maxMs); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
+// The signal closing a tab's PTY sends: SIGHUP unless the owner names another (phone mode: SIGKILL, so a shell stopped
+// with SIGSTOP still ends and cannot carry a pending fallback past the release).
+let killSignalFn = () => undefined;
+export function setKillSignal(fn) { killSignalFn = typeof fn === 'function' ? fn : () => undefined; }
+const killSignalOf = (id) => { try { const s = killSignalFn(id); return s === 'SIGKILL' ? s : undefined; } catch { return undefined; } };
 
 // A resume is not visible in the process table for a second or two: the shell
 // has to print a prompt, the command has to be typed in, and claude has to
@@ -1201,6 +1244,8 @@ export async function claimSessionResume(sessionId, tabId = null) {
   // claude is genuinely running it, nobody may start a second one, not even
   // the tab that reserved it.
   if ((await processSessionIds()).has(sessionId)) return false;
+  // Held by phone mode: refused for every caller, the tab that ran it included, until phone mode lets go.
+  if (heldElsewhere().has(sessionId)) return false;
   // Prune FIRST, then read: everything from here down is synchronous, so a
   // concurrent claim that is still inside the await above cannot interleave,
   // and whichever caller reaches this line first takes the slot.
@@ -1280,7 +1325,8 @@ export function killTerminal(id, { respawn = false } = {}) {
       // once the entry is gone) but it frees the ThreadSafeFunction now instead
       // of leaving a late callback that could land during a quit.
       disposeListeners(entry);
-      entry.pty.kill();
+      const sig = respawn ? undefined : killSignalOf(id);
+      if (sig) entry.pty.kill(sig); else entry.pty.kill();
     } catch (err) {
       console.error(`[terminal-manager] kill error for ${id}:`, err.message);
     }
@@ -1369,7 +1415,8 @@ export function killAll() {
       // Unregister FIRST, then kill: the reverse order is what crashed the
       // app on the update-Restart path (SIGABRT in CleanupHandles).
       disposeListeners(entry);
-      entry.pty.kill();
+      const sig = killSignalOf(id);
+      if (sig) entry.pty.kill(sig); else entry.pty.kill();
     } catch (err) {
       console.error(`[terminal-manager] killAll error for ${id}:`, err.message);
     }

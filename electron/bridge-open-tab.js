@@ -199,6 +199,40 @@ function caretInBox(cursor, top, bottom, firstRow) {
  * draws under its box (a status line) can draw boxes too.
  */
 export function promptBoxText(lines, modes) {
+  return findPromptBox(lines, modes)?.text ?? null;
+}
+
+// Claude's own permission-mode line under its input box, as Claude Code 2.1 draws it ("⏸ manual mode on",
+// "⏵⏵ accept edits on (shift+tab to cycle)"), and the mode each names.
+const FOOTER_MODE_RE = /^\s*(?:⏵⏵|⏸)\s+(manual mode|auto mode|accept edits|plan mode|bypass permissions) on\b/;
+const FOOTER_MODES = { 'manual mode': 'default', 'auto mode': 'auto', 'accept edits': 'acceptEdits', 'plan mode': 'plan', 'bypass permissions': 'bypassPermissions' };
+// Strictest first. A custom statusLine prints its own rows under the box, so they can carry a mode-looking line too.
+const FOOTER_STRICTNESS = ['plan', 'default', 'acceptEdits', 'auto', 'bypassPermissions'];
+// A row that starts like a mode line but is not a whole one (a redraw caught halfway, "⏸ plan mode o").
+const FOOTER_PARTIAL_RE = /^\s*(?:⏵|⏸)/;
+
+/**
+ * The permission mode Claude shows under its idle input box right now (it changes with Shift+Tab, which no flag or
+ * record reflects), or null when the screen is not an idle prompt or shows no mode line. Only rows under the box are
+ * read, never the transcript above it: every row down to the bottom of the screen (the box ends within
+ * PROMPT_BOTTOM_ROWS of it), because a multi-line statusLine can come before Claude's own line (Codex r36). The
+ * statusLine is the person's script and may print a mode-looking line of its own, so of several the STRICTEST is
+ * taken: a stray line can only make the result stricter, never looser. A row that starts like a mode line but is not a
+ * whole one makes the footer unreadable (null): it may be Claude's own line half drawn, stricter than the rest.
+ */
+export function promptFooterMode(lines, modes) {
+  const box = findPromptBox(lines, modes);
+  if (!box) return null;
+  const seen = new Set();
+  for (const row of lines.slice(box.bottom + 1, box.bottom + 2 + PROMPT_BOTTOM_ROWS)) {
+    const m = FOOTER_MODE_RE.exec(String(row || ''));
+    if (m) seen.add(FOOTER_MODES[m[1]]);
+    else if (FOOTER_PARTIAL_RE.test(String(row || ''))) return null;
+  }
+  return FOOTER_STRICTNESS.find((mode) => seen.has(mode)) ?? null;
+}
+
+function findPromptBox(lines, modes) {
   if (!Array.isArray(lines) || !modes?.bracketedPaste) return null;
   let last = lines.length - 1;
   while (last >= 0 && !String(lines[last] || '').trim()) last -= 1;
@@ -232,7 +266,7 @@ export function promptBoxText(lines, modes) {
       // row starting with ">" or "│" in the flat prompt is message text.
       const lead = k0 => (flat ? (k0 ? /^\s*[❯>]?\s?/ : /^\s*/) : (k0 ? /^\s*│?\s*>?\s?/ : /^\s*│?\s*/));
       const rows = lines.slice(top + 1, j).map((r, k) => String(r).replace(lead(k === 0), '').replace(flat ? /\s+$/ : /\s*│?\s*$/, ''));
-      return rows.join('\n');
+      return { text: rows.join('\n'), bottom: j };
     }
   }
   return null;
