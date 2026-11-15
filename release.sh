@@ -45,14 +45,15 @@ const p = read("package.json"), lockFile = read("package-lock.json");
 const lock = lockFile.packages || {}, v1 = lockFile.dependencies || {};
 const bad = [];
 for (const n of Object.keys({ ...p.dependencies, ...p.devDependencies })) {
-  // A file: dependency is a link whose version sits on its target record; a v1 lockfile has only `dependencies` (Codex r3).
+  // A file: dependency is a link whose version sits on its target record; a v1 lockfile has only `dependencies`, where
+  // a file: dependency records its path instead of a version, so only its presence is checked (Codex r3, r4).
   const entry = lock["node_modules/" + n];
   const want = (entry?.link ? lock[entry.resolved] : entry)?.version ?? v1[n]?.version;
-  let have = null;
-  try { have = JSON.parse(fs.readFileSync("node_modules/" + n + "/package.json", "utf8")).version; }
-  catch (e) { have = e.code === "ENOENT" ? null : "an unreadable package.json (" + (e.code || e.message) + ")"; }
+  let have = null, why = "nothing";
+  try { have = JSON.parse(fs.readFileSync("node_modules/" + n + "/package.json", "utf8")).version || null; }
+  catch (e) { if (e.code !== "ENOENT") why = "an unreadable package.json (" + (e.code || e.message) + ")"; }
   if (!want) bad.push(n + " (not in package-lock.json)");
-  else if (have !== want) bad.push(n + " (installed " + (have || "nothing") + ", lockfile " + want + ")");
+  else if (/^(file|link):/.test(want) ? !have : have !== want) bad.push(n + " (installed " + (have || why) + ", lockfile " + want + ")");
 }
 if (bad.length) { console.error("ERROR: node_modules does not match the lockfile; run npm install:\n  " + bad.join("\n  ")); process.exit(1); }
 ' || exit 1
