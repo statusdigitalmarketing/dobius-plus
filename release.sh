@@ -41,10 +41,13 @@ xcrun --find notarytool >/dev/null || { echo "ERROR: notarytool missing" >&2; ex
 # npm ls checks (Codex r1, r2). Every direct dependency must be installed at the version package-lock.json records.
 node -e '
 const fs = require("fs"), read = (f) => JSON.parse(fs.readFileSync(f, "utf8"));
-const p = read("package.json"), lock = read("package-lock.json").packages || {};
+const p = read("package.json"), lockFile = read("package-lock.json");
+const lock = lockFile.packages || {}, v1 = lockFile.dependencies || {};
 const bad = [];
 for (const n of Object.keys({ ...p.dependencies, ...p.devDependencies })) {
-  const want = lock["node_modules/" + n]?.version;
+  // A file: dependency is a link whose version sits on its target record; a v1 lockfile has only `dependencies` (Codex r3).
+  const entry = lock["node_modules/" + n];
+  const want = (entry?.link ? lock[entry.resolved] : entry)?.version ?? v1[n]?.version;
   let have = null;
   try { have = JSON.parse(fs.readFileSync("node_modules/" + n + "/package.json", "utf8")).version; }
   catch (e) { have = e.code === "ENOENT" ? null : "an unreadable package.json (" + (e.code || e.message) + ")"; }
