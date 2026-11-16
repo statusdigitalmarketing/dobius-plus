@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/store';
 import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache } from '../../../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache, foldTurns } from '../../../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../../../shared/chat-activity.js';
 import ModelMenu from './ModelMenu';
 import './ChatPane.css';
@@ -430,6 +430,23 @@ const Message = memo(function Message({ role, content, timestamp, queued, sendin
   );
 });
 
+// An older turn, folded (Bryan, Asana 1220559095116745): Claude's last reply text and one "Show N steps" toggle.
+// Open, it is the turn's rows exactly as they render live. Only the exchange after the newest message you sent
+// stays open on its own; sending a new message folds the one that was open.
+function FoldedTurn({ steps, summary, timestamp, open, onToggle, children }) {
+  return (
+    <div className="chatp-turn">
+      {open ? children : summary != null && (
+        <Message role="assistant" content={summary} timestamp={timestamp} blocks={[{ type: 'text', text: summary }]} />
+      )}
+      <button type="button" className="chatp-turn-toggle" onClick={onToggle} aria-expanded={open}>
+        <span className="chatp-step-caret">{open ? '\u25be' : '\u25b8'}</span>
+        {open ? 'Hide steps' : `Show ${steps} step${steps === 1 ? '' : 's'}`}
+      </button>
+    </div>
+  );
+}
+
 // The transcript records `!cmd` as "! cmd"; compare both sides normalized.
 function normEcho(t) {
   const s = String(t).trim();
@@ -474,6 +491,14 @@ export default function ChatPane({ tabId, visible }) {
   const isActive = useStore((s) => s.activeTabId === tabId);
   const [messages, setMessages] = useState(null); // null = not loaded yet
   const [sessionId, setSessionId] = useState(undefined); // undefined = first poll pending
+  // Older turns you opened (keys of their first row). Only clicks add to it, and a new session starts empty.
+  const [openTurns, setOpenTurns] = useState(() => new Set());
+  const toggleTurn = useCallback((k) => setOpenTurns((prev) => {
+    const next = new Set(prev);
+    if (!next.delete(k)) next.add(k);
+    return next;
+  }), []);
+  useEffect(() => { setOpenTurns(new Set()); }, [sessionId]);
   const [shellText, setShellText] = useState(null);
   const [claudeLive, setClaudeLive] = useState(false);
   // Read by paste and drop handlers that outlive a render.
@@ -1105,19 +1130,34 @@ export default function ChatPane({ tabId, visible }) {
     // The newest Claude reply stays open even when long: it is what you came to read.
     const lastClaude = messages.findLastIndex((m) => m.role === 'assistant');
     const keys = rowKeys(messages);
+    const renderRow = (i) => {
+      const m = messages[i];
+      return (
+        <Message
+          key={keys[i]} role={m.role} content={m.content} timestamp={m.timestamp || null} queued={!!m.queued}
+          command={!!m.command} detail={typeof m.detail === 'string' ? m.detail : null}
+          detailLabel={typeof m.detailLabel === 'string' ? m.detailLabel : null}
+          blocks={m.blocks}
+          startOpen={i === lastClaude}
+          live={working && i === lastClaude && i === messages.length - 1}
+        />
+      );
+    };
     body = (
       <>
         {messages.length === 0 && shellBlock('No messages yet. Live terminal:')}
-        {messages.map((m, i) => (
-          <Message
-            key={keys[i]} role={m.role} content={m.content} timestamp={m.timestamp || null} queued={!!m.queued}
-            command={!!m.command} detail={typeof m.detail === 'string' ? m.detail : null}
-            detailLabel={typeof m.detailLabel === 'string' ? m.detailLabel : null}
-            blocks={m.blocks}
-            startOpen={i === lastClaude}
-            live={working && i === lastClaude && i === messages.length - 1}
-          />
-        ))}
+        {foldTurns(messages).map((seg) => {
+          if (seg.kind === 'row') return renderRow(seg.index);
+          const k = `turn:${keys[seg.start]}`;
+          const rows = [];
+          for (let j = seg.start; j <= seg.end; j++) rows.push(renderRow(j));
+          return (
+            <FoldedTurn
+              key={k} steps={seg.steps} summary={seg.summary} timestamp={messages[seg.end].timestamp || null}
+              open={openTurns.has(k)} onToggle={() => toggleTurn(k)}
+            >{rows}</FoldedTurn>
+          );
+        })}
         {echoes.filter((e) => e.sid === sessionId).map((e) => (
           <Message key={`echo-${e.at}`} role="user" content={e.content} timestamp={e.at} sending />
         ))}

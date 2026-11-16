@@ -404,3 +404,39 @@ export function stepSummary(steps) {
   return { text, added, removed };
 }
 
+
+/**
+ * Older turns fold (Bryan, Asana 1220559095116745): everything before the newest message the person sent shows only
+ * that message and Claude's last reply text, with one "Show N steps" toggle per turn. The exchange after the newest
+ * person row stays as it is, live. A turn is a run of assistant rows between two person rows.
+ *
+ * Returns segments in row order: { kind: 'row', index } or
+ * { kind: 'turn', start, end, steps, summary } where start..end are the turn's assistant row indexes (inclusive),
+ * steps counts its tool and thinking blocks, and summary is its last text block (null when it has none).
+ * A turn with no steps is not folded: its rows come back as plain row segments.
+ */
+export function foldTurns(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  let lastPerson = -1;
+  for (let i = list.length - 1; i >= 0; i--) if (list[i]?.role === 'user') { lastPerson = i; break; }
+  const out = [];
+  let i = 0;
+  while (i < list.length) {
+    if (i >= lastPerson || list[i]?.role !== 'assistant') { out.push({ kind: 'row', index: i }); i++; continue; }
+    const start = i;
+    let steps = 0;
+    let summary = null;
+    while (i < lastPerson && list[i]?.role === 'assistant') {
+      const blocks = normalizeBlocks(list[i].blocks);
+      if (blocks) {
+        for (const b of blocks) {
+          if (b.type === 'text') { if (b.text.trim()) summary = b.text; } else steps++;
+        }
+      } else if (String(list[i].content ?? '').trim()) summary = String(list[i].content);
+      i++;
+    }
+    if (steps) out.push({ kind: 'turn', start, end: i - 1, steps, summary });
+    else for (let j = start; j < i; j++) out.push({ kind: 'row', index: j });
+  }
+  return out;
+}
