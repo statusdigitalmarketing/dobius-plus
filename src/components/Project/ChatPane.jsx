@@ -886,7 +886,7 @@ export default function ChatPane({ tabId, visible }) {
       setEchoes((cur) => [...cur, { content: text, at: Date.now(), sid, base }]);
     }
     if (ok) refreshSoon();
-    return r === 'stranded' || r === 'prompt' ? r : ok;
+    return r === 'stranded' || r === 'prompt' || r === 'busy' ? r : ok;
   };
 
   const send = async () => {
@@ -913,6 +913,10 @@ export default function ChatPane({ tabId, visible }) {
       for (const a of imgs) deliverAttachment(tabId, a);
       deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, 'Claude is asking you something. Answer it above first, then send this.');
       if (mountedRef.current) pollSelector(5);
+    } else if (ok === 'busy') {
+      // The screen never held still long enough to check for a prompt: nothing was typed.
+      for (const a of imgs) deliverAttachment(tabId, a);
+      deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, 'Claude\'s screen is changing too fast to check. Nothing was sent, try again in a moment.');
     } else if (!ok) {
       // Keep what they wrote, images back as thumbnails.
       for (const a of imgs) deliverAttachment(tabId, a);

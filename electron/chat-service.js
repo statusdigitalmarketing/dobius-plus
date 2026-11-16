@@ -571,23 +571,27 @@ export function submitPromptDetailed(id, text, stillOk0 = () => true, onStranded
 
 /**
  * Is a question card or permission prompt on the tab's screen? For plain sends (desktop Chat): a paste plus Enter
- * there would answer it (a permission prompt's highlighted "1. Yes"). It does not wait for a quiet screen, so a
- * message sent while Claude streams still goes: a read raced by output is read again, and a screen that keeps moving
- * with no prompt in any read counts as none (prompts stop and wait; only their timer ticks). A render that fails
- * counts as a prompt (unknown is refused).
+ * there would answer it (a permission prompt's highlighted "1. Yes"). Answers 'prompt', 'none', or 'unknown' when no
+ * read finished without output arriving during it (a raced read's snapshot may predate a prompt that just appeared).
+ * It does not need a quiet screen, only one read between two repaints, so a send while Claude streams still goes: a
+ * raced read is retried after a short gap. A render that fails counts as a prompt (unknown is refused).
  */
+const PROMPT_CHECK_TRIES = 10;
+const PROMPT_CHECK_GAP_MS = 40;
 async function promptOnScreen(id) {
-  for (let i = 0; i < 3; i += 1) {
+  for (let i = 0; i < PROMPT_CHECK_TRIES; i += 1) {
+    if (i) await new Promise((r) => setTimeout(r, PROMPT_CHECK_GAP_MS));
     const out = terminalRawOutputSeq(id);
     let sel;
-    try { sel = await liveSelectorForTab(id); } catch (err) { console.warn('[chat-service] prompt check failed:', err?.message || err); return true; }
-    if (sel) return true;
-    if (terminalRawOutputSeq(id) === out) return false;
+    try { sel = await liveSelectorForTab(id); } catch (err) { console.warn('[chat-service] prompt check failed:', err?.message || err); return 'prompt'; }
+    if (sel) return 'prompt';
+    if (terminalRawOutputSeq(id) === out) return 'none';
   }
-  return false;
+  return 'unknown';
 }
-// The pre-Enter hook for a plain send: no prompt on screen. outSeq null: output may keep moving (Claude streaming).
-const noPromptBeforeEnter = (id) => async () => ((await promptOnScreen(id)) ? null : { outSeq: null });
+// The pre-Enter hook for a plain send: a settled read with no prompt. outSeq null: output may keep moving (Claude
+// streaming) after that read; a prompt that appears later stops and waits, and the next send checks again.
+const noPromptBeforeEnter = (id) => async () => ((await promptOnScreen(id)) === 'none' ? { outSeq: null } : null);
 
 const DONE = Object.freeze({ ok: true });
 const refused = (reason) => ({ ok: false, reason });
@@ -676,10 +680,10 @@ async function drainSubmits(id, q) {
         continue;
       }
       if (it.guardPrompt) {
-        const prompt = await promptOnScreen(id);
+        const screen = await promptOnScreen(id);
         skip = skipReason(id, q, it);
         if (skip) { it.resolve(refused(skip)); continue; }
-        if (prompt) { it.resolve(refused('prompt_open')); continue; }
+        if (screen !== 'none') { it.resolve(refused(screen === 'prompt' ? 'prompt_open' : 'screen_busy')); continue; }
       }
       it.touched = true;
       writeTerminal(id, `\x1b[200~${it.clean}\x1b[201~`);

@@ -759,4 +759,17 @@ ok('a strict read never reports no prompt for a screen that has not settled');
 }
 ok('a plain Chat send refuses a prompt on screen and withholds Enter from one that appears');
 
+// 26. Output arriving during every screen read: no read can be trusted, so the send is refused, nothing typed.
+{
+  const rule = '─'.repeat(80);
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', ['', rule, '❯ ', rule, ''].join('\r\n')); emitOutput('a');
+  const spin = setInterval(() => emitOutput('a'), 1);
+  const r = await submitPromptDetailed('a', 'hello', () => true, () => {}, { guardPrompt: true });
+  clearInterval(spin);
+  assert.deepEqual(r, { ok: false, reason: 'screen_busy' });
+  assert.deepEqual([...writes], [], 'nothing typed while the screen could not be read');
+  cols.delete('a');
+}
+ok('a plain Chat send is refused when every screen read races with output');
+
 console.log(`\n${pass} passed`);

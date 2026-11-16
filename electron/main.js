@@ -1302,7 +1302,7 @@ function setupDataHandlers() {
     // comes back and the pane shows the card to answer instead).
     let stranded = false;
     const r = await submitPromptDetailed(tabId, text, () => ownsTerminal(senderId, tabId), () => { stranded = true; }, { guardPrompt: true });
-    return r.ok ? true : r.reason === 'prompt_open' ? 'prompt' : (stranded ? 'stranded' : false);
+    return r.ok ? true : r.reason === 'prompt_open' ? 'prompt' : r.reason === 'screen_busy' ? 'busy' : (stranded ? 'stranded' : false);
   });
   // --- Chat model picker (Asana 1220098108555124) ------------------------------
   // What a tab's Claude runs (from its session's usage record) and what it can
