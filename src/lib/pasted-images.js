@@ -26,7 +26,7 @@ const MAX_TABS = 40; // tabs remembered; the oldest-touched tab is dropped first
 const LABEL_RE = /\[Image #(\d{1,4})\]/g;
 const WATCH_MS = 4000;
 const WATCH_EVERY_MS = 120;
-const SAVE_WAIT_MS = 16000; // an unsaved paste holds its place this long (prompt-edit gives up on it at 15 s)
+const SAVE_WAIT_MS = 5 * 60_000; // backstop only: a paste waits in prompt-edit's queue up to 15 s per paste ahead of it
 
 let cache = null;
 function load() {
@@ -124,7 +124,9 @@ export function reserveImageLabel(tabId, getTerm, before, ms = WATCH_MS) {
     watches.set(tabId, job);
     const tick = () => {
       settleSlots(tabId, job);
-      // A paste still being saved keeps the watch (and its place in line) alive, up to the paste queue's own limit.
+      // A paste not yet delivered or dropped keeps the watch (and its place in line) alive: the paste queue reports
+      // every paste either way (prompt-edit-term done(), or the caller's failure path), so this ends on its own.
+      // ponytail: SAVE_WAIT_MS is only a backstop for a report that never comes (a poll of ~50 rows every 120 ms).
       const saving = job.slots.some((s) => s.path === undefined && Date.now() - s.at < SAVE_WAIT_MS);
       if (!job.slots.length || (Date.now() >= job.until && !saving)) { watches.delete(tabId); return; }
       setTimeout(tick, WATCH_EVERY_MS);

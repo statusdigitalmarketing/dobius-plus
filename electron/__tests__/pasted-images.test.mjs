@@ -146,4 +146,20 @@ assert.equal(imageForLabel('tab-l', 2), '/l/B.png');
 const live = fakeTerm(['old: [Image #5]', '> [Image #6]']);
 live.rows = 1; live.buffer.active.viewportY = 0; live.buffer.active.baseY = 1;
 assert.deepEqual([...labelsOnScreen(live)], [[6, 1]]);
+// A paste queued behind a slow one keeps its place well past any per-paste window until it is delivered.
+term = fakeTerm(['>']);
+const mA = reserveImageLabel('tab-m', () => term, labelsOnScreen(term), 50);
+const mB = reserveImageLabel('tab-m', () => term, labelsOnScreen(term), 50);
+await new Promise((r) => setTimeout(r, 300));
+mA('/m/A.png');
+term = fakeTerm(['> [Image #1]']);
+await new Promise((r) => setTimeout(r, 300)); // A's window ends; B is still waiting
+const mC = reserveImageLabel('tab-m', () => term, labelsOnScreen(term), 50);
+mC('/m/C.png');
+mB('/m/B.png');
+term = fakeTerm(['> [Image #1] [Image #2] [Image #3]']);
+await new Promise((r) => setTimeout(r, 300));
+assert.equal(imageForLabel('tab-m', 1), '/m/A.png');
+assert.equal(imageForLabel('tab-m', 2), '/m/B.png');
+assert.equal(imageForLabel('tab-m', 3), '/m/C.png');
 console.log('ALL PASS  (pasted-images)');
