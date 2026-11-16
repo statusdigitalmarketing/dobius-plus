@@ -404,3 +404,48 @@ export function stepSummary(steps) {
   return { text, added, removed };
 }
 
+
+/**
+ * Older turns fold (Bryan, Asana 1220559095116745): everything before the newest message the person sent shows only
+ * that message and Claude's last reply text, with one "Show N steps" toggle per turn. The exchange after the newest
+ * sent message stays as it is, live.
+ *
+ * A turn is everything between two messages the person sent: Claude's rows plus anything injected between them (a
+ * skill body, hook context, a queued send that never landed), so one exchange is always ONE folded segment with one
+ * identity (Codex r4 P2). Only a sent message is a boundary (`sent` below): a queued send, a command row and injected
+ * `meta` text can sit inside an exchange Claude is still working on, and folding there would hide the tool it is
+ * running (Codex P1 rounds 1 to 4). Erring this way only leaves a finished exchange open a little longer.
+ *
+ * Returns segments in row order: { kind: 'row', index } or
+ * { kind: 'turn', start, end, steps, summary, anchor }: start..end are the turn's row indexes (inclusive), steps
+ * counts its tool and thinking blocks, summary is Claude's last text in it (null when none), and anchor is the index of
+ * the sent message right after it, whose key is the turn's stable identity (the turn's own first row changes as the
+ * transcript window slides: Codex P2). A turn with no steps is not folded: its rows come back as row segments.
+ */
+export function foldTurns(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const sent = (r) => r?.role === 'user' && !r.queued && !r.command && !r.meta;
+  let lastPerson = -1;
+  for (let i = list.length - 1; i >= 0; i--) if (sent(list[i])) { lastPerson = i; break; }
+  const out = [];
+  let i = 0;
+  while (i < list.length) {
+    if (i >= lastPerson || sent(list[i])) { out.push({ kind: 'row', index: i }); i++; continue; }
+    const start = i;
+    let steps = 0;
+    let summary = null;
+    for (; i < lastPerson && !sent(list[i]); i++) {
+      if (list[i]?.role !== 'assistant') continue;
+      const blocks = normalizeBlocks(list[i].blocks);
+      if (blocks) {
+        for (const b of blocks) {
+          if (b.type === 'text') { if (b.text.trim()) summary = b.text; } else steps++;
+        }
+      } else if (String(list[i].content ?? '').trim()) summary = String(list[i].content);
+    }
+    // i is now the sent message after the turn (lastPerson at the latest).
+    if (steps) out.push({ kind: 'turn', start, end: i - 1, steps, summary, anchor: i });
+    else for (let j = start; j < i; j++) out.push({ kind: 'row', index: j });
+  }
+  return out;
+}

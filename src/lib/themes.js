@@ -70,6 +70,7 @@ const themes = [
     name: 'Arctic',
     bg: '#0F1B2D', fg: '#87CEEB', cursor: '#4FC3F7',
     accent1: '#4FC3F7', accent2: '#00BCD4', accent3: '#80DEEA', accent4: '#B3E5FC',
+    youBg: '#87CEEB', youFg: '#0F1B2D', // your Chat messages flip the theme: blue box, navy text (Bryan)
   },
   {
     name: 'Plum',
@@ -212,6 +213,8 @@ const themes = [
     name: 'Better Health',
     bg: '#F5FAFF', fg: '#1A365D', cursor: '#0EA5E9',
     accent1: '#0284C7', accent2: '#2F855A', accent3: '#B7791F', accent4: '#C53030',
+    // Your messages in Chat: the Arctic theme's blue with navy text (Bryan, Asana 1220559095116745).
+    youBg: '#87CEEB', youFg: '#0F1B2D',
   },
   {
     name: 'Blue Atlas',
@@ -231,6 +234,10 @@ export const THEMES = themes.map((t) => ({
     '--accent-muted': `${t.accent1}22`,
     '--border': `${t.fg}22`,
     '--surface': mixColor(t.bg, t.fg, 0.05),
+    // Your messages in Chat. Themes without their own colors keep the surface and text colors.
+    '--you-bg': t.youBg ?? mixColor(t.bg, t.fg, 0.05),
+    '--you-fg': t.youFg ?? t.fg,
+    '--you-border': t.youBg ?? `${t.fg}22`,
     '--surface-hover': mixColor(t.bg, t.fg, 0.08),
     // Secondary/"dim" text. On LIGHT backgrounds a 53% alpha (0x88) dark fg is
     // too faint for WCAG AA, so use a stronger 78% (0xC7); dark themes keep the

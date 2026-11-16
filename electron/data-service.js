@@ -2316,7 +2316,11 @@ export function entryToMessage(entry, opts = {}) {
     }
   }
   if (content.length > MAX_MESSAGE_CHARS) content = capText(content, MAX_MESSAGE_CHARS, 'message');
-  return { role, content };
+  // Text Claude injected itself: flagged isMeta (hook context), or one of the known synthetic shapes (an unflagged
+  // compaction preamble, SYNTHETIC_USER_PREFIXES). The Chat view must not take it for a message the person sent, or it
+  // folds the exchange Claude is still working on (Codex r3 and r4 P1, shared/chat-rows.js).
+  // Blocks mode only: the legacy shape the App Store build reads stays exactly { role, content }.
+  return wantBlocks && role === 'user' && (entry.isMeta === true || isSyntheticUserText(content)) ? { role, content, meta: true } : { role, content };
 }
 
 // Queue replay: an enqueue makes a pending `queued` row; a LATER real user

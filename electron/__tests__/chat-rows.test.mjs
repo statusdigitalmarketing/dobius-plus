@@ -2,7 +2,7 @@
 // A malformed row must degrade to its plain text, never throw.
 // Run: node ./electron/__tests__/chat-rows.test.mjs
 import assert from 'node:assert/strict';
-import { normalizeBlocks, rowText, rowKeys, createImageCache } from '../../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, createImageCache, foldTurns } from '../../shared/chat-rows.js';
 
 // 1. Junk blocks are dropped field by field; nothing usable means null.
 assert.equal(normalizeBlocks(undefined), null);
@@ -296,4 +296,60 @@ console.log('PASS  row keys survive a sliding window');
   get('a'); await new Promise((r) => setTimeout(r, 0));
   assert.equal(calls.filter((c) => c.ref === 'a').length, 2, 'settled entries past the cap are evicted');
   console.log('PASS  image cache keeps pending requests');
+}
+
+// Older turns fold to the person's message + Claude's last reply; the newest exchange stays open.
+{
+  const you = (t) => ({ role: 'user', content: t });
+  const claude = (...blocks) => ({ role: 'assistant', content: 'x', blocks });
+  const txt = (t) => ({ type: 'text', text: t });
+  const tool = (n) => ({ type: 'tool', name: n });
+  const rows = [
+    you('fix it'),                                   // 0
+    claude(txt('looking'), tool('Bash'), tool('Read')), // 1
+    claude(tool('Edit'), txt('Fixed the login bug.')),  // 2
+    you('thanks'),                                   // 3
+    claude(txt('Anytime.')),                         // 4  no steps: not folded
+    you('now the tests'),                            // 5  newest person row
+    claude(tool('Bash'), txt('Running them.')),      // 6  live exchange: open
+  ];
+  assert.deepEqual(foldTurns(rows), [
+    { kind: 'row', index: 0 },
+    { kind: 'turn', start: 1, end: 2, steps: 3, summary: 'Fixed the login bug.', anchor: 3 },
+    { kind: 'row', index: 3 },
+    { kind: 'row', index: 4 },
+    { kind: 'row', index: 5 },
+    { kind: 'row', index: 6 },
+  ]);
+  // Sending a new message folds the exchange that was open.
+  const after = foldTurns([...rows, you('ship it')]);
+  assert.deepEqual(after.slice(-3), [{ kind: 'row', index: 5 }, { kind: 'turn', start: 6, end: 6, steps: 1, summary: 'Running them.', anchor: 7 }, { kind: 'row', index: 7 }]);
+  // A turn that ends on a tool keeps its last text as the summary; one with no text at all has none.
+  assert.equal(foldTurns([you('a'), claude(txt('first'), tool('Bash')), you('b')])[1].summary, 'first');
+  assert.equal(foldTurns([you('a'), claude(tool('Bash')), you('b')])[1].summary, null);
+  // The window can open mid-turn (no person row first): those rows are older, so they fold.
+  assert.deepEqual(foldTurns([claude(tool('Read'), txt('done')), you('next')])[0], { kind: 'turn', start: 0, end: 0, steps: 1, summary: 'done', anchor: 1 });
+  // No person row at all: nothing is older than the live exchange, nothing folds.
+  assert.deepEqual(foldTurns([claude(tool('Read'))]), [{ kind: 'row', index: 0 }]);
+  // A queued send is not a boundary: the exchange Claude is still working on stays open (Codex P1).
+  const queued = foldTurns([...rows, { role: 'user', content: 'then test it', queued: true }]);
+  assert.deepEqual(queued.slice(-3), [{ kind: 'row', index: 5 }, { kind: 'row', index: 6 }, { kind: 'row', index: 7 }]);
+  // An injected skill body (a command row) is not a boundary either: the exchange stays open (Codex r2 P1).
+  const skill = foldTurns([...rows, { role: 'user', content: '/review (skill)', command: true }, claude(tool('Read'))]);
+  assert.deepEqual(skill.slice(-4).map((s) => s.kind), ['row', 'row', 'row', 'row']);
+  // Hook context Claude injected (main flags it `meta`) is not a boundary either (Codex r3 P1).
+  const meta = foldTurns([...rows, { role: 'user', content: 'SessionStart hook context', meta: true }]);
+  assert.deepEqual(meta.slice(-3).map((s) => s.kind), ['row', 'row', 'row']);
+  // A turn's anchor is the next SENT message, skipping a stale queued row right after it (Codex r2 P2).
+  const stale = [you('a'), claude(tool('Bash'), txt('done')), { role: 'user', content: 'later', queued: true }, you('different')];
+  assert.deepEqual(foldTurns(stale)[1], { kind: 'turn', start: 1, end: 2, steps: 1, summary: 'done', anchor: 3 });
+  // Rows injected between Claude's rows stay inside ONE turn with one identity (Codex r4 P2).
+  const split = foldTurns([you('q'), claude(tool('Bash')), { role: 'user', content: 'hook', meta: true }, claude(tool('Read'), txt('ok')), you('next')]);
+  assert.deepEqual(split, [{ kind: 'row', index: 0 }, { kind: 'turn', start: 1, end: 3, steps: 2, summary: 'ok', anchor: 4 }, { kind: 'row', index: 4 }]);
+  for (const seg of foldTurns([...rows, you('ship it')])) if (seg.kind === 'turn') assert.equal([...rows, you('ship it')][seg.anchor].role, 'user');
+  // Plain rows (no blocks) count as text, and junk input never throws.
+  assert.deepEqual(foldTurns([you('a'), { role: 'assistant', content: 'plain reply' }, you('b')]).map((s) => s.kind), ['row', 'row', 'row']);
+  assert.deepEqual(foldTurns(null), []);
+  assert.deepEqual(foldTurns([null, you('a')]), [{ kind: 'row', index: 0 }, { kind: 'row', index: 1 }]);
+  console.log('PASS  older turns fold, the newest exchange stays open');
 }
