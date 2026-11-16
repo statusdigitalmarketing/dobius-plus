@@ -83,24 +83,30 @@ function rowWithColumns(line, cols) {
   return { text, colAt };
 }
 
-/** Every [Image #N] number on the visible screen. */
+/**
+ * How many times each [Image #N] number appears on the LIVE screen (the bottom page where Claude draws, whatever the
+ * person has scrolled to): Map number -> count. Counted, not just listed, so a new #1 still shows up as new when an
+ * old printed "[Image #1]" is already on screen.
+ */
 export function labelsOnScreen(term) {
-  const out = new Set();
+  const out = new Map();
   const buf = term?.buffer?.active;
   if (!buf) return out;
-  for (let y = buf.viewportY; y < buf.viewportY + term.rows; y += 1) {
+  const top = Number.isInteger(buf.baseY) ? buf.baseY : buf.viewportY;
+  for (let y = top; y < top + term.rows; y += 1) {
     const line = buf.getLine(y);
     if (!line) continue;
-    for (const m of line.translateToString(true).matchAll(LABEL_RE)) out.add(Number(m[1]));
+    for (const m of line.translateToString(true).matchAll(LABEL_RE)) { const n = Number(m[1]); out.set(n, (out.get(n) || 0) + 1); }
   }
   return out;
 }
+const atLeast = (seen, counts) => { for (const [n, c] of counts) if (c > (seen.get(n) || 0)) seen.set(n, c); };
 
 /**
  * Call when an image is pasted into Claude's prompt, BEFORE it is saved: it holds that paste's place in line, and the
  * returned function hands over the saved path once known (null when the paste did not go in). Claude draws each new
  * [Image #N] in paste order, so the first new label goes to the first place in line, whichever save finished first.
- * `before` is labelsOnScreen() at paste time; a new label is any number not on screen then (never "above the highest",
+ * `before` is labelsOnScreen() at paste time; a new label is a number appearing more often than it did then (never "above the highest",
  * which a printed [Image #9000] would block forever). One watch per tab: a paste made while another is still watched
  * joins it: labels already drawn go to the earlier pastes first, and the rest of this paste's `before` is excluded. Gives up quietly `ms` after the latest paste (a label it never saw
  * stays plain text).
@@ -109,7 +115,7 @@ const watches = new Map(); // tab id -> { getTerm, seen: Set, slots: [{ path, la
 export function reserveImageLabel(tabId, getTerm, before, ms = WATCH_MS) {
   let job = watches.get(tabId);
   if (!job) {
-    job = { getTerm, seen: new Set(before), slots: [], until: 0 };
+    job = { getTerm, seen: new Map(before), slots: [], until: 0 }; // seen: number -> occurrences accounted for
     watches.set(tabId, job);
     const tick = () => {
       settleSlots(tabId, job);
@@ -120,11 +126,11 @@ export function reserveImageLabel(tabId, getTerm, before, ms = WATCH_MS) {
     };
     setTimeout(tick, WATCH_EVERY_MS);
   } else if (!job.slots.length) {
-    job.seen = new Set(before); // everything before was settled: this paste's own screen is the baseline
+    job.seen = new Map(before); // everything before was settled: this paste's own screen is the baseline
   } else {
     // Earlier pastes take the labels already drawn for them; anything else on screen now is not this paste's.
     settleSlots(tabId, job);
-    for (const n of before) job.seen.add(n);
+    atLeast(job.seen, before);
   }
   job.getTerm = getTerm;
   job.until = Date.now() + ms;
@@ -139,14 +145,17 @@ export function reserveImageLabel(tabId, getTerm, before, ms = WATCH_MS) {
 
 function settleSlots(tabId, job) {
   // A paste that did not go in gives its label (if one was already matched to it) back to the line.
-  for (const s of job.slots) if (s.path === null && s.label != null) { job.seen.delete(s.label); s.label = null; }
+  for (const s of job.slots) {
+    if (s.path === null && s.label != null) { job.seen.set(s.label, Math.max(0, (job.seen.get(s.label) || 0) - 1)); s.label = null; }
+  }
   job.slots = job.slots.filter((s) => s.path !== null);
-  const fresh = [...labelsOnScreen(job.getTerm())].filter((n) => !job.seen.has(n)).sort((x, y) => x - y);
+  // New = a number appearing more times than already accounted for.
+  const fresh = [...labelsOnScreen(job.getTerm())].filter(([n, c]) => c > (job.seen.get(n) || 0)).map(([n]) => n).sort((x, y) => x - y);
   for (const n of fresh) {
     const slot = job.slots.find((s) => s.label == null);
     if (!slot) break;
     slot.label = n;
-    job.seen.add(n);
+    job.seen.set(n, (job.seen.get(n) || 0) + 1);
   }
   // Record in line order as each place has both its label and its saved path.
   job.slots = job.slots.filter((s) => {

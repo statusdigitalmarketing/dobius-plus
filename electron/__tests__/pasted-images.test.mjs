@@ -18,7 +18,7 @@ function fakeTerm(rows, cols = 40) {
   return { rows: lines.length, cols, buffer: { active: { viewportY: 0, getLine: (y) => lines[y] } } };
 }
 
-assert.deepEqual([...labelsOnScreen(fakeTerm(['[Image #3] [Image #4]', 'x', '[Pasted text #5 +2 lines]']))].sort(), [3, 4]);
+assert.deepEqual([...labelsOnScreen(fakeTerm(['[Image #3] [Image #4] [Image #3]', 'x', '[Pasted text #5 +2 lines]']))].sort(), [[3, 2], [4, 1]]);
 assert.deepEqual([...labelsOnScreen(null)], []);
 
 // The paste sees #4 appear above the #3 already there and records it for that tab only.
@@ -133,4 +133,17 @@ await new Promise((r) => setTimeout(r, 300));
 assert.equal(imageForLabel('tab-k', 1), '/k/A.png');
 assert.equal(imageForLabel('tab-k', 2), '/k/B.png');
 assert.equal(imageForLabel('tab-k', 9000), null);
+// A printed [Image #1] already on screen: Claude's real #1 is still new (counted, not just listed).
+term = fakeTerm(['printed: [Image #1]', '>']);
+const lA = reserveImageLabel('tab-l', () => term, labelsOnScreen(term));
+const lB = reserveImageLabel('tab-l', () => term, labelsOnScreen(term));
+lA('/l/A.png'); lB('/l/B.png');
+term = fakeTerm(['printed: [Image #1]', '> [Image #1] [Image #2]']);
+await new Promise((r) => setTimeout(r, 300));
+assert.equal(imageForLabel('tab-l', 1), '/l/A.png');
+assert.equal(imageForLabel('tab-l', 2), '/l/B.png');
+// The live screen is read, not the scrolled-back view.
+const live = fakeTerm(['old: [Image #5]', '> [Image #6]']);
+live.rows = 1; live.buffer.active.viewportY = 0; live.buffer.active.baseY = 1;
+assert.deepEqual([...labelsOnScreen(live)], [[6, 1]]);
 console.log('ALL PASS  (pasted-images)');
