@@ -720,4 +720,19 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
 }
 ok('own words answer only the Type something row, and Enter only once the card shows them');
 
+// 24. The strict read (the Chat pane's answer guard): a screen not settled since the last key is never "no prompt",
+// even when nothing on it parses, because a prompt may still be on its way. The plain read keeps hiding the card.
+{
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', '\r\n> \r\n'); emitOutput('a');
+  assert.equal(await readSelectorForAnswer('a'), null, 'settled, nothing on screen: no prompt');
+  assert.equal(await readSelectorForAnswer('a', () => true, { strict: true }), null, 'settled: strict agrees');
+  writeTerminal('a', 'x');
+  assert.equal(await readSelectorForAnswer('a'), null, 'plain read: an unsettled empty screen still hides the card');
+  assert.deepEqual(await readSelectorForAnswer('a', () => true, { strict: true }), { unsettled: true });
+  ptys.delete('a');
+  assert.equal(await readSelectorForAnswer('a', () => true, { strict: true }), null, 'no tab: nothing to wait for');
+  cols.delete('a');
+}
+ok('a strict read never reports no prompt for a screen that has not settled');
+
 console.log(`\n${pass} passed`);

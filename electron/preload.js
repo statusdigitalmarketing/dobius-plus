@@ -14,7 +14,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Only /openTab reads this (electron/bridge-open-main.js).
   terminalInputHeld: (id, data) => ipcRenderer.send('terminal:inputHeld', id, data),
   chatPoll: (id, have) => ipcRenderer.invoke('chat:poll', id, have),
-  chatSelector: (id) => ipcRenderer.invoke('chat:selector', id),
+  chatSelector: (id, strict) => ipcRenderer.invoke('chat:selector', id, strict === true),
   chatImage: (sessionId, projectPath, ref) => ipcRenderer.invoke('chat:image', sessionId, projectPath, ref),
   chatSubmit: (id, text) => ipcRenderer.invoke('chat:submit', id, text),
   // Chat model picker: what this tab's Claude runs and can switch to, and the switch.

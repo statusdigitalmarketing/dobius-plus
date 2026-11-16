@@ -1263,13 +1263,13 @@ function setupDataHandlers() {
     if (typeof sessionId !== 'string' || typeof projectPath !== 'string' || typeof ref !== 'string') return null;
     return loadTranscriptImage(sessionId, projectPath, ref);
   });
-  ipcMain.handle('chat:selector', async (event, tabId) => {
+  ipcMain.handle('chat:selector', async (event, tabId, strict) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return null;
     const senderId = event.sender.id;
     if (!ownsTerminal(senderId, tabId)) return null;
     // Shared with the phone (chat-service): stamped before the render, and
     // unsettled rather than answerable when anything reached the tab meanwhile.
-    return readSelectorForAnswer(tabId, () => ownsTerminal(senderId, tabId));
+    return readSelectorForAnswer(tabId, () => ownsTerminal(senderId, tabId), { strict: strict === true });
   });
   // Answer a selector read: delivered only while neither input nor output has
   // reached the tab since that read (the token carries both counts) AND the

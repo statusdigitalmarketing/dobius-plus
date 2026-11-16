@@ -299,7 +299,7 @@ export function selectorToken(id) {
  * answer prompts under the same rules. `stillOk` re-checks the caller's right
  * to the tab after the render await.
  */
-export async function readSelectorForAnswer(id, stillOk = () => true) {
+export async function readSelectorForAnswer(id, stillOk = () => true, { strict = false } = {}) {
   // Stamp BEFORE rendering: anything that lands meanwhile makes the read stale.
   const token = selectorToken(id);
   let selector;
@@ -309,7 +309,12 @@ export async function readSelectorForAnswer(id, stillOk = () => true) {
   // on screen, disabled. It carries the prompt for DISPLAY only (an older
   // phone shows it, as it always did); nothing can answer it without a token.
   // A read that found no prompt hides the card, which is always safe.
-  if (!token || selectorToken(id) !== token) return selector && terminalInstance(id) ? { unsettled: true, selector } : null;
+  // strict (the Chat pane deciding whether plain sends are safe again): a raced or unsettled read is unsettled even
+  // when it found no prompt, since a prompt may have arrived while it rendered.
+  if (!token || selectorToken(id) !== token) {
+    if (!terminalInstance(id)) return null;
+    return selector ? { unsettled: true, selector } : strict ? { unsettled: true } : null;
+  }
   if (!selector) return null;
   const full = `${token}|${selectorFingerprint(selector)}`;
   const countdown = selectorCountdown(selector);

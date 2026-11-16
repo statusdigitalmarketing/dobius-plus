@@ -674,11 +674,12 @@ export default function ChatPane({ tabId, visible }) {
     if (r.unchanged && !haveRef.current && mountedRef.current) await pollOnce();
   }, [tabId, apply]);
 
-  const pollSelector = useCallback(async (retries = 0) => {
+  // strict: a read raced by output is 'unsettled' even with no prompt in it (the answer guard's release check).
+  const pollSelector = useCallback(async (retries = 0, strict = false) => {
     const seq = ++selSeqRef.current;
     let sel;
-    try { sel = await window.electronAPI?.chatSelector?.(tabId); } catch { sel = null; }
-    if (seq < selAppliedRef.current) return;
+    try { sel = await window.electronAPI?.chatSelector?.(tabId, strict); } catch { sel = null; }
+    if (seq < selAppliedRef.current) return 'superseded';
     selAppliedRef.current = seq;
     // Not repainted since the last key: unknown, not "no prompt". Keep the
     // card, disabled (no token), and look again shortly instead of dropping
@@ -944,8 +945,10 @@ export default function ChatPane({ tabId, visible }) {
       }
       // Sends stay on the card path until a settled read says what is on screen now (another card, a permission
       // prompt, or Claude's prompt): an Enter in between must not paste into whatever replaced the card.
-      for (let i = 0; i < 12 && mountedRef.current; i += 1) {
-        if ((await pollSelector(0)) === 'read') break;
+      // ponytail: gives up after ~40 reads (several seconds of a screen that never stops moving) and lets sends
+      // through; main's chat:submit has no prompt check of its own (older than this guard).
+      for (let i = 0; i < 40 && mountedRef.current; i += 1) {
+        if ((await pollSelector(0, true)) === 'read') break;
         await new Promise((res) => setTimeout(res, 150));
       }
     } finally { answeringTabs.delete(tabId); }
