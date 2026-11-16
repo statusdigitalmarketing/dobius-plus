@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { buildTerminalFontFamily } from '../lib/terminal-font';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { imageLinkProvider } from '../lib/pasted-images.js';
 import { SearchAddon } from '@xterm/addon-search';
 import { useStore } from '../store/store';
 import { takePendingScrollback, drawableLine } from '../lib/pending-scrollback';
@@ -86,8 +87,13 @@ function getScrollback(term, maxLines = MAX_SCROLLBACK_LINES) {
  * @param {boolean} [options.claimExisting] — if true, claim an existing PTY (for tab tear-off)
  * @returns {{ containerRef: React.RefObject, termRef: React.RefObject, searchAddonRef: React.RefObject, promptEditRef: React.RefObject }}
  */
-export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', maxScrollbackLines = MAX_SCROLLBACK_LINES, claimExisting = false }) {
+export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', maxScrollbackLines = MAX_SCROLLBACK_LINES, claimExisting = false, onOpenImage = null }) {
   const containerRef = useRef(null);
+  // Latest click handler for a pasted [Image #N] label (src/lib/pasted-images.js); a ref so the term is not rebuilt.
+  const onOpenImageRef = useRef(onOpenImage);
+  onOpenImageRef.current = onOpenImage;
+  const idRef = useRef(id);
+  idRef.current = id;
   const termRef = useRef(null);
   const fitAddonRef = useRef(null);
   // True while the pane has no layout box (its tab is hidden). Used so the
@@ -177,6 +183,8 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
     term.loadAddon(searchAddon);
+    // Pasted images: [Image #N] labels Dobius saw appear for a paste open a preview.
+    term.registerLinkProvider(imageLinkProvider(term, () => idRef.current, (path, n) => onOpenImageRef.current?.(path, n)));
 
     termRef.current = term;
     fitAddonRef.current = fitAddon;

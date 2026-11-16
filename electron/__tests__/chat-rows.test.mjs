@@ -2,7 +2,7 @@
 // A malformed row must degrade to its plain text, never throw.
 // Run: node ./electron/__tests__/chat-rows.test.mjs
 import assert from 'node:assert/strict';
-import { normalizeBlocks, rowText, rowKeys, createImageCache, foldTurns } from '../../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, createImageCache, foldTurns, freeTextOption } from '../../shared/chat-rows.js';
 
 // 1. Junk blocks are dropped field by field; nothing usable means null.
 assert.equal(normalizeBlocks(undefined), null);
@@ -352,4 +352,13 @@ console.log('PASS  row keys survive a sliding window');
   assert.deepEqual(foldTurns(null), []);
   assert.deepEqual(foldTurns([null, you('a')]), [{ kind: 'row', index: 0 }, { kind: 'row', index: 1 }]);
   console.log('PASS  older turns fold, the newest exchange stays open');
+}
+
+{
+  const card = (labels) => ({ options: labels.map((label, i) => ({ num: i + 1, label })) });
+  assert.equal(freeTextOption(card(['Red', 'Blue', 'Type something.', 'Chat about this'])).num, 3);
+  assert.equal(freeTextOption(card(['Yes', 'No'])), null, 'a permission prompt has no free-text row');
+  assert.equal(freeTextOption(card(['Type something else entirely'])), null, 'only the exact row');
+  assert.equal(freeTextOption(null), null);
+  console.log('PASS  the free-text row of a question card');
 }

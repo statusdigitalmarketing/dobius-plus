@@ -49,7 +49,9 @@ import { isTerminalReply } from './terminal-reply.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { createSnoozeStore } from './tab-snooze.js';
-import { terminalTextTail, terminalScreenText, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, submitPending, setPhoneTabCheck } from './chat-service.js';
+import { dropClaudeChildMarkers } from './claude-child-env.js';
+import { recordSavedImage, readSavedImage } from './pasted-image-store.js';
+import { terminalTextTail, terminalScreenText, submitPromptToTab, submitPromptDetailed, writeRawInput, readSelectorForAnswer, answerSelector, answerSelectorWithText, activityForTab, submitPending, setPhoneTabCheck } from './chat-service.js';
 import { launchCommandFor, claudeLaunchOptions, normalizeNewTabModel, normalizeNewTabPermissionMode, CLAUDE_AUTH_ENV } from '../shared/new-tab.js';
 import { sanitizeAccountPin } from '../shared/tab-label.js';
 import { renderScreenLines } from './screen-render.js';
@@ -165,6 +167,8 @@ import { isAbsPath, isInsidePath } from '../shared/platform.js';
 // symlink. None of them are installed or upgraded on Windows yet; Windows tabs
 // still get status from terminal output.
 const IS_WIN = process.platform === 'win32';
+// Tabs are new top-level Claude sessions, never children of whatever started the app (electron/claude-child-env.js).
+{ const dropped = dropClaudeChildMarkers(process.env); if (dropped.length) console.log(`[env] dropped inherited Claude session markers: ${dropped.join(', ')}`); }
 const WIN_UNSUPPORTED = { error: 'Not available on Windows yet.' };
 
 // A project's task list changed: every window's Tasks dropdown and every open phone To-do / Asana screen read again
@@ -928,8 +932,28 @@ function setupTerminalHandlers() {
     const dir = path.join(app.getPath('temp'), 'dobius-clipboard');
     fs.mkdirSync(dir, { recursive: true });
     const filePath = path.join(dir, `clipboard-${timestamp}${ext}`);
-    fs.writeFileSync(filePath, Buffer.from(base64Data, 'base64'));
+    const bytes = Buffer.from(base64Data, 'base64');
+    fs.writeFileSync(filePath, bytes);
+    recordSavedImage(path.basename(filePath), bytes); // what the preview may show later
     return filePath;
+  });
+  // The preview for a pasted [Image #N] in the terminal (src/lib/pasted-images.js). Only bytes the save handler above
+  // wrote and recorded (pasted-image-store.js: by name AND hash, no symlinks, bounded read). Returns a data URL, or
+  // null when it is gone (the OS clears temp files) or anything does not match.
+  const CLIPBOARD_NAME_RE = /^clipboard-\d{10,16}\.(png|jpg|gif|webp)$/;
+  const MIME_BY_EXT = { png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
+  ipcMain.handle('terminal:readPastedImage', async (_event, filePath) => {
+    if (typeof filePath !== 'string' || filePath.length > 1024) return null;
+    // By name inside the clipboard folder only: the renderer may hold the path as it was typed (cut at a space).
+    const m = CLIPBOARD_NAME_RE.exec(path.basename(filePath.replace(/\\/g, '/')));
+    if (!m) return null;
+    try {
+      const bytes = await readSavedImage(path.join(app.getPath('temp'), 'dobius-clipboard'), m[0], MAX_IMAGE_SIZE);
+      return bytes ? `data:${MIME_BY_EXT[m[1]]};base64,${bytes.toString('base64')}` : null;
+    } catch (err) {
+      if (err?.code !== 'ENOENT') console.warn('[terminal] pasted image unreadable:', err?.code || err?.message);
+      return null;
+    }
   });
 }
 
@@ -1238,13 +1262,13 @@ function setupDataHandlers() {
     if (typeof sessionId !== 'string' || typeof projectPath !== 'string' || typeof ref !== 'string') return null;
     return loadTranscriptImage(sessionId, projectPath, ref);
   });
-  ipcMain.handle('chat:selector', async (event, tabId) => {
+  ipcMain.handle('chat:selector', async (event, tabId, strict) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return null;
     const senderId = event.sender.id;
     if (!ownsTerminal(senderId, tabId)) return null;
     // Shared with the phone (chat-service): stamped before the render, and
     // unsettled rather than answerable when anything reached the tab meanwhile.
-    return readSelectorForAnswer(tabId, () => ownsTerminal(senderId, tabId));
+    return readSelectorForAnswer(tabId, () => ownsTerminal(senderId, tabId), { strict: strict === true });
   });
   // Answer a selector read: delivered only while neither input nor output has
   // reached the tab since that read (the token carries both counts) AND the
@@ -1257,6 +1281,14 @@ function setupDataHandlers() {
     if (!ownsTerminal(senderId, tabId)) return { ok: false };
     return answerSelector(tabId, data, token, () => ownsTerminal(senderId, tabId), () => cancelAutoResumeTab(tabId));
   });
+  // Your own words as the answer to a question card's "Type something." row (chat-service answerSelectorWithText).
+  ipcMain.handle('chat:answerText', async (event, tabId, num, text, token) => {
+    if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return { ok: false };
+    if (typeof text !== 'string' || !text.trim() || Buffer.byteLength(text, 'utf8') > TERMINAL_WRITE_MAX_BYTES) return { ok: false };
+    const senderId = event.sender.id;
+    if (!ownsTerminal(senderId, tabId)) return { ok: false };
+    return answerSelectorWithText(tabId, num, text, token, () => ownsTerminal(senderId, tabId), () => cancelAutoResumeTab(tabId));
+  });
   ipcMain.handle('chat:submit', async (event, tabId, text) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return false;
     if (typeof text !== 'string' || !text.trim()) return false;
@@ -1266,9 +1298,11 @@ function setupDataHandlers() {
     cancelAutoResumeTab(tabId); // user input wins over a queued resume, as in terminal:write
     // true, false, or 'stranded': pasted, but the Enter was withheld because
     // other input reached the tab first, so the text sits in its input line.
+    // guardPrompt: never pasted into, or confirmed onto, a question card or permission prompt ('prompt': the draft
+    // comes back and the pane shows the card to answer instead).
     let stranded = false;
-    const ok = await submitPromptToTab(tabId, text, () => ownsTerminal(senderId, tabId), () => { stranded = true; });
-    return ok ? true : (stranded ? 'stranded' : false);
+    const r = await submitPromptDetailed(tabId, text, () => ownsTerminal(senderId, tabId), () => { stranded = true; }, { guardPrompt: true });
+    return r.ok ? true : r.reason === 'prompt_open' ? 'prompt' : r.reason === 'screen_busy' ? 'busy' : (stranded ? 'stranded' : false);
   });
   // --- Chat model picker (Asana 1220098108555124) ------------------------------
   // What a tab's Claude runs (from its session's usage record) and what it can

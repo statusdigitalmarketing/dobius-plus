@@ -4,6 +4,8 @@ import { useTerminal, takeAdopting } from '../../hooks/useTerminal';
 import '@xterm/xterm/css/xterm.css';
 import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
 import { isWindows } from '../../../shared/platform.js';
+import { Lightbox } from './ChatPane';
+import { labelsOnScreen, reserveImageLabel } from '../../lib/pasted-images.js';
 
 
 function isChatTab(id) {
@@ -41,7 +43,15 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     return () => window.removeEventListener('dobius:terminal-font', onFont);
   }, []);
 
-  const { containerRef, promptEditRef, searchAddonRef } = useTerminal({ id, cwd, theme, fontSize: termFontSize, fontFamily: termFontFamily, maxScrollbackLines: scrollbackLines, claimExisting });
+  // A clicked [Image #N] (src/lib/pasted-images.js): the saved paste, full size, or a short note when it is gone.
+  const [pastedPreview, setPastedPreview] = useState(null); // { url } | { gone: true }
+  const openPastedImage = useCallback(async (filePath) => {
+    let url = null;
+    try { url = await window.electronAPI?.readPastedImage?.(filePath); } catch (err) { console.warn('[terminal] pasted image read failed:', err?.message || err); }
+    setPastedPreview(url ? { url } : { gone: true });
+    if (!url) setTimeout(() => setPastedPreview((cur) => (cur?.gone ? null : cur)), 3500);
+  }, []);
+  const { containerRef, termRef, promptEditRef, searchAddonRef } = useTerminal({ id, cwd, theme, fontSize: termFontSize, fontFamily: termFontFamily, maxScrollbackLines: scrollbackLines, claimExisting, onOpenImage: openPastedImage });
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
   const mountedRef = useRef(true);
@@ -288,10 +298,11 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
       const promptEdit = containerRef.current?.contains(e.target) ? promptEditRef.current : null;
       // pathPromise resolves to a file path or null. The terminal takes its
       // place in the input queue now, so keys typed while it saves wait.
-      const insertPath = async (pathPromise) => {
-        if (promptEdit?.pasteWhenReady(pathPromise.then((p) => (p ? shellEscape(p) : null)))) return;
+      // onDelivered(true|false): only for a paste prompt-edit took, once it knows whether the path reached Claude.
+      const insertPath = async (pathPromise, onDelivered = null) => {
+        if (promptEdit?.pasteWhenReady(pathPromise.then((p) => (p ? shellEscape(p) : null)), onDelivered)) return true;
         const p = await pathPromise;
-        if (!p) return;
+        if (!p) return false;
         setInput((prev) => {
           const needsSpace = prev.length > 0 && !prev.endsWith(' ');
           return prev + (needsSpace ? ' ' : '') + shellEscape(p);
@@ -305,10 +316,22 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
           e.stopPropagation();
           const blob = item.getAsFile();
           if (!blob) return;
-          insertPath((async () => {
+          // Straight into Claude's prompt: note which [Image #N] Claude draws for it, so the label opens this image.
+          // (The command bar gets no label: Claude reads a typed path as a file.)
+          // Its place in line is held now, before saving, so two quick pastes keep their order.
+          const label = promptEdit ? reserveImageLabel(id, () => termRef.current, labelsOnScreen(termRef.current)) : null;
+          const saved = (async () => {
             const base64 = arrayBufferToBase64(await blob.arrayBuffer());
             return window.electronAPI.saveClipboardImage(base64, item.type);
-          })());
+          })();
+          // The label goes to this image only if its path really reached Claude's prompt (a paste dropped because
+          // the prompt went away gives its place up).
+          const delivered = label ? (ok) => { if (!ok) label(null); else saved.then((p) => label(p || null), () => label(null)); } : null;
+          const inPrompt = insertPath(saved, delivered);
+          if (label) {
+            inPrompt.then((took) => { if (!took) label(null); },
+              (err) => { label(null); console.warn('[terminal] pasted image not saved:', err?.message || err); });
+          }
           return;
         }
         // Non-image files (PDF, etc.) — insert as path
@@ -437,6 +460,12 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
       onFocusCapture={() => activatePane(true)}
       onDragEnterCapture={() => activatePane(true)}
     >
+      {pastedPreview?.url && <Lightbox url={pastedPreview.url} alt="Pasted image, full size" onClose={() => { setPastedPreview(null); requestAnimationFrame(() => containerRef.current?.querySelector('.xterm-helper-textarea')?.focus()); }} />}
+      {pastedPreview?.gone && (
+        <div role="status" style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', zIndex: 30, background: 'var(--surface)', color: 'var(--fg)', border: '1px solid var(--border)', borderRadius: 8, padding: '6px 12px', fontSize: 12 }}>
+          That image can't be shown any more (Dobius restarted, or the file was removed).
+        </div>
+      )}
       {/* Search bar */}
       {searchVisible && (
         <div

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { writes, ptys, writeTerminal, emitOutput, emitRawOutput, closing, buffers, inputAges, cols, altAtStart, trimmed } from './fake-terminal-manager.mjs';
 
-const { submitPromptToTab, writeRawInput, selectorToken, submitPending, selectorFingerprint, readSelectorForAnswer, answerSelector } = await import('../chat-service.js');
+const { submitPromptToTab, submitPromptDetailed, writeRawInput, selectorToken, submitPending, selectorFingerprint, readSelectorForAnswer, answerSelector, answerSelectorWithText } = await import('../chat-service.js');
 let pass = 0;
 const ok = (n) => { console.log(`PASS  ${n}`); pass += 1; };
 const reset = () => { writes.length = 0; ptys.clear(); closing.clear(); buffers.clear(); inputAges.clear(); trimmed.clear(); };
@@ -629,5 +629,159 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   assert.equal(csi.slice(screenTailStart(csi, csi.length - 52)), '\x1b[31mred');
   ok('the cut never starts inside an escape sequence or a long title');
 }
+
+// 23. Your own words as a question card's answer (Asana 1220550214785317). Laid out as Claude Code 2.1.325 draws an
+// AskUserQuestion card; pressing the "Type something." number opens its input in place (verified live), then the words
+// are pasted and Enter sends them. Any other row is refused (its number would pick it), and so is a changed card.
+{
+  const rule = '─'.repeat(80);
+  const card = (sel, typed = 'Type something.') => ['', rule, ' ☐ Color ', 'Pick a color',
+    `${sel === 1 ? '❯' : ' '} 1. Red`, '     Choose red',
+    `${sel === 2 ? '❯' : ' '} 2. Blue`, '     Choose blue',
+    `${sel === 3 ? '❯' : ' '} 3. ${typed}`, rule, '  4. Chat about this',
+    'Enter to select · ↑/↓ to navigate · Esc to cancel', ''].join('\r\n');
+  const perm = ['', rule, ' Bash command', '   rm -rf build', ' Do you want to proceed?', '❯ 1. Yes', '  2. No', ''].join('\r\n');
+  const tick = (ms) => new Promise((res) => setTimeout(res, ms));
+  // Waits until the writes reach `n` entries (or gives up), so a step reacts to what was just written.
+  const writesReach = async (n) => { for (let i = 0; i < 60 && writes.length < n; i += 1) await tick(20); };
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
+  const r = await readSelectorForAnswer('a');
+  assert.ok(r?.token, 'the card reads as answerable');
+  assert.equal(r.selector.options.find((o) => o.num === 3)?.label, 'Type something.');
+  assert.deepEqual(await answerSelectorWithText('a', 1, 'purple', r.token), { ok: false, reason: 'not-free-text' });
+  assert.deepEqual(await answerSelectorWithText('a', 3, '   ', r.token), { ok: false });
+  assert.deepEqual([...writes], [], 'a refused answer writes nothing');
+  emitRawOutput('a');
+  assert.deepEqual(await answerSelectorWithText('a', 3, 'purple', r.token), { ok: false, stale: true });
+  assert.deepEqual([...writes], []);
+  // Claude opens the input after the number: the words go in only then, as one line.
+  emitOutput('a');
+  const r2 = await readSelectorForAnswer('a');
+  const pending = answerSelectorWithText('a', 3, 'purple\n  haze', r2.token);
+  await new Promise((res) => setTimeout(res, 40));
+  assert.deepEqual(writes.map((w) => w[1]), ['3'], 'nothing pasted before the input shows');
+  buffers.set('a', card(3)); emitOutput('a');
+  await writesReach(2);
+  assert.deepEqual(writes.map((w) => w[1]), ['3', PASTE('purple haze')]);
+  // The Enter waits until the card shows those words in the free row.
+  await tick(400);
+  assert.equal(writes.length, 2, 'no Enter while the row still reads empty');
+  buffers.set('a', card(3, 'purple haze')); emitOutput('a');
+  assert.deepEqual(await pending, { ok: true });
+  assert.deepEqual(writes.map((w) => w[1]), ['3', PASTE('purple haze'), '\r']);
+  // The card is replaced by a permission prompt after the paste: no Enter (its option 1 is Yes), and the words are
+  // reported as possibly typed, never as unsent.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
+  const r4 = await readSelectorForAnswer('a');
+  const swapped = answerSelectorWithText('a', 3, 'teal', r4.token);
+  await writesReach(1);
+  buffers.set('a', card(3)); emitOutput('a');
+  await writesReach(2);
+  buffers.set('a', perm); emitOutput('a');
+  assert.deepEqual(await swapped, { ok: false, reason: 'stranded', uncertain: true });
+  assert.deepEqual(writes.map((w) => w[1]), ['3', PASTE('teal')], 'no Enter into the permission prompt');
+  // Ctrl+U in the terminal while the Enter waits for the screen: the words were erased, so they come back as unsent.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
+  const r7 = await readSelectorForAnswer('a');
+  const erased = answerSelectorWithText('a', 3, 'teal', r7.token);
+  await writesReach(1);
+  buffers.set('a', card(3)); emitOutput('a');
+  await writesReach(2);
+  await tick(300);
+  await writeRawInput('a', '\x15');
+  assert.deepEqual(await erased, { ok: false, reason: 'cancelled' });
+  assert.deepEqual(writes.map((w) => w[1]), ['3', PASTE('teal'), '\x15']);
+  // A long answer wraps onto an indented row: still recognized as the typed answer, and Enter goes.
+  const long = 'I would like a deep purple shade with blue undertones and a little bit of red mixed in';
+  const wrapped = (sel) => card(sel, sel === 3 ? 'I would like a deep purple shade with blue undertones and a little bit of red\r\n     mixed in' : 'Type something.');
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', wrapped(1)); emitOutput('a');
+  const r8 = await readSelectorForAnswer('a');
+  const wrapAns = answerSelectorWithText('a', 3, long, r8.token);
+  await writesReach(1);
+  buffers.set('a', card(3)); emitOutput('a');
+  await writesReach(2);
+  buffers.set('a', wrapped(3)); emitOutput('a');
+  assert.deepEqual(await wrapAns, { ok: true });
+  assert.deepEqual(writes.map((w) => w[1]), ['3', PASTE(long), '\r']);
+  // Someone types into the tab while the input opens: nothing is pasted.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
+  const r5 = await readSelectorForAnswer('a');
+  const typedOver = answerSelectorWithText('a', 3, 'teal', r5.token);
+  await writesReach(1);
+  writeTerminal('a', 'x');
+  buffers.set('a', card(3)); emitOutput('a');
+  assert.deepEqual(await typedOver, { ok: false, reason: 'interrupted' });
+  assert.deepEqual(writes.map((w) => w[1]), ['3', 'x']);
+  // A different question shows up with its row 3 selected: refused as a changed card.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
+  const r6 = await readSelectorForAnswer('a');
+  const other = answerSelectorWithText('a', 3, 'teal', r6.token);
+  await writesReach(1);
+  buffers.set('a', card(3).replace('Pick a color', 'Pick a size')); emitOutput('a');
+  assert.deepEqual(await other, { ok: false, stale: true });
+  assert.deepEqual(writes.map((w) => w[1]), ['3']);
+  // The input never opens (the card went away): nothing is pasted.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
+  const r3 = await readSelectorForAnswer('a');
+  const lost = answerSelectorWithText('a', 3, 'teal', r3.token);
+  await new Promise((res) => setTimeout(res, 40));
+  buffers.set('a', '\r\n> \r\n'); emitOutput('a');
+  assert.deepEqual(await lost, { ok: false, reason: 'not-open' });
+  assert.deepEqual(writes.map((w) => w[1]), ['3']);
+  cols.delete('a');
+}
+ok('own words answer only the Type something row, and Enter only once the card shows them');
+
+// 24. The strict read (the Chat pane's answer guard): a screen not settled since the last key is never "no prompt",
+// even when nothing on it parses, because a prompt may still be on its way. The plain read keeps hiding the card.
+{
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', '\r\n> \r\n'); emitOutput('a');
+  assert.equal(await readSelectorForAnswer('a'), null, 'settled, nothing on screen: no prompt');
+  assert.equal(await readSelectorForAnswer('a', () => true, { strict: true }), null, 'settled: strict agrees');
+  writeTerminal('a', 'x');
+  assert.equal(await readSelectorForAnswer('a'), null, 'plain read: an unsettled empty screen still hides the card');
+  assert.deepEqual(await readSelectorForAnswer('a', () => true, { strict: true }), { unsettled: true });
+  ptys.delete('a');
+  assert.equal(await readSelectorForAnswer('a', () => true, { strict: true }), null, 'no tab: nothing to wait for');
+  cols.delete('a');
+}
+ok('a strict read never reports no prompt for a screen that has not settled');
+
+// 25. A plain Chat send (guardPrompt) never types into a question card or permission prompt: refused before the paste
+// when one is on screen, Enter withheld when one appears after it, and an ordinary prompt still gets both.
+{
+  const rule = '─'.repeat(80);
+  const perm = ['', rule, ' Bash command', '   rm -rf build', ' Do you want to proceed?', '❯ 1. Yes', '  2. No', '', 'Esc to cancel', ''].join('\r\n');
+  const plain = ['', rule, '❯ ', rule, ''].join('\r\n');
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', perm); emitOutput('a');
+  assert.deepEqual(await submitPromptDetailed('a', 'hello', () => true, () => {}, { guardPrompt: true }), { ok: false, reason: 'prompt_open' });
+  assert.deepEqual([...writes], [], 'nothing typed into the permission prompt');
+  buffers.set('a', plain); emitOutput('a');
+  assert.deepEqual(await submitPromptDetailed('a', 'hello', () => true, () => {}, { guardPrompt: true }), { ok: true });
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('hello'), '\r']);
+  writes.length = 0;
+  let stranded = false;
+  const late = submitPromptDetailed('a', 'again', () => true, () => { stranded = true; }, { guardPrompt: true });
+  for (let i = 0; i < 50 && writes.length < 1; i += 1) await new Promise((res) => setTimeout(res, 10));
+  buffers.set('a', perm); emitOutput('a');
+  assert.deepEqual(await late, { ok: false, reason: 'stranded', uncertain: true });
+  assert.equal(stranded, true);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('again')], 'no Enter onto the prompt that appeared');
+  cols.delete('a');
+}
+ok('a plain Chat send refuses a prompt on screen and withholds Enter from one that appears');
+
+// 26. Output arriving during every screen read: no read can be trusted, so the send is refused, nothing typed.
+{
+  const rule = '─'.repeat(80);
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', ['', rule, '❯ ', rule, ''].join('\r\n')); emitOutput('a');
+  const spin = setInterval(() => emitOutput('a'), 1);
+  const r = await submitPromptDetailed('a', 'hello', () => true, () => {}, { guardPrompt: true });
+  clearInterval(spin);
+  assert.deepEqual(r, { ok: false, reason: 'screen_busy' });
+  assert.deepEqual([...writes], [], 'nothing typed while the screen could not be read');
+  cols.delete('a');
+}
+ok('a plain Chat send is refused when every screen read races with output');
 
 console.log(`\n${pass} passed`);

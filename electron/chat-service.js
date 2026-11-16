@@ -7,6 +7,7 @@ import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, t
 import { parseSelector, parseSelectorFromScreen, stripAnsi, selectorFingerprint, selectorCountdown, spinnerStatus } from './selector-parser.js';
 export { selectorFingerprint };
 import { renderScreenLines, FILL } from './screen-render.js';
+import { FREE_TEXT_LABEL } from '../shared/chat-rows.js';
 
 // The live selector for a tab, via the headless-xterm SCREEN render (v1.0.62).
 // The old strip-and-regex path missed Ink's incremental repaints entirely: on
@@ -298,7 +299,7 @@ export function selectorToken(id) {
  * answer prompts under the same rules. `stillOk` re-checks the caller's right
  * to the tab after the render await.
  */
-export async function readSelectorForAnswer(id, stillOk = () => true) {
+export async function readSelectorForAnswer(id, stillOk = () => true, { strict = false } = {}) {
   // Stamp BEFORE rendering: anything that lands meanwhile makes the read stale.
   const token = selectorToken(id);
   let selector;
@@ -308,7 +309,12 @@ export async function readSelectorForAnswer(id, stillOk = () => true) {
   // on screen, disabled. It carries the prompt for DISPLAY only (an older
   // phone shows it, as it always did); nothing can answer it without a token.
   // A read that found no prompt hides the card, which is always safe.
-  if (!token || selectorToken(id) !== token) return selector && terminalInstance(id) ? { unsettled: true, selector } : null;
+  // strict (the Chat pane deciding whether plain sends are safe again): a raced or unsettled read is unsettled even
+  // when it found no prompt, since a prompt may have arrived while it rendered.
+  if (!token || selectorToken(id) !== token) {
+    if (!terminalInstance(id)) return null;
+    return selector ? { unsettled: true, selector } : strict ? { unsettled: true } : null;
+  }
   if (!selector) return null;
   const full = `${token}|${selectorFingerprint(selector)}`;
   const countdown = selectorCountdown(selector);
@@ -422,6 +428,93 @@ export async function answerSelector(id, data, token, stillOk0 = () => true, bef
   return { ok: true, token: `${next}|${fp}` };
 }
 
+/**
+ * Answer a question card with your own words (Asana 1220550214785317): option `num` must be the card's "Type
+ * something." row, on the live screen AND on the card the token was read from (the same fingerprint). Its number is
+ * pressed through answerSelector (every check it makes). Then, on a read with nothing typed or drawn during it, the
+ * same card (fingerprint) with that row selected and still empty, the words are pasted in the same tick. The Enter
+ * goes out only after a fresh read shows the same card, that row selected and reading exactly the pasted words, with
+ * nothing typed or drawn since (Claude Code 2.1.325 shows the input in place of "Type something.", captured live).
+ * Anything else (a permission prompt that replaced the card, a person typing) leaves the words in the input
+ * unsubmitted: 'stranded', uncertain. New lines become spaces: the input is one line.
+ * Returns { ok, stale?, reason?, uncertain? }; `reason` 'not-free-text', 'not-open' (the input never showed),
+ * 'interrupted' (other input reached the tab first) or the submit's own reason.
+ */
+const FREE_TEXT_OPEN_MS = 2000;
+const FREE_TEXT_SHOW_MS = 1500;
+const collapse = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
+export async function answerSelectorWithText(id, num, text, token, stillOk = () => true, beforeWrite = () => {}) {
+  if (!Number.isInteger(num) || num < 1 || num > 9 || typeof text !== 'string' || typeof token !== 'string') return { ok: false };
+  const line = collapse(text.replace(/[\x00-\x1F\x7F]/g, ' '));
+  if (!line) return { ok: false };
+  const fp = token.split('|')[1];
+  const optOf = (sel) => (Array.isArray(sel?.options) ? sel.options.find((o) => o?.num === num) : null);
+  const selected = (sel) => (Array.isArray(sel?.options) ? sel.options[sel.selectedIndex] : null)?.num === num;
+  let live = null;
+  try { live = await liveSelectorForTab(id); } catch { live = null; }
+  if (!live || selectorFingerprint(live) !== fp) return { ok: false, stale: true };
+  const freeLabel = String(optOf(live)?.label ?? '');
+  const freeDetail = optOf(live)?.detail;
+  if (!FREE_TEXT_LABEL.test(freeLabel.trim())) return { ok: false, reason: 'not-free-text' };
+  // The words as the row shows them: a long answer wraps onto indented rows, which the parser reads as the option's
+  // detail. Compared with whitespace collapsed, or (a word cut at the edge) with none at all.
+  const squash = (t) => String(t ?? '').replace(/\s+/g, '');
+  const showsLine = (o) => {
+    const shown = `${o?.label ?? ''} ${o?.detail ?? ''}`;
+    return collapse(shown) === line || squash(shown) === squash(line);
+  };
+  // The card as it reads with words typed into the free row: everything else exactly as read.
+  const typedCard = (sel) => {
+    if (!sel || !selected(sel) || !showsLine(optOf(sel))) return false;
+    // Every own property kept, non-enumerable ones too: the fingerprint reads `context`, which a spread would drop.
+    const asRead = Object.create(Object.getPrototypeOf(sel), {
+      ...Object.getOwnPropertyDescriptors(sel),
+      options: { value: sel.options.map((o) => (o?.num === num ? { ...o, label: freeLabel, detail: freeDetail } : o)), enumerable: true, writable: true, configurable: true },
+    });
+    return selectorFingerprint(asRead) === fp;
+  };
+  const r = await answerSelector(id, String(num), token, stillOk, beforeWrite);
+  if (!r?.ok) return r || { ok: false };
+  // Same PTY and nothing typed since our own key: the last thing in the tab is the number we pressed.
+  const inputKey = () => { const pty = terminalInstance(id); return pty ? `${ptySerials.get(pty)}:${terminalInputSeq(id)}` : ''; };
+  const key0 = inputKey();
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  // A read that counts: settled, and neither input nor output reached the tab while it was rendered.
+  const readQuiet = async () => {
+    const tok = selectorToken(id);
+    if (!tok) return null;
+    let sel = null;
+    try { sel = await liveSelectorForTab(id); } catch { sel = null; }
+    return sel && selectorToken(id) === tok ? { sel, out: terminalRawOutputSeq(id) } : null;
+  };
+  const started = Date.now();
+  for (;;) {
+    await sleep(80);
+    if (!stillOk()) return { ok: false, reason: 'not_allowed' };
+    if (inputKey() !== key0 || submitPending(id)) return { ok: false, reason: 'interrupted' };
+    const read = await readQuiet();
+    if (read && inputKey() === key0) {
+      if (selectorFingerprint(read.sel) !== fp) return { ok: false, stale: true };
+      if (selected(read.sel)) {
+        // Pasted in this same tick, and only while nothing has moved since the read.
+        const guard = () => stillOk() && inputKey() === key0 && terminalRawOutputSeq(id) === read.out;
+        const beforeEnter = async () => {
+          const until = Date.now() + FREE_TEXT_SHOW_MS;
+          for (;;) {
+            const shown = await readQuiet();
+            if (shown && typedCard(shown.sel)) return { outSeq: shown.out };
+            if (Date.now() > until) return null;
+            await sleep(80);
+          }
+        };
+        const sent = await submitPromptDetailed(id, line, guard, () => {}, { beforeEnter });
+        return sent.ok ? { ok: true } : { ok: false, reason: sent.reason, ...(sent.uncertain ? { uncertain: true } : {}) };
+      }
+    }
+    if (Date.now() - started > FREE_TEXT_OPEN_MS) return { ok: false, reason: 'not-open' };
+  }
+}
+
 const SUBMIT_ENTER_DELAY_MS = 250;
 const RAW_KEY_GAP_MS = 20;
 // tabId -> { running, items, gen }. gen bumps on a cancel key; an item queued
@@ -468,7 +561,7 @@ export function submitPromptToTab(id, text, stillOk = () => true, onStranded = (
  * the Enter was withheld: the text sits in the input line, see onStranded).
  * @returns {Promise<{ok: boolean, reason?: string}>}
  */
-export function submitPromptDetailed(id, text, stillOk0 = () => true, onStranded = () => {}) {
+export function submitPromptDetailed(id, text, stillOk0 = () => true, onStranded = () => {}, { beforeEnter = null, guardPrompt = false } = {}) {
   if (onPhone(id)) return Promise.resolve(refused('on_phone'));
   const stillOk = () => !onPhone(id) && stillOk0();
   // Strip control chars except \t and \n (multi-line paste is legitimate); \r
@@ -479,10 +572,34 @@ export function submitPromptDetailed(id, text, stillOk0 = () => true, onStranded
   if (!stillOk()) return Promise.resolve(refused('not_allowed'));
   const q = queueFor(id);
   return new Promise((resolve) => {
-    q.items.push({ clean, pty, stillOk, gen: q.gen, resolve, onStranded });
+    q.items.push({ clean, pty, stillOk, gen: q.gen, resolve, onStranded, beforeEnter: beforeEnter || (guardPrompt ? noPromptBeforeEnter(id) : null), guardPrompt });
     if (!q.running) drainSubmits(id, q);
   });
 }
+
+/**
+ * Is a question card or permission prompt on the tab's screen? For plain sends (desktop Chat): a paste plus Enter
+ * there would answer it (a permission prompt's highlighted "1. Yes"). Answers 'prompt', 'none', or 'unknown' when no
+ * read finished without output arriving during it (a raced read's snapshot may predate a prompt that just appeared).
+ * It does not need a quiet screen, only one read between two repaints, so a send while Claude streams still goes: a
+ * raced read is retried after a short gap. A render that fails counts as a prompt (unknown is refused).
+ */
+const PROMPT_CHECK_TRIES = 10;
+const PROMPT_CHECK_GAP_MS = 40;
+async function promptOnScreen(id) {
+  for (let i = 0; i < PROMPT_CHECK_TRIES; i += 1) {
+    if (i) await new Promise((r) => setTimeout(r, PROMPT_CHECK_GAP_MS));
+    const out = terminalRawOutputSeq(id);
+    let sel;
+    try { sel = await liveSelectorForTab(id); } catch (err) { console.warn('[chat-service] prompt check failed:', err?.message || err); return 'prompt'; }
+    if (sel) return 'prompt';
+    if (terminalRawOutputSeq(id) === out) return 'none';
+  }
+  return 'unknown';
+}
+// The pre-Enter hook for a plain send: a settled read with no prompt. outSeq null: output may keep moving (Claude
+// streaming) after that read; a prompt that appears later stops and waits, and the next send checks again.
+const noPromptBeforeEnter = (id) => async () => ((await promptOnScreen(id)) === 'none' ? { outSeq: null } : null);
 
 const DONE = Object.freeze({ ok: true });
 const refused = (reason) => ({ ok: false, reason });
@@ -570,6 +687,12 @@ async function drainSubmits(id, q) {
         it.resolve(DONE);
         continue;
       }
+      if (it.guardPrompt) {
+        const screen = await promptOnScreen(id);
+        skip = skipReason(id, q, it);
+        if (skip) { it.resolve(refused(skip)); continue; }
+        if (screen !== 'none') { it.resolve(refused(screen === 'prompt' ? 'prompt_open' : 'screen_busy')); continue; }
+      }
       it.touched = true;
       writeTerminal(id, `\x1b[200~${it.clean}\x1b[201~`);
       const pastedAt = terminalInputSeq(id);
@@ -601,6 +724,23 @@ async function drainSubmits(id, q) {
         const uncertain = !erased;
         it.resolve({ ...refused(gone ? 'tab_exited' : erased ? 'cancelled' : 'stranded'), ...(uncertain ? { uncertain: true } : {}) });
         continue;
+      }
+      // A caller that knows what the screen must show before Enter (a card's free-text answer) checks it now, on a
+      // fresh read; the Enter goes only if nothing at all reached the tab since that read. Otherwise the text stays
+      // in the input, never confirmed into whatever replaced it (a permission prompt's "1. Yes").
+      if (it.beforeEnter) {
+        let seen = null;
+        try { seen = await it.beforeEnter(); } catch (err) { console.warn('[chat-service] pre-Enter check failed:', err?.message || err); seen = null; }
+        const gone = terminalInstance(id) !== it.pty || terminalClosing(id);
+        if (!seen || gone || it.gen !== q.gen || terminalInputSeq(id) !== pastedAt || (seen.outSeq != null && terminalRawOutputSeq(id) !== seen.outSeq)) {
+          // Same accounting as the check above: a Ctrl+C/Ctrl+U with no other writer erased the pasted words, so
+          // they are plainly unsent (the caller gives them back); anything else may have landed.
+          const foreign = (terminalInputSeq(id) - pastedAt) - ((q.cancelWrites || 0) - cancelsAt);
+          const erased = !gone && foreign === 0 && (q.clearedGen ?? -1) > it.gen;
+          if (!gone && !erased) it.onStranded();
+          it.resolve(erased ? refused('cancelled') : { ...refused(gone ? 'tab_exited' : 'stranded'), uncertain: true });
+          continue;
+        }
       }
       writeTerminal(id, '\r');
       it.resolve(DONE);

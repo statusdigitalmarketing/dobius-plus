@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/store';
 import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache, foldTurns } from '../../../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, freeTextOption, tokenFingerprint, createPressGuard, stepImages, createImageCache, foldTurns } from '../../../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../../../shared/chat-activity.js';
 import ModelMenu from './ModelMenu';
 import './ChatPane.css';
@@ -56,6 +56,8 @@ function deliverDraft(tabId, update, notice) {
 // losing to it. Failures resolve in send order, so appending keeps several
 // cancelled sends in the order they were written.
 const withUnsent = (text) => (cur) => (!cur ? text : cur.split('\n\n').includes(text) ? cur : `${cur}\n\n${text}`);
+// Tabs with an own-words card answer still going in (module level: it outlives a remounted pane).
+const answeringTabs = new Set();
 const NOT_SENT = 'Not sent. The tab was interrupted, closed or moved to another window.';
 const STRANDED = 'Other input reached the terminal while this was being sent, so Chat cannot tell whether it went through. Check the terminal.';
 const SELECTOR_POLL_MS = 2500;
@@ -169,7 +171,7 @@ function ToolImages({ images }) {
 
 // Full size, modal: it takes focus and keeps it (Tab cannot reach the chat or
 // a selector card behind it, Codex), Escape/Enter or a click/tap closes it.
-function Lightbox({ url, onClose, alt = 'Tool output, full size' }) {
+export function Lightbox({ url, onClose, alt = 'Tool output, full size' }) {
   const ref = useRef(null);
   // Modal for real: anything that grabs focus while it is open (a new tab's
   // terminal in the other split pane) hands it straight back, so typing and
@@ -672,11 +674,12 @@ export default function ChatPane({ tabId, visible }) {
     if (r.unchanged && !haveRef.current && mountedRef.current) await pollOnce();
   }, [tabId, apply]);
 
-  const pollSelector = useCallback(async (retries = 0) => {
+  // strict: a read raced by output is 'unsettled' even with no prompt in it (the answer guard's release check).
+  const pollSelector = useCallback(async (retries = 0, strict = false) => {
     const seq = ++selSeqRef.current;
     let sel;
-    try { sel = await window.electronAPI?.chatSelector?.(tabId); } catch { sel = null; }
-    if (seq < selAppliedRef.current) return;
+    try { sel = await window.electronAPI?.chatSelector?.(tabId, strict); } catch { sel = null; }
+    if (seq < selAppliedRef.current) return 'superseded';
     selAppliedRef.current = seq;
     // Not repainted since the last key: unknown, not "no prompt". Keep the
     // card, disabled (no token), and look again shortly instead of dropping
@@ -684,10 +687,11 @@ export default function ChatPane({ tabId, visible }) {
     if (sel?.unsettled) {
       setSelector((cur) => (cur ? { ...cur, token: '' } : cur));
       if (retries > 0) setTimeout(() => { if (mountedRef.current && visibleRef.current) pollSelector(retries - 1); }, 150);
-      return;
+      return 'unsettled';
     }
     const s2 = sel?.selector;
     setSelector(s2 && Array.isArray(s2.options) && s2.options.length > 0 ? { ...s2, token: sel.token, fp: tokenFingerprint(sel.token) } : null);
+    return 'read';
   }, [tabId]);
 
   // Transcript + status poll, only while this pane is on screen.
@@ -882,7 +886,7 @@ export default function ChatPane({ tabId, visible }) {
       setEchoes((cur) => [...cur, { content: text, at: Date.now(), sid, base }]);
     }
     if (ok) refreshSoon();
-    return r === 'stranded' ? 'stranded' : ok;
+    return r === 'stranded' || r === 'prompt' || r === 'busy' ? r : ok;
   };
 
   const send = async () => {
@@ -894,6 +898,9 @@ export default function ChatPane({ tabId, visible }) {
     // Claude is not running (`open `) still gets the path as its argument.
     const text = [typed, ...imgs.map((a) => shellEscape(a.path))].filter(Boolean).join(' ');
     if (!text) return;
+    // A question card is up: a paste plus Enter would pick whichever option is highlighted. Words go in as the
+    // card's "Type something." answer; a card without that row (a permission prompt) takes a button press first.
+    if (selector || answeringTabs.has(tabId)) { answerInOwnWords(text, typed, imgs); return; }
     setDraft('');
     setTabAttachments(tabId, []);
     setBigAtt(null);
@@ -901,11 +908,59 @@ export default function ChatPane({ tabId, visible }) {
     const ok = await submit(text, { echo: !!sessionId });
     // Typed but not entered: the text is already in the terminal's input
     // line, so handing it back here would send it twice.
-    if (ok === 'stranded') { revokeAll(imgs); deliverDraft(tabId, (cur) => cur, STRANDED); } else if (!ok) {
+    if (ok === 'stranded') { revokeAll(imgs); deliverDraft(tabId, (cur) => cur, STRANDED); } else if (ok === 'prompt') {
+      // A card or permission prompt is up (main checks the screen before pasting): nothing was typed. Show it.
+      for (const a of imgs) deliverAttachment(tabId, a);
+      deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, 'Claude is asking you something. Answer it above first, then send this.');
+      if (mountedRef.current) pollSelector(5);
+    } else if (ok === 'busy') {
+      // The screen never held still long enough to check for a prompt: nothing was typed.
+      for (const a of imgs) deliverAttachment(tabId, a);
+      deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, 'Claude\'s screen is changing too fast to check. Nothing was sent, try again in a moment.');
+    } else if (!ok) {
       // Keep what they wrote, images back as thumbnails.
       for (const a of imgs) deliverAttachment(tabId, a);
       deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, NOT_SENT);
     } else revokeAll(imgs);
+  };
+
+  const answerInOwnWords = async (text, typed, imgs) => {
+    // One answer at a time: the card is cleared from the pane while it goes in, so a second Enter would otherwise take
+    // the plain send path and could land as a new prompt once Claude moves on.
+    if (answeringTabs.has(tabId)) { flash('One moment, your answer is still going in.'); return; }
+    const free = freeTextOption(selector);
+    if (!free) { flash('Claude is waiting for you to pick one of the options above. Pick one, or press Stop to dismiss it and type.'); return; }
+    if (!selector.token) { flash('One moment, the question is still updating. Try again.'); return; }
+    const token = selector.token;
+    setDraft('');
+    setTabAttachments(tabId, []);
+    setBigAtt(null);
+    dropPendingSelector();
+    setSelector(null);
+    atBottomRef.current = true;
+    let r = null;
+    answeringTabs.add(tabId);
+    try {
+      try { r = await window.electronAPI?.chatAnswerText?.(tabId, free.num, text, token); } catch (err) { console.warn('[chat] answer failed:', err?.message || err); r = null; }
+      // The draft goes back whether or not this pane is still mounted (deliverDraft finds the pane showing the tab
+      // now, else the saved draft); only the refreshes need this pane.
+      if (r?.ok) { revokeAll(imgs); if (mountedRef.current) refreshSoon(); }
+      // Pasted but not confirmed (stranded, or a write that may have landed): the words may already sit in Claude's
+      // input, so handing them back would send them twice.
+      else if (r?.reason === 'stranded' || r?.uncertain) { revokeAll(imgs); deliverDraft(tabId, (cur) => cur, STRANDED); }
+      else {
+        for (const a of imgs) deliverAttachment(tabId, a);
+        deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, r?.stale ? 'That question changed. Nothing was sent, check it again.' : 'Not sent. Your answer is back in the box.');
+      }
+      // Sends stay on the card path until a settled read says what is on screen now (another card, a permission
+      // prompt, or Claude's prompt): an Enter in between must not paste into whatever replaced the card.
+      // ponytail: gives up after ~40 reads (several seconds of a screen that never stops moving) and lets sends
+      // through; main's chat:submit has no prompt check of its own (older than this guard).
+      for (let i = 0; i < 40 && mountedRef.current; i += 1) {
+        if ((await pollSelector(0, true)) === 'read') break;
+        await new Promise((res) => setTimeout(res, 150));
+      }
+    } finally { answeringTabs.delete(tabId); }
   };
 
   const removeAtt = (path) => {
@@ -1089,7 +1144,9 @@ export default function ChatPane({ tabId, visible }) {
     if (!a || a === document.body || a === modelChipRef.current) inputRef.current?.focus();
   });
 
-  const placeholder = sessionId
+  const placeholder = selector
+    ? (freeTextOption(selector) ? 'Type your own answer and press Enter...' : 'Pick an option above first...')
+    : sessionId
     ? (claudeLive ? 'Message Claude...' : 'Claude exited. Input goes to the terminal...')
     : (claudeLive ? 'Message Claude...' : 'Type a command for the terminal...');
 

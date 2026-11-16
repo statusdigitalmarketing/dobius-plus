@@ -238,6 +238,23 @@ test('a paste consumes the selection it replaced, so the next key is plain typin
   assert.equal(t.app.text, "hello '/tmp/a'Z foo");
 });
 
+test('a paste tells its caller whether it really went in', async () => {
+  const t = fakeClaude('describe');
+  const got = [];
+  let resolve;
+  t.edit.pasteWhenReady(new Promise((r) => { resolve = r; }), (d) => got.push(['first', d]));
+  t.edit.pasteWhenReady(Promise.resolve("'/tmp/b.png'"), (d) => got.push(['second', d]));
+  t.exit();
+  resolve("'/tmp/a.png'");
+  await wait();
+  assert.deepEqual(got, [['first', false], ['second', false]], 'the prompt went away: neither went in');
+  const u = fakeClaude('describe');
+  const ok = [];
+  u.edit.pasteWhenReady(Promise.resolve("'/tmp/c.png'"), (d) => ok.push(d));
+  await wait();
+  assert.deepEqual(ok, [true]);
+});
+
 test('a paste anywhere but Claude\'s prompt is left to the caller', () => {
   const t = fakeClaude('');
   t.exit();
