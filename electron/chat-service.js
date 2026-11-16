@@ -690,8 +690,12 @@ async function drainSubmits(id, q) {
         try { seen = await it.beforeEnter(); } catch (err) { console.warn('[chat-service] pre-Enter check failed:', err?.message || err); seen = null; }
         const gone = terminalInstance(id) !== it.pty || terminalClosing(id);
         if (!seen || gone || it.gen !== q.gen || terminalInputSeq(id) !== pastedAt || terminalRawOutputSeq(id) !== seen.outSeq) {
-          if (!gone) it.onStranded();
-          it.resolve({ ...refused(gone ? 'tab_exited' : 'stranded'), uncertain: true });
+          // Same accounting as the check above: a Ctrl+C/Ctrl+U with no other writer erased the pasted words, so
+          // they are plainly unsent (the caller gives them back); anything else may have landed.
+          const foreign = (terminalInputSeq(id) - pastedAt) - ((q.cancelWrites || 0) - cancelsAt);
+          const erased = !gone && foreign === 0 && (q.clearedGen ?? -1) > it.gen;
+          if (!gone && !erased) it.onStranded();
+          it.resolve(erased ? refused('cancelled') : { ...refused(gone ? 'tab_exited' : 'stranded'), uncertain: true });
           continue;
         }
       }

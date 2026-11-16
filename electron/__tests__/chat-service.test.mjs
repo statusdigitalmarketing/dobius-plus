@@ -680,6 +680,17 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   buffers.set('a', perm); emitOutput('a');
   assert.deepEqual(await swapped, { ok: false, reason: 'stranded', uncertain: true });
   assert.deepEqual(writes.map((w) => w[1]), ['3', PASTE('teal')], 'no Enter into the permission prompt');
+  // Ctrl+U in the terminal while the Enter waits for the screen: the words were erased, so they come back as unsent.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
+  const r7 = await readSelectorForAnswer('a');
+  const erased = answerSelectorWithText('a', 3, 'teal', r7.token);
+  await writesReach(1);
+  buffers.set('a', card(3)); emitOutput('a');
+  await writesReach(2);
+  await tick(300);
+  await writeRawInput('a', '\x15');
+  assert.deepEqual(await erased, { ok: false, reason: 'cancelled' });
+  assert.deepEqual(writes.map((w) => w[1]), ['3', PASTE('teal'), '\x15']);
   // Someone types into the tab while the input opens: nothing is pasted.
   reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
   const r5 = await readSelectorForAnswer('a');

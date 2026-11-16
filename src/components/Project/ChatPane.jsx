@@ -56,6 +56,8 @@ function deliverDraft(tabId, update, notice) {
 // losing to it. Failures resolve in send order, so appending keeps several
 // cancelled sends in the order they were written.
 const withUnsent = (text) => (cur) => (!cur ? text : cur.split('\n\n').includes(text) ? cur : `${cur}\n\n${text}`);
+// Tabs with an own-words card answer still going in (module level: it outlives a remounted pane).
+const answeringTabs = new Set();
 const NOT_SENT = 'Not sent. The tab was interrupted, closed or moved to another window.';
 const STRANDED = 'Other input reached the terminal while this was being sent, so Chat cannot tell whether it went through. Check the terminal.';
 const SELECTOR_POLL_MS = 2500;
@@ -896,7 +898,7 @@ export default function ChatPane({ tabId, visible }) {
     if (!text) return;
     // A question card is up: a paste plus Enter would pick whichever option is highlighted. Words go in as the
     // card's "Type something." answer; a card without that row (a permission prompt) takes a button press first.
-    if (selector) { answerInOwnWords(text, typed, imgs); return; }
+    if (selector || answeringTabs.has(tabId)) { answerInOwnWords(text, typed, imgs); return; }
     setDraft('');
     setTabAttachments(tabId, []);
     setBigAtt(null);
@@ -912,6 +914,9 @@ export default function ChatPane({ tabId, visible }) {
   };
 
   const answerInOwnWords = async (text, typed, imgs) => {
+    // One answer at a time: the card is cleared from the pane while it goes in, so a second Enter would otherwise take
+    // the plain send path and could land as a new prompt once Claude moves on.
+    if (answeringTabs.has(tabId)) { flash('One moment, your answer is still going in.'); return; }
     const free = freeTextOption(selector);
     if (!free) { flash('Claude is waiting for you to pick one of the options above. Pick one, or press Stop to dismiss it and type.'); return; }
     if (!selector.token) { flash('One moment, the question is still updating. Try again.'); return; }
@@ -923,7 +928,9 @@ export default function ChatPane({ tabId, visible }) {
     setSelector(null);
     atBottomRef.current = true;
     let r = null;
+    answeringTabs.add(tabId);
     try { r = await window.electronAPI?.chatAnswerText?.(tabId, free.num, text, token); } catch (err) { console.warn('[chat] answer failed:', err?.message || err); r = null; }
+    finally { answeringTabs.delete(tabId); }
     // The draft goes back whether or not this pane is still mounted (deliverDraft finds the pane showing the tab now,
     // else the saved draft); only the refreshes need this pane.
     const live = mountedRef.current;
