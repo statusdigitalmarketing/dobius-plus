@@ -50,6 +50,7 @@ import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { createSnoozeStore } from './tab-snooze.js';
 import { dropClaudeChildMarkers } from './claude-child-env.js';
+import { recordSavedImage, readSavedImage } from './pasted-image-store.js';
 import { terminalTextTail, terminalScreenText, submitPromptToTab, submitPromptDetailed, writeRawInput, readSelectorForAnswer, answerSelector, answerSelectorWithText, activityForTab, submitPending, setPhoneTabCheck } from './chat-service.js';
 import { launchCommandFor, claudeLaunchOptions, normalizeNewTabModel, normalizeNewTabPermissionMode, CLAUDE_AUTH_ENV } from '../shared/new-tab.js';
 import { sanitizeAccountPin } from '../shared/tab-label.js';
@@ -931,26 +932,24 @@ function setupTerminalHandlers() {
     const dir = path.join(app.getPath('temp'), 'dobius-clipboard');
     fs.mkdirSync(dir, { recursive: true });
     const filePath = path.join(dir, `clipboard-${timestamp}${ext}`);
-    fs.writeFileSync(filePath, Buffer.from(base64Data, 'base64'));
+    const bytes = Buffer.from(base64Data, 'base64');
+    fs.writeFileSync(filePath, bytes);
+    recordSavedImage(app.getPath('userData'), path.basename(filePath), bytes); // what the preview may show later
     return filePath;
   });
-  // The preview for a pasted [Image #N] in the terminal (src/lib/pasted-images.js). Only a file the save handler above
-  // names (clipboard-<ms>.<ext> directly inside <temp>/dobius-clipboard), checked on the real path, within the size cap.
-  // Returns a data URL, or null when it is gone (the OS clears temp files) or anything does not fit.
+  // The preview for a pasted [Image #N] in the terminal (src/lib/pasted-images.js). Only bytes the save handler above
+  // wrote and recorded (pasted-image-store.js: by name AND hash, no symlinks, bounded read). Returns a data URL, or
+  // null when it is gone (the OS clears temp files) or anything does not match.
   const CLIPBOARD_NAME_RE = /^clipboard-\d{10,16}\.(png|jpg|gif|webp)$/;
   const MIME_BY_EXT = { png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
   ipcMain.handle('terminal:readPastedImage', async (_event, filePath) => {
     if (typeof filePath !== 'string' || filePath.length > 1024) return null;
+    // By name inside the clipboard folder only: the renderer may hold the path as it was typed (cut at a space).
     const m = CLIPBOARD_NAME_RE.exec(path.basename(filePath.replace(/\\/g, '/')));
     if (!m) return null;
     try {
-      // By name inside this folder only: the renderer may hold the path as it was typed (cut at a space).
-      const dir = await fs.promises.realpath(path.join(app.getPath('temp'), 'dobius-clipboard'));
-      const real = await fs.promises.realpath(path.join(dir, m[0]));
-      if (path.dirname(real) !== dir || path.basename(real) !== m[0]) return null;
-      const st = await fs.promises.stat(real);
-      if (!st.isFile() || st.size > MAX_IMAGE_SIZE) return null;
-      return `data:${MIME_BY_EXT[m[1]]};base64,${(await fs.promises.readFile(real)).toString('base64')}`;
+      const bytes = await readSavedImage(app.getPath('userData'), path.join(app.getPath('temp'), 'dobius-clipboard'), m[0], MAX_IMAGE_SIZE);
+      return bytes ? `data:${MIME_BY_EXT[m[1]]};base64,${bytes.toString('base64')}` : null;
     } catch (err) {
       if (err?.code !== 'ENOENT') console.warn('[terminal] pasted image unreadable:', err?.code || err?.message);
       return null;

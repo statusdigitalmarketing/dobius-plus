@@ -66,7 +66,7 @@
     "test:chatactivity": "node ./electron/__tests__/chat-activity.test.mjs",
     "test:chatrows": "node ./electron/__tests__/chat-rows.test.mjs",
     "test:childenv": "node ./electron/__tests__/claude-child-env.test.mjs",
-    "test:pastedimg": "node ./electron/__tests__/pasted-images.test.mjs",
+    "test:pastedimg": "node ./electron/__tests__/pasted-images.test.mjs && node --test ./electron/__tests__/pasted-image-store.test.mjs",
     "test:loosedismiss": "node ./electron/__tests__/loose-dismiss.test.mjs",
     "test:termfont": "node ./electron/__tests__/terminal-font.test.mjs",
     "test:tailread": "node ./electron/__tests__/tail-read.test.mjs",

@@ -7,6 +7,10 @@
 // plain text. A path sent from the command bar is typed, not pasted, so Claude reads it as a file and draws no label
 // (checked on 2.1.325); nothing is watched then.
 //
+// Accepted: any text in the tab that reads [Image #N] for a recorded N is clickable, so a program printing that string
+// opens the person's own pasted image (shown only to them, nothing leaves the Mac). Claude repaints its prompt, so a
+// label's screen position cannot be tracked to bind the link to the one occurrence Claude drew.
+//
 // ponytail: the number is per Claude session but the map is per tab, newest paste wins. After /clear or a new session in
 // the same tab, an old [Image #2] in the scrollback opens the newer #2. Upgrade path: key by session id once the
 // renderer knows it.
@@ -92,26 +96,31 @@ export function labelsOnScreen(term) {
 }
 
 /**
- * After image paths were pasted into Claude's prompt: wait for the new [Image #N]
- * labels Claude draws and record them, oldest path to lowest new number. `before` is labelsOnScreen() taken before the
- * paths went in. Claude's counter only goes up, so new labels are numbers above everything that was on screen. Gives up
- * quietly after `ms` (a label it never saw stays plain text).
+ * After image paths were pasted into Claude's prompt: wait for the new [Image #N] labels Claude draws and record them,
+ * oldest path to lowest new number, each label as soon as it appears. `before` is labelsOnScreen() taken before the
+ * paths went in; a new label is any number not on screen then (never "above the highest", which a printed
+ * [Image #9000] would block forever). One watch per tab: a paste made while another is still being watched joins it,
+ * so one label can never be given to two pastes. Gives up quietly after `ms` from the latest paste (a label it never
+ * saw stays plain text).
  */
+const watches = new Map(); // tab id -> { getTerm, seen: Set, paths: [], until }
 export function watchForImageLabels(tabId, getTerm, paths, before, ms = WATCH_MS) {
   const list = (Array.isArray(paths) ? paths : [paths]).filter((p) => typeof p === 'string');
   if (!list.length) return;
-  const floor = Math.max(0, ...before);
-  const started = Date.now();
+  const open = watches.get(tabId);
+  // Joining: keep the first paste's `before` (a later one may already include the earlier paste's label).
+  if (open) { open.paths.push(...list); open.getTerm = getTerm; open.until = Date.now() + ms; return; }
+  const job = { getTerm, seen: new Set(before), paths: list.slice(), until: Date.now() + ms };
+  watches.set(tabId, job);
   const tick = () => {
-    const seen = [...labelsOnScreen(getTerm())].filter((n) => n > floor && !before.has(n)).sort((x, y) => x - y);
-    const done = seen.length >= list.length;
-    if (done || (Date.now() - started >= ms && seen.length)) {
-      // Fewer labels than paths: the newest labels belong to the newest paths.
-      const pairs = seen.slice(-list.length);
-      list.slice(-pairs.length).forEach((p, i) => recordImageLabel(tabId, pairs[i], p));
-      return;
+    const fresh = [...labelsOnScreen(job.getTerm())].filter((n) => !job.seen.has(n)).sort((x, y) => x - y);
+    for (const n of fresh) {
+      if (!job.paths.length) break;
+      recordImageLabel(tabId, n, job.paths.shift());
+      job.seen.add(n);
     }
-    if (Date.now() - started < ms) setTimeout(tick, WATCH_EVERY_MS);
+    if (!job.paths.length || Date.now() >= job.until) { watches.delete(tabId); return; }
+    setTimeout(tick, WATCH_EVERY_MS);
   };
   setTimeout(tick, WATCH_EVERY_MS);
 }

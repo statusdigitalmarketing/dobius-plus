@@ -57,4 +57,21 @@ term = fakeTerm(['[Image #4]', '> [Image #5] [Image #6] what is this']);
 await new Promise((r) => setTimeout(r, 300));
 assert.equal(imageForLabel('tab-d', 5), '/a/1.png');
 assert.equal(imageForLabel('tab-d', 6), '/a/2.png');
+// Two pastes before Claude draws either: one joint watch, so #1 goes to the first and #2 to the second.
+term = fakeTerm(['>']);
+watchForImageLabels('tab-e', () => term, ['/e/A.png'], labelsOnScreen(term));
+watchForImageLabels('tab-e', () => term, ['/e/B.png'], labelsOnScreen(term));
+term = fakeTerm(['> [Image #1]']);
+await new Promise((r) => setTimeout(r, 200));
+term = fakeTerm(['> [Image #1] [Image #2]']);
+await new Promise((r) => setTimeout(r, 300));
+assert.equal(imageForLabel('tab-e', 1), '/e/A.png');
+assert.equal(imageForLabel('tab-e', 2), '/e/B.png');
+// A printed [Image #9000] on screen does not block Claude's real #1.
+term = fakeTerm(['output: [Image #9000]', '>']);
+watchForImageLabels('tab-f', () => term, ['/f/1.png'], labelsOnScreen(term));
+term = fakeTerm(['output: [Image #9000]', '> [Image #1]']);
+await new Promise((r) => setTimeout(r, 300));
+assert.equal(imageForLabel('tab-f', 1), '/f/1.png');
+assert.equal(imageForLabel('tab-f', 9000), null);
 console.log('ALL PASS  (pasted-images)');
