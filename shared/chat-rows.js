@@ -414,11 +414,15 @@ export function stepSummary(steps) {
  * { kind: 'turn', start, end, steps, summary } where start..end are the turn's assistant row indexes (inclusive),
  * steps counts its tool and thinking blocks, and summary is its last text block (null when it has none).
  * A turn with no steps is not folded: its rows come back as plain row segments.
+ * A folded turn is always followed by a person row (index end + 1), whose key is the turn's stable identity: the
+ * turn's own first row can change as the transcript window slides (Codex P2).
  */
 export function foldTurns(rows) {
   const list = Array.isArray(rows) ? rows : [];
   let lastPerson = -1;
-  for (let i = list.length - 1; i >= 0; i--) if (list[i]?.role === 'user') { lastPerson = i; break; }
+  // A queued send (main marks it `queued`) is not a boundary: Claude is still working on the exchange before it, and
+  // folding that would hide the tool it is running (Codex P1).
+  for (let i = list.length - 1; i >= 0; i--) if (list[i]?.role === 'user' && !list[i].queued) { lastPerson = i; break; }
   const out = [];
   let i = 0;
   while (i < list.length) {

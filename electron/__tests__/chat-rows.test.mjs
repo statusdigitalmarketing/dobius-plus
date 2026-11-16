@@ -331,6 +331,11 @@ console.log('PASS  row keys survive a sliding window');
   assert.deepEqual(foldTurns([claude(tool('Read'), txt('done')), you('next')])[0], { kind: 'turn', start: 0, end: 0, steps: 1, summary: 'done' });
   // No person row at all: nothing is older than the live exchange, nothing folds.
   assert.deepEqual(foldTurns([claude(tool('Read'))]), [{ kind: 'row', index: 0 }]);
+  // A queued send is not a boundary: the exchange Claude is still working on stays open (Codex P1).
+  const queued = foldTurns([...rows, { role: 'user', content: 'then test it', queued: true }]);
+  assert.deepEqual(queued.slice(-3), [{ kind: 'row', index: 5 }, { kind: 'row', index: 6 }, { kind: 'row', index: 7 }]);
+  // Every folded turn is followed by a person row (its stable key).
+  for (const seg of foldTurns([...rows, you('ship it')])) if (seg.kind === 'turn') assert.equal([...rows, you('ship it')][seg.end + 1].role, 'user');
   // Plain rows (no blocks) count as text, and junk input never throws.
   assert.deepEqual(foldTurns([you('a'), { role: 'assistant', content: 'plain reply' }, you('b')]).map((s) => s.kind), ['row', 'row', 'row']);
   assert.deepEqual(foldTurns(null), []);
