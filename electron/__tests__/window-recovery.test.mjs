@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { allowRecovery, renderGoneNeedsReload, loadFailNeedsReload, gpuGoneNeedsRepaint, installWindowRecovery, MAX_RECOVERIES, MAX_TOTAL_RECOVERIES } from '../window-recovery.js';
+import { allowRecovery, renderGoneNeedsReload, loadFailNeedsReload, gpuGoneNeedsRepaint, installWindowRecovery, recoveryUrl, MAX_RECOVERIES, MAX_TOTAL_RECOVERIES } from '../window-recovery.js';
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 function fakeWc(type = 'window') {
@@ -12,6 +12,10 @@ function fakeWc(type = 'window') {
   wc.isDestroyed = () => wc.destroyed;
   wc.reload = () => { wc.reloads += 1; };
   wc.invalidate = () => { wc.invalidates += 1; };
+  wc.crashed = true; wc.url = 'file:///app/dist/index.html?project=%2Fp'; wc.loaded = [];
+  wc.isCrashed = () => wc.crashed;
+  wc.getURL = () => wc.url;
+  wc.loadURL = (u) => { wc.loaded.push(u); };
   return wc;
 }
 function rig(gap) {
@@ -106,4 +110,40 @@ test('many windows dying at once reload one at a time, with an app-wide cap', as
   await wait(40 * 12);
   assert.equal(wins.reduce((n, w) => n + w.reloads, 0), MAX_TOTAL_RECOVERIES, 'the app-wide cap stops the storm');
   assert.match(logs.find(([k]) => k === 'window.recovery-stopped')[1], /app-wide/);
+});
+
+test('a window that loaded again before its turn is left alone', async () => {
+  const { open, logs } = rig();
+  const win = open('window');
+  win.emit('did-fail-load', {}, -102, 'refused', 'http://localhost:5173', true);
+  win.crashed = false;
+  win.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false }); // someone reloaded it
+  await wait(30);
+  assert.equal(win.reloads, 0);
+  assert.match(logs.find(([k]) => k === 'diag.window-recovery')[1], /skipped/);
+  // A same-document (hash) navigation is not a new load.
+  const w2 = open('window');
+  w2.emit('render-process-gone', {}, { reason: 'crashed' });
+  w2.emit('did-start-navigation', {}, 'file:///x#a', true, true);
+  await wait(30);
+  assert.equal(w2.reloads, 1);
+  // Still dead after a navigation started: reloaded anyway.
+  const w3 = open('window');
+  w3.emit('render-process-gone', {}, { reason: 'crashed' });
+  w3.emit('did-start-navigation', {}, 'file:///x', false, true);
+  await wait(30);
+  assert.equal(w3.reloads, 1);
+});
+
+test('a torn-off window comes back with its saved tab set', async () => {
+  assert.equal(recoveryUrl('http://localhost:5173/?project=%2Fp&tearOffTab=term-%2Fp-3&tearOffLabel=x'), 'http://localhost:5173/?project=%2Fp&tearOffTab=term-%2Fp-3&tearOffLabel=x&tearOffRestore=1');
+  assert.equal(recoveryUrl('file:///a/index.html?project=%2Fp&tearOffTab=t&tearOffRestore=1'), null);
+  assert.equal(recoveryUrl('file:///a/index.html?project=%2Fp'), null);
+  assert.equal(recoveryUrl('not a url'), null);
+  const { open } = rig();
+  const win = open('window');
+  win.url = 'file:///a/index.html?project=%2Fp&tearOffTab=term-%2Fp-3';
+  win.emit('render-process-gone', {}, { reason: 'crashed' });
+  await wait(30);
+  assert.deepEqual([win.reloads, win.loaded], [0, ['file:///a/index.html?project=%2Fp&tearOffTab=term-%2Fp-3&tearOffRestore=1']]);
 });

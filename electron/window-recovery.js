@@ -42,6 +42,19 @@ export function gpuGoneNeedsRepaint(details) {
 }
 
 /**
+ * Pure: the address to reload a window at. A torn-off window opened by a drag claims its one live tab; reloaded like
+ * that it would show only that tab and overwrite its saved set. With tearOffRestore=1 it loads its saved tab set, the
+ * way it comes back after a relaunch (Codex P1, PR 27). Anything else reloads as is (null).
+ */
+export function recoveryUrl(current) {
+  let u;
+  try { u = new URL(String(current || '')); } catch { return null; }
+  if (!u.searchParams.has('tearOffTab') || u.searchParams.get('tearOffRestore') === '1') return null;
+  u.searchParams.set('tearOffRestore', '1');
+  return u.href;
+}
+
+/**
  * Wire it up. `app` is Electron's app; `isQuitting()` is true while the app is shutting down (nothing is recovered
  * then); `log(kind, detail)` writes error.log; `allWindows()` lists the open BrowserWindows.
  */
@@ -50,6 +63,7 @@ export function installWindowRecovery({ app, isQuitting, log, allWindows, delayM
   const pending = new WeakSet(); // webContents waiting in the queue (two events for one death reload once)
   const queue = []; // [{ wc, why }], one entry per window at most, capped at MAX_QUEUED
   const total = []; // every reload's time, app-wide
+  const navs = new WeakMap(); // webContents -> main-frame navigations started (a newer one supersedes a queued reload)
   let timer = null;
 
   // One reload at a time, RECOVERY_GAP_MS apart: when memory pressure kills many windows at once they come back one by
@@ -61,7 +75,11 @@ export function installWindowRecovery({ app, isQuitting, log, allWindows, delayM
     if (!item) return;
     const { wc, why } = item;
     pending.delete(wc);
-    if (!isQuitting() && !wc.isDestroyed()) {
+    // The window moved on since the failure (a reload or navigation started, and the page is not dead): leave it, or
+    // the reload would kill the shells the new page just started (Codex P1, PR 27).
+    const superseded = !wc.isDestroyed() && (navs.get(wc) || 0) !== item.nav && !wc.isCrashed?.();
+    if (superseded) log('diag.window-recovery', `skipped: the window loaded again after ${why}`);
+    if (!superseded && !isQuitting() && !wc.isDestroyed()) {
       let times = history.get(wc);
       if (!times) { times = []; history.set(wc, times); }
       if (!allowRecovery(total, now(), { max: MAX_TOTAL_RECOVERIES })) {
@@ -75,7 +93,10 @@ export function installWindowRecovery({ app, isQuitting, log, allWindows, delayM
         log('window.recovery-stopped', `${why}: ${MAX_RECOVERIES} reloads in ${RECOVERY_WINDOW_MS / 60_000} min, leaving it`);
       } else {
         log('diag.window-recovery', `reloading a window after ${why}`);
-        try { wc.reload(); } catch (err) { log('window.recovery-failed', `${why}: ${err?.message || err}`); }
+        try {
+          const url = recoveryUrl(wc.getURL?.());
+          if (url) wc.loadURL(url); else wc.reload();
+        } catch (err) { log('window.recovery-failed', `${why}: ${err?.message || err}`); }
       }
     }
     if (queue.length) timer = setTimeout(drain, gapMs);
@@ -84,7 +105,7 @@ export function installWindowRecovery({ app, isQuitting, log, allWindows, delayM
   const recover = (wc, why) => {
     if (pending.has(wc) || queue.length >= MAX_QUEUED) return;
     pending.add(wc);
-    queue.push({ wc, why });
+    queue.push({ wc, why, nav: navs.get(wc) || 0 });
     if (!timer) timer = setTimeout(drain, delayMs);
   };
 
@@ -92,6 +113,11 @@ export function installWindowRecovery({ app, isQuitting, log, allWindows, delayM
     let type = '';
     try { type = wc.getType?.() || ''; } catch { type = ''; }
     if (type !== 'window') return; // a <webview> pane is a third-party page, never reloaded by us
+    wc.on('did-start-navigation', (...args) => {
+      // (event, url, isInPlace, isMainFrame) in Electron 33; also an event object with those fields in newer versions.
+      const d = args[0] && typeof args[0] === 'object' && 'isMainFrame' in args[0] ? args[0] : { isSameDocument: args[2], isMainFrame: args[3] };
+      if (d.isMainFrame && !(d.isSameDocument ?? d.isInPlace)) navs.set(wc, (navs.get(wc) || 0) + 1);
+    });
     wc.on('render-process-gone', (_ev, details) => {
       if (isQuitting() || !renderGoneNeedsReload(details)) return;
       recover(wc, `page process gone (${String(details?.reason || 'unknown').slice(0, 40)})`);
