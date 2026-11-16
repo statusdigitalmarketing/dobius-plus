@@ -7,6 +7,7 @@ import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, t
 import { parseSelector, parseSelectorFromScreen, stripAnsi, selectorFingerprint, selectorCountdown, spinnerStatus } from './selector-parser.js';
 export { selectorFingerprint };
 import { renderScreenLines, FILL } from './screen-render.js';
+import { FREE_TEXT_LABEL } from '../shared/chat-rows.js';
 
 // The live selector for a tab, via the headless-xterm SCREEN render (v1.0.62).
 // The old strip-and-regex path missed Ink's incremental repaints entirely: on
@@ -420,6 +421,45 @@ export async function answerSelector(id, data, token, stillOk0 = () => true, bef
   // The next key on this prompt (an arrow, then Enter) is read as of now.
   stampRead(id, `${next}|${fp}`, selectorCountdown(live));
   return { ok: true, token: `${next}|${fp}` };
+}
+
+/**
+ * Answer a question card with your own words (Asana 1220550214785317): option `num` must be the card's "Type
+ * something." row, on the live screen AND on the card the token was read from (the same fingerprint). Its number is
+ * pressed through answerSelector (every check it makes), then, once Claude shows that row selected with its input open,
+ * the text goes in through the usual guarded paste plus Enter. New lines become spaces: the input is one line.
+ * Returns { ok, stale?, reason? }; `reason` 'not-free-text' (that row is not the free-text option), 'not-open' (the
+ * input never showed) or the submit's own reason.
+ */
+const FREE_TEXT_OPEN_MS = 2000;
+export async function answerSelectorWithText(id, num, text, token, stillOk = () => true, beforeWrite = () => {}) {
+  if (!Number.isInteger(num) || num < 1 || num > 9 || typeof text !== 'string' || typeof token !== 'string') return { ok: false };
+  const line = text.replace(/\s*[\r\n]+\s*/g, ' ').trim();
+  if (!line) return { ok: false };
+  const fp = token.split('|')[1];
+  const isFree = (sel) => {
+    const opt = Array.isArray(sel?.options) ? sel.options.find((o) => o?.num === num) : null;
+    return !!opt && FREE_TEXT_LABEL.test(String(opt.label ?? '').trim());
+  };
+  let live = null;
+  try { live = await liveSelectorForTab(id); } catch { live = null; }
+  if (!live || selectorFingerprint(live) !== fp) return { ok: false, stale: true };
+  if (!isFree(live)) return { ok: false, reason: 'not-free-text' };
+  const r = await answerSelector(id, String(num), token, stillOk, beforeWrite);
+  if (!r?.ok) return r || { ok: false };
+  // The input is open once the free-text row is the selected one and still reads "Type something." (empty).
+  const started = Date.now();
+  for (;;) {
+    await new Promise((res) => setTimeout(res, 80));
+    if (!stillOk()) return { ok: false, reason: 'not_allowed' };
+    let now = null;
+    try { now = await liveSelectorForTab(id); } catch { now = null; }
+    const at = Array.isArray(now?.options) ? now.options[now.selectedIndex] : null;
+    if (at && at.num === num && isFree(now)) break;
+    if (Date.now() - started > FREE_TEXT_OPEN_MS) return { ok: false, reason: 'not-open' };
+  }
+  const sent = await submitPromptDetailed(id, line, stillOk);
+  return sent.ok ? { ok: true } : { ok: false, reason: sent.reason };
 }
 
 const SUBMIT_ENTER_DELAY_MS = 250;

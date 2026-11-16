@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/store';
 import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache, foldTurns } from '../../../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, freeTextOption, tokenFingerprint, createPressGuard, stepImages, createImageCache, foldTurns } from '../../../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../../../shared/chat-activity.js';
 import ModelMenu from './ModelMenu';
 import './ChatPane.css';
@@ -169,7 +169,7 @@ function ToolImages({ images }) {
 
 // Full size, modal: it takes focus and keeps it (Tab cannot reach the chat or
 // a selector card behind it, Codex), Escape/Enter or a click/tap closes it.
-function Lightbox({ url, onClose, alt = 'Tool output, full size' }) {
+export function Lightbox({ url, onClose, alt = 'Tool output, full size' }) {
   const ref = useRef(null);
   // Modal for real: anything that grabs focus while it is open (a new tab's
   // terminal in the other split pane) hands it straight back, so typing and
@@ -894,6 +894,9 @@ export default function ChatPane({ tabId, visible }) {
     // Claude is not running (`open `) still gets the path as its argument.
     const text = [typed, ...imgs.map((a) => shellEscape(a.path))].filter(Boolean).join(' ');
     if (!text) return;
+    // A question card is up: a paste plus Enter would pick whichever option is highlighted. Words go in as the
+    // card's "Type something." answer; a card without that row (a permission prompt) takes a button press first.
+    if (selector) { answerInOwnWords(text, typed, imgs); return; }
     setDraft('');
     setTabAttachments(tabId, []);
     setBigAtt(null);
@@ -906,6 +909,28 @@ export default function ChatPane({ tabId, visible }) {
       for (const a of imgs) deliverAttachment(tabId, a);
       deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, NOT_SENT);
     } else revokeAll(imgs);
+  };
+
+  const answerInOwnWords = async (text, typed, imgs) => {
+    const free = freeTextOption(selector);
+    if (!free) { flash('Claude is waiting for you to pick one of the options above. Pick one, or press Stop to dismiss it and type.'); return; }
+    if (!selector.token) { flash('One moment, the question is still updating. Try again.'); return; }
+    const token = selector.token;
+    setDraft('');
+    setTabAttachments(tabId, []);
+    setBigAtt(null);
+    dropPendingSelector();
+    setSelector(null);
+    atBottomRef.current = true;
+    let r = null;
+    try { r = await window.electronAPI?.chatAnswerText?.(tabId, free.num, text, token); } catch { r = null; }
+    if (!mountedRef.current) return;
+    if (r?.ok) { revokeAll(imgs); refreshSoon(); return; }
+    // Pasted but the Enter withheld: the words already sit in Claude's input, so handing them back would send them twice.
+    if (r?.reason === 'stranded') { revokeAll(imgs); deliverDraft(tabId, (cur) => cur, STRANDED); pollSelector(5); return; }
+    for (const a of imgs) deliverAttachment(tabId, a);
+    deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, r?.stale ? 'That question changed. Nothing was sent, check it again.' : 'Not sent. Your answer is back in the box.');
+    pollSelector(5);
   };
 
   const removeAtt = (path) => {
@@ -1089,7 +1114,9 @@ export default function ChatPane({ tabId, visible }) {
     if (!a || a === document.body || a === modelChipRef.current) inputRef.current?.focus();
   });
 
-  const placeholder = sessionId
+  const placeholder = selector
+    ? (freeTextOption(selector) ? 'Type your own answer and press Enter...' : 'Pick an option above first...')
+    : sessionId
     ? (claudeLive ? 'Message Claude...' : 'Claude exited. Input goes to the terminal...')
     : (claudeLive ? 'Message Claude...' : 'Type a command for the terminal...');
 

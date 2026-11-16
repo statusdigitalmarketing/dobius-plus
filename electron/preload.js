@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   chatModelState: (id, sessionId) => ipcRenderer.invoke('chat:modelState', id, sessionId),
   chatSetModel: (id, sessionId, choice) => ipcRenderer.invoke('chat:setModel', id, sessionId, choice),
   chatKey: (id, data, token) => ipcRenderer.invoke('chat:key', id, data, token),
+  chatAnswerText: (id, num, text, token) => ipcRenderer.invoke('chat:answerText', id, num, text, token),
   terminalResize: (id, cols, rows) => ipcRenderer.send('terminal:resize', id, cols, rows),
   terminalKill: (id) => ipcRenderer.send('terminal:kill', id),
   terminalGetProcess: (id) => ipcRenderer.invoke('terminal:getProcess', id),
@@ -474,6 +475,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Save clipboard image to temp file, return path
   saveClipboardImage: (base64Data, mimeType) => ipcRenderer.invoke('terminal:saveClipboardImage', base64Data, mimeType),
+  readPastedImage: (filePath) => ipcRenderer.invoke('terminal:readPastedImage', filePath),
 
   // Quit gate
   onQuitPrompt: (callback) => {

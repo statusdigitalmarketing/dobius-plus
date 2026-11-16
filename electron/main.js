@@ -49,7 +49,8 @@ import { isTerminalReply } from './terminal-reply.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { createSnoozeStore } from './tab-snooze.js';
-import { terminalTextTail, terminalScreenText, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, submitPending, setPhoneTabCheck } from './chat-service.js';
+import { dropClaudeChildMarkers } from './claude-child-env.js';
+import { terminalTextTail, terminalScreenText, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, answerSelectorWithText, activityForTab, submitPending, setPhoneTabCheck } from './chat-service.js';
 import { launchCommandFor, claudeLaunchOptions, normalizeNewTabModel, normalizeNewTabPermissionMode, CLAUDE_AUTH_ENV } from '../shared/new-tab.js';
 import { sanitizeAccountPin } from '../shared/tab-label.js';
 import { renderScreenLines } from './screen-render.js';
@@ -165,6 +166,8 @@ import { isAbsPath, isInsidePath } from '../shared/platform.js';
 // symlink. None of them are installed or upgraded on Windows yet; Windows tabs
 // still get status from terminal output.
 const IS_WIN = process.platform === 'win32';
+// Tabs are new top-level Claude sessions, never children of whatever started the app (electron/claude-child-env.js).
+{ const dropped = dropClaudeChildMarkers(process.env); if (dropped.length) console.log(`[env] dropped inherited Claude session markers: ${dropped.join(', ')}`); }
 const WIN_UNSUPPORTED = { error: 'Not available on Windows yet.' };
 
 // A project's task list changed: every window's Tasks dropdown and every open phone To-do / Asana screen read again
@@ -931,6 +934,28 @@ function setupTerminalHandlers() {
     fs.writeFileSync(filePath, Buffer.from(base64Data, 'base64'));
     return filePath;
   });
+  // The preview for a pasted [Image #N] in the terminal (src/lib/pasted-images.js). Only a file the save handler above
+  // names (clipboard-<ms>.<ext> directly inside <temp>/dobius-clipboard), checked on the real path, within the size cap.
+  // Returns a data URL, or null when it is gone (the OS clears temp files) or anything does not fit.
+  const CLIPBOARD_NAME_RE = /^clipboard-\d{10,16}\.(png|jpg|gif|webp)$/;
+  const MIME_BY_EXT = { png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
+  ipcMain.handle('terminal:readPastedImage', async (_event, filePath) => {
+    if (typeof filePath !== 'string' || filePath.length > 1024) return null;
+    const m = CLIPBOARD_NAME_RE.exec(path.basename(filePath.replace(/\\/g, '/')));
+    if (!m) return null;
+    try {
+      // By name inside this folder only: the renderer may hold the path as it was typed (cut at a space).
+      const dir = await fs.promises.realpath(path.join(app.getPath('temp'), 'dobius-clipboard'));
+      const real = await fs.promises.realpath(path.join(dir, m[0]));
+      if (path.dirname(real) !== dir || path.basename(real) !== m[0]) return null;
+      const st = await fs.promises.stat(real);
+      if (!st.isFile() || st.size > MAX_IMAGE_SIZE) return null;
+      return `data:${MIME_BY_EXT[m[1]]};base64,${(await fs.promises.readFile(real)).toString('base64')}`;
+    } catch (err) {
+      if (err?.code !== 'ENOENT') console.warn('[terminal] pasted image unreadable:', err?.code || err?.message);
+      return null;
+    }
+  });
 }
 
 function setupDataHandlers() {
@@ -1256,6 +1281,14 @@ function setupDataHandlers() {
     const senderId = event.sender.id;
     if (!ownsTerminal(senderId, tabId)) return { ok: false };
     return answerSelector(tabId, data, token, () => ownsTerminal(senderId, tabId), () => cancelAutoResumeTab(tabId));
+  });
+  // Your own words as the answer to a question card's "Type something." row (chat-service answerSelectorWithText).
+  ipcMain.handle('chat:answerText', async (event, tabId, num, text, token) => {
+    if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return { ok: false };
+    if (typeof text !== 'string' || !text.trim() || Buffer.byteLength(text, 'utf8') > TERMINAL_WRITE_MAX_BYTES) return { ok: false };
+    const senderId = event.sender.id;
+    if (!ownsTerminal(senderId, tabId)) return { ok: false };
+    return answerSelectorWithText(tabId, num, text, token, () => ownsTerminal(senderId, tabId), () => cancelAutoResumeTab(tabId));
   });
   ipcMain.handle('chat:submit', async (event, tabId, text) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return false;

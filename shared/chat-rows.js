@@ -200,6 +200,16 @@ export function tokenFingerprint(token) {
   return at === -1 ? '' : token.slice(at + 1);
 }
 
+// The option Claude Code's AskUserQuestion card offers for your own words ("3. Type something.", verified on 2.1.325):
+// pressing its number opens an input in place, pasted text goes into it, Enter sends it as the answer. Chat sends typed
+// text through it while such a card is up (Asana 1220550214785317), never as a bare paste plus Enter, which would pick
+// whatever option is highlighted.
+export const FREE_TEXT_LABEL = /^type something\.?$/i;
+export function freeTextOption(sel) {
+  if (!sel || !Array.isArray(sel.options)) return null;
+  return sel.options.find((o) => FREE_TEXT_LABEL.test(String(o?.label ?? '').trim())) || null;
+}
+
 /**
  * A React key for a selector card. A different prompt remounts the card, so a
  * press that began on prompt A's button can never complete as a click on

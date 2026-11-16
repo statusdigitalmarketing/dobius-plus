@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { writes, ptys, writeTerminal, emitOutput, emitRawOutput, closing, buffers, inputAges, cols, altAtStart, trimmed } from './fake-terminal-manager.mjs';
 
-const { submitPromptToTab, writeRawInput, selectorToken, submitPending, selectorFingerprint, readSelectorForAnswer, answerSelector } = await import('../chat-service.js');
+const { submitPromptToTab, writeRawInput, selectorToken, submitPending, selectorFingerprint, readSelectorForAnswer, answerSelector, answerSelectorWithText } = await import('../chat-service.js');
 let pass = 0;
 const ok = (n) => { console.log(`PASS  ${n}`); pass += 1; };
 const reset = () => { writes.length = 0; ptys.clear(); closing.clear(); buffers.clear(); inputAges.clear(); trimmed.clear(); };
@@ -629,5 +629,46 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   assert.equal(csi.slice(screenTailStart(csi, csi.length - 52)), '\x1b[31mred');
   ok('the cut never starts inside an escape sequence or a long title');
 }
+
+// 23. Your own words as a question card's answer (Asana 1220550214785317). Laid out as Claude Code 2.1.325 draws an
+// AskUserQuestion card; pressing the "Type something." number opens its input in place (verified live), then the words
+// are pasted and Enter sends them. Any other row is refused (its number would pick it), and so is a changed card.
+{
+  const rule = '─'.repeat(80);
+  const card = (sel) => ['', rule, ' ☐ Color ', 'Pick a color',
+    `${sel === 1 ? '❯' : ' '} 1. Red`, '     Choose red',
+    `${sel === 2 ? '❯' : ' '} 2. Blue`, '     Choose blue',
+    `${sel === 3 ? '❯' : ' '} 3. Type something.`, rule, '  4. Chat about this',
+    'Enter to select · ↑/↓ to navigate · Esc to cancel', ''].join('\r\n');
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
+  const r = await readSelectorForAnswer('a');
+  assert.ok(r?.token, 'the card reads as answerable');
+  assert.equal(r.selector.options.find((o) => o.num === 3)?.label, 'Type something.');
+  assert.deepEqual(await answerSelectorWithText('a', 1, 'purple', r.token), { ok: false, reason: 'not-free-text' });
+  assert.deepEqual(await answerSelectorWithText('a', 3, '   ', r.token), { ok: false });
+  assert.deepEqual([...writes], [], 'a refused answer writes nothing');
+  emitRawOutput('a');
+  assert.deepEqual(await answerSelectorWithText('a', 3, 'purple', r.token), { ok: false, stale: true });
+  assert.deepEqual([...writes], []);
+  // Claude opens the input after the number: the words go in only then, as one line.
+  emitOutput('a');
+  const r2 = await readSelectorForAnswer('a');
+  const pending = answerSelectorWithText('a', 3, 'purple\n  haze', r2.token);
+  await new Promise((res) => setTimeout(res, 40));
+  assert.deepEqual(writes.map((w) => w[1]), ['3'], 'nothing pasted before the input shows');
+  buffers.set('a', card(3)); emitOutput('a');
+  assert.deepEqual(await pending, { ok: true });
+  assert.deepEqual(writes.map((w) => w[1]), ['3', PASTE('purple haze'), '\r']);
+  // The input never opens (the card went away): nothing is pasted.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
+  const r3 = await readSelectorForAnswer('a');
+  const lost = answerSelectorWithText('a', 3, 'teal', r3.token);
+  await new Promise((res) => setTimeout(res, 40));
+  buffers.set('a', '\r\n> \r\n'); emitOutput('a');
+  assert.deepEqual(await lost, { ok: false, reason: 'not-open' });
+  assert.deepEqual(writes.map((w) => w[1]), ['3']);
+  cols.delete('a');
+}
+ok('own words answer only the Type something row, after its input opens');
 
 console.log(`\n${pass} passed`);
