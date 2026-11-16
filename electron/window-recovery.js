@@ -56,9 +56,10 @@ export function recoveryUrl(current) {
 
 /**
  * Wire it up. `app` is Electron's app; `isQuitting()` is true while the app is shutting down (nothing is recovered
- * then); `log(kind, detail)` writes error.log; `allWindows()` lists the open BrowserWindows.
+ * then); `log(kind, detail)` writes error.log; `allWindows()` lists the open BrowserWindows; `handoffPending(wc)` is
+ * true while a torn-off window has not yet claimed its tab's live PTY (it must reload into that same claim).
  */
-export function installWindowRecovery({ app, isQuitting, log, allWindows, delayMs = RECOVERY_DELAY_MS, gapMs = RECOVERY_GAP_MS, now = Date.now }) {
+export function installWindowRecovery({ app, isQuitting, log, allWindows, handoffPending = () => false, delayMs = RECOVERY_DELAY_MS, gapMs = RECOVERY_GAP_MS, now = Date.now }) {
   const history = new WeakMap(); // webContents -> reload times (dropped with the webContents)
   const pending = new WeakSet(); // webContents waiting in the queue (two events for one death reload once)
   const queue = []; // [{ wc, why }], one entry per window at most, capped at MAX_QUEUED
@@ -96,7 +97,9 @@ export function installWindowRecovery({ app, isQuitting, log, allWindows, delayM
         log('diag.window-recovery', `reloading a window after ${why}`);
         lastReloadAt = now();
         try {
-          const url = recoveryUrl(wc.getURL?.());
+          // A drag tear-off that has not claimed its PTY yet reloads as is: it still has a grant to claim with, and a
+          // restore address would create instead and lose the handoff (Codex P2, PR 27).
+          const url = handoffPending(wc) ? null : recoveryUrl(wc.getURL?.());
           if (url) wc.loadURL(url); else wc.reload();
         } catch (err) { log('window.recovery-failed', `${why}: ${err?.message || err}`); }
       }
@@ -105,7 +108,14 @@ export function installWindowRecovery({ app, isQuitting, log, allWindows, delayM
   };
 
   const recover = (wc, why) => {
-    if (pending.has(wc) || queue.length >= MAX_QUEUED) return;
+    if (pending.has(wc)) {
+      // Failed again while waiting (a replacement load failed too): the request now stands for the newest failure, or
+      // the supersede check would drop it as if the window had recovered (Codex P2, PR 27).
+      const item = queue.find((q) => q.wc === wc);
+      if (item) { item.nav = navs.get(wc) || 0; item.why = why; }
+      return;
+    }
+    if (queue.length >= MAX_QUEUED) return;
     pending.add(wc);
     queue.push({ wc, why, nav: navs.get(wc) || 0 });
     if (!timer) timer = setTimeout(drain, Math.max(delayMs, lastReloadAt + gapMs - now()));

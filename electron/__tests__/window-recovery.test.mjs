@@ -18,11 +18,11 @@ function fakeWc(type = 'window') {
   wc.loadURL = (u) => { wc.loaded.push(u); };
   return wc;
 }
-function rig(gap) {
+function rig(gap, handoffPending) {
   const app = new EventEmitter();
   const logs = [];
   const state = { quitting: false, clock: 1_000_000, windows: [], gap };
-  installWindowRecovery({ app, isQuitting: () => state.quitting, log: (k, d) => logs.push([k, d]), allWindows: () => state.windows, delayMs: 5, gapMs: state.gap ?? 5, now: () => state.clock });
+  installWindowRecovery({ app, isQuitting: () => state.quitting, log: (k, d) => logs.push([k, d]), allWindows: () => state.windows, handoffPending, delayMs: 5, gapMs: state.gap ?? 5, now: () => state.clock });
   const open = (type) => { const wc = fakeWc(type); app.emit('web-contents-created', {}, wc); state.windows.push({ webContents: wc, isDestroyed: () => false }); return wc; };
   return { app, logs, state, open };
 }
@@ -161,4 +161,26 @@ test('the gap holds when the queue empties between deaths', async () => {
   assert.equal(b.reloads, 0, 'not after the short first delay');
   await wait(60);
   assert.equal(b.reloads, 1, 'after the gap from the last reload');
+});
+
+test('a tear-off still claiming its PTY reloads into the claim, not the restore', async () => {
+  const claiming = new Set();
+  const { open } = rig(undefined, (wc) => claiming.has(wc));
+  const win = open('window');
+  win.url = 'file:///a/index.html?project=%2Fp&tearOffTab=term-%2Fp-3';
+  claiming.add(win);
+  win.emit('render-process-gone', {}, { reason: 'crashed' });
+  await wait(30);
+  assert.deepEqual([win.reloads, win.loaded.length], [1, 0]);
+});
+
+test('a replacement load that fails too keeps the reload queued', async () => {
+  const { open } = rig(30);
+  const win = open('window');
+  win.crashed = false;
+  win.emit('did-fail-load', {}, -102, 'refused', 'http://localhost:5173', true);
+  win.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+  win.emit('did-fail-load', {}, -102, 'refused', 'http://localhost:5173', true);
+  await wait(40);
+  assert.equal(win.reloads, 1);
 });

@@ -5381,7 +5381,7 @@ function setupCrashLogging() {
 app.whenReady().then(() => {
   installErrorLog();
   // A window whose page process died or failed to load is reloaded instead of left blank (window-recovery.js).
-  installWindowRecovery({ app, isQuitting: getQuitting, log: logLine, allWindows: () => BrowserWindow.getAllWindows() });
+  installWindowRecovery({ app, isQuitting: getQuitting, log: logLine, allWindows: () => BrowserWindow.getAllWindows(), handoffPending: (wc) => [...tearOffGrants.values()].includes(wc.id) });
   // Phone mode first: its claim gate holds an earlier run's sessions from here on, before any window, History or
   // auto-resume can ask for one. The startup sweep runs in the background.
   void setupPhoneMode().catch((err) => { logLine('phone', `setup failed: ${err?.message || err}`); });
