@@ -18,11 +18,11 @@ function fakeWc(type = 'window') {
   wc.loadURL = (u) => { wc.loaded.push(u); };
   return wc;
 }
-function rig(gap, handoffPending) {
+function rig(gap, handoffPending, extra = {}) {
   const app = new EventEmitter();
   const logs = [];
   const state = { quitting: false, clock: 1_000_000, windows: [], gap };
-  installWindowRecovery({ app, isQuitting: () => state.quitting, log: (k, d) => logs.push([k, d]), allWindows: () => state.windows, handoffPending, delayMs: 5, gapMs: state.gap ?? 5, now: () => state.clock });
+  installWindowRecovery({ app, isQuitting: () => state.quitting, log: (k, d) => logs.push([k, d]), allWindows: () => state.windows, handoffPending, ...extra, delayMs: 5, gapMs: state.gap ?? 5, now: () => state.clock });
   const open = (type) => { const wc = fakeWc(type); app.emit('web-contents-created', {}, wc); state.windows.push({ webContents: wc, isDestroyed: () => false }); return wc; };
   return { app, logs, state, open };
 }
@@ -183,4 +183,34 @@ test('a replacement load that fails too keeps the reload queued', async () => {
   win.emit('did-fail-load', {}, -102, 'refused', 'http://localhost:5173', true);
   await wait(40);
   assert.equal(win.reloads, 1);
+});
+
+test('a window being closed is never reloaded', async () => {
+  const closing = new Set();
+  const { open, logs } = rig(undefined, undefined, { isClosing: (wc) => closing.has(wc) });
+  const win = open('window');
+  win.emit('render-process-gone', {}, { reason: 'crashed' });
+  closing.add(win);
+  await wait(30);
+  assert.equal(win.reloads, 0);
+  assert.match(logs.find(([k]) => k === 'diag.window-recovery')[1], /closing/);
+});
+
+test('a window sending a tab away reloads only after the move settles', async () => {
+  const sending = new Set();
+  const { open } = rig(10, undefined, { isSendingTab: (wc) => sending.has(wc) });
+  const win = open('window');
+  sending.add(win);
+  win.emit('render-process-gone', {}, { reason: 'crashed' });
+  await wait(40);
+  assert.equal(win.reloads, 0, 'waits while the tab is moving');
+  sending.delete(win);
+  await wait(30);
+  assert.equal(win.reloads, 1, 'then reloads');
+  // A move that never settles does not hold the window blank forever.
+  const w2 = open('window');
+  sending.add(w2);
+  w2.emit('render-process-gone', {}, { reason: 'crashed' });
+  await wait(150);
+  assert.equal(w2.reloads, 1);
 });

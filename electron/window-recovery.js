@@ -16,6 +16,7 @@ export const RECOVERY_DELAY_MS = 1000;
 export const RECOVERY_GAP_MS = 5000; // between two windows' reloads, app-wide
 export const MAX_TOTAL_RECOVERIES = 6; // reloads across all windows per RECOVERY_WINDOW_MS
 const MAX_QUEUED = 64; // windows waiting to reload (there is never more than one entry per window)
+const MAX_DEFERS = 6; // RECOVERY_GAP_MS each: a tab move settles within 10 s (main's claim timeout)
 const ERR_ABORTED = -3; // a navigation replaced by another one: not a failure
 
 /** Pure: may this window be reloaded now? `times` is its recent reload times, oldest first (trimmed and appended). */
@@ -58,8 +59,10 @@ export function recoveryUrl(current) {
  * Wire it up. `app` is Electron's app; `isQuitting()` is true while the app is shutting down (nothing is recovered
  * then); `log(kind, detail)` writes error.log; `allWindows()` lists the open BrowserWindows; `handoffPending(wc)` is
  * true while a torn-off window has not yet claimed its tab's live PTY (it must reload into that same claim).
+ * `isClosing(wc)` is true once the person closed that window (it is saving its tabs' last output: never reload it);
+ * `isSendingTab(wc)` is true while a tab is moving out of it to another window (its reload waits for the move).
  */
-export function installWindowRecovery({ app, isQuitting, log, allWindows, handoffPending = () => false, delayMs = RECOVERY_DELAY_MS, gapMs = RECOVERY_GAP_MS, now = Date.now }) {
+export function installWindowRecovery({ app, isQuitting, log, allWindows, handoffPending = () => false, isClosing = () => false, isSendingTab = () => false, delayMs = RECOVERY_DELAY_MS, gapMs = RECOVERY_GAP_MS, now = Date.now }) {
   const history = new WeakMap(); // webContents -> reload times (dropped with the webContents)
   const pending = new WeakSet(); // webContents waiting in the queue (two events for one death reload once)
   const queue = []; // [{ wc, why }], one entry per window at most, capped at MAX_QUEUED
@@ -81,7 +84,17 @@ export function installWindowRecovery({ app, isQuitting, log, allWindows, handof
     // the reload would kill the shells the new page just started (Codex P1, PR 27).
     const superseded = !wc.isDestroyed() && (navs.get(wc) || 0) !== item.nav && !wc.isCrashed?.();
     if (superseded) log('diag.window-recovery', `skipped: the window loaded again after ${why}`);
-    if (!superseded && !isQuitting() && !wc.isDestroyed()) {
+    const alive = !superseded && !isQuitting() && !wc.isDestroyed();
+    // Closing: its tabs are being stopped and saved; a reload would replace them mid-save (Codex P2, PR 27).
+    if (alive && isClosing(wc)) {
+      log('diag.window-recovery', `skipped: the window is closing (${why})`);
+    } else if (alive && isSendingTab(wc) && (item.defers || 0) < MAX_DEFERS) {
+      // A tab is moving out of it: reloading now would restore that tab here too, as a dead copy. Wait for the move;
+      // main then updates its saved tabs either way (Codex P2, PR 27).
+      item.defers = (item.defers || 0) + 1;
+      pending.add(wc);
+      queue.push(item);
+    } else if (alive) {
       let times = history.get(wc);
       if (!times) { times = []; history.set(wc, times); }
       if (!allowRecovery(total, now(), { max: MAX_TOTAL_RECOVERIES })) {
