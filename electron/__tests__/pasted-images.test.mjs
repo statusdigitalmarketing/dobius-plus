@@ -121,4 +121,16 @@ await new Promise((r) => setTimeout(r, 300));
 assert.equal(imageForLabel('tab-j', 1), '/j/A.png');
 assert.equal(imageForLabel('tab-j', 2), '/j/B.png');
 assert.equal(imageForLabel('tab-j', 9000), null);
+// A joins, its label and a printed one appear before the tick, then B pastes: #1 is A's, #9000 is nobody's.
+term = fakeTerm(['>']);
+const kA = reserveImageLabel('tab-k', () => term, labelsOnScreen(term));
+kA('/k/A.png');
+term = fakeTerm(['printed: [Image #9000]', '> [Image #1]']);
+const kB = reserveImageLabel('tab-k', () => term, labelsOnScreen(term));
+kB('/k/B.png');
+term = fakeTerm(['printed: [Image #9000]', '> [Image #1] [Image #2]']);
+await new Promise((r) => setTimeout(r, 300));
+assert.equal(imageForLabel('tab-k', 1), '/k/A.png');
+assert.equal(imageForLabel('tab-k', 2), '/k/B.png');
+assert.equal(imageForLabel('tab-k', 9000), null);
 console.log('ALL PASS  (pasted-images)');

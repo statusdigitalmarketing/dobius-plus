@@ -102,7 +102,7 @@ export function labelsOnScreen(term) {
  * [Image #N] in paste order, so the first new label goes to the first place in line, whichever save finished first.
  * `before` is labelsOnScreen() at paste time; a new label is any number not on screen then (never "above the highest",
  * which a printed [Image #9000] would block forever). One watch per tab: a paste made while another is still watched
- * joins it, keeping the first paste's `before`. Gives up quietly `ms` after the latest paste (a label it never saw
+ * joins it: labels already drawn go to the earlier pastes first, and the rest of this paste's `before` is excluded. Gives up quietly `ms` after the latest paste (a label it never saw
  * stays plain text).
  */
 const watches = new Map(); // tab id -> { getTerm, seen: Set, slots: [{ path, label }], until }
@@ -121,6 +121,10 @@ export function reserveImageLabel(tabId, getTerm, before, ms = WATCH_MS) {
     setTimeout(tick, WATCH_EVERY_MS);
   } else if (!job.slots.length) {
     job.seen = new Set(before); // everything before was settled: this paste's own screen is the baseline
+  } else {
+    // Earlier pastes take the labels already drawn for them; anything else on screen now is not this paste's.
+    settleSlots(tabId, job);
+    for (const n of before) job.seen.add(n);
   }
   job.getTerm = getTerm;
   job.until = Date.now() + ms;

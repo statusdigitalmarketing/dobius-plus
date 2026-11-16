@@ -326,7 +326,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
           })();
           // The label goes to this image only if its path really reached Claude's prompt (a paste dropped because
           // the prompt went away gives its place up).
-          const delivered = label ? (ok) => saved.then((p) => label(ok && p ? p : null), () => label(null)) : null;
+          const delivered = label ? (ok) => { if (!ok) label(null); else saved.then((p) => label(p || null), () => label(null)); } : null;
           const inPrompt = insertPath(saved, delivered);
           if (label) {
             inPrompt.then((took) => { if (!took) label(null); },

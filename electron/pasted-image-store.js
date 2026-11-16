@@ -36,7 +36,7 @@ export async function readSavedImage(dir, name, maxBytes) {
   if (!want) return null;
   const dst = await fs.promises.lstat(dir);
   if (!dst.isDirectory()) return null; // a symlinked folder lstats as a link, not a directory
-  const fh = await fs.promises.open(path.join(dir, name), fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  const fh = await fs.promises.open(path.join(dir, name), fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
   try {
     const st = await fh.stat();
     if (!st.isFile() || st.size > maxBytes) return null;

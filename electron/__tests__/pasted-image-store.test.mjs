@@ -40,6 +40,17 @@ test('changed bytes, a symlinked file and a symlinked folder are refused', async
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test('a named pipe in place of a saved image is refused without waiting for a writer', { skip: process.platform === 'win32' }, async () => {
+  const { root, dir } = setup();
+  fs.writeFileSync(path.join(dir, NAME), PNG); recordSavedImage(NAME, PNG);
+  fs.rmSync(path.join(dir, NAME));
+  const { execFileSync } = await import('node:child_process');
+  execFileSync('mkfifo', [path.join(dir, NAME)]);
+  const r = await Promise.race([readSavedImage(dir, NAME, 1024), new Promise((res) => setTimeout(() => res('hung'), 2000))]);
+  assert.equal(r, null);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test('over the cap is refused, and only this run\'s records count', async () => {
   const { root, ud, dir } = setup();
   const big = Buffer.alloc(2048, 7);
