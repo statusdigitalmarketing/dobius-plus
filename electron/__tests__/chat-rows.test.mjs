@@ -342,7 +342,10 @@ console.log('PASS  row keys survive a sliding window');
   assert.deepEqual(meta.slice(-3).map((s) => s.kind), ['row', 'row', 'row']);
   // A turn's anchor is the next SENT message, skipping a stale queued row right after it (Codex r2 P2).
   const stale = [you('a'), claude(tool('Bash'), txt('done')), { role: 'user', content: 'later', queued: true }, you('different')];
-  assert.deepEqual(foldTurns(stale)[1], { kind: 'turn', start: 1, end: 1, steps: 1, summary: 'done', anchor: 3 });
+  assert.deepEqual(foldTurns(stale)[1], { kind: 'turn', start: 1, end: 2, steps: 1, summary: 'done', anchor: 3 });
+  // Rows injected between Claude's rows stay inside ONE turn with one identity (Codex r4 P2).
+  const split = foldTurns([you('q'), claude(tool('Bash')), { role: 'user', content: 'hook', meta: true }, claude(tool('Read'), txt('ok')), you('next')]);
+  assert.deepEqual(split, [{ kind: 'row', index: 0 }, { kind: 'turn', start: 1, end: 3, steps: 2, summary: 'ok', anchor: 4 }, { kind: 'row', index: 4 }]);
   for (const seg of foldTurns([...rows, you('ship it')])) if (seg.kind === 'turn') assert.equal([...rows, you('ship it')][seg.anchor].role, 'user');
   // Plain rows (no blocks) count as text, and junk input never throws.
   assert.deepEqual(foldTurns([you('a'), { role: 'assistant', content: 'plain reply' }, you('b')]).map((s) => s.kind), ['row', 'row', 'row']);
