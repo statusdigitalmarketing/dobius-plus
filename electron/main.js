@@ -934,7 +934,7 @@ function setupTerminalHandlers() {
     const filePath = path.join(dir, `clipboard-${timestamp}${ext}`);
     const bytes = Buffer.from(base64Data, 'base64');
     fs.writeFileSync(filePath, bytes);
-    recordSavedImage(app.getPath('userData'), path.basename(filePath), bytes); // what the preview may show later
+    recordSavedImage(path.basename(filePath), bytes); // what the preview may show later
     return filePath;
   });
   // The preview for a pasted [Image #N] in the terminal (src/lib/pasted-images.js). Only bytes the save handler above
@@ -948,7 +948,7 @@ function setupTerminalHandlers() {
     const m = CLIPBOARD_NAME_RE.exec(path.basename(filePath.replace(/\\/g, '/')));
     if (!m) return null;
     try {
-      const bytes = await readSavedImage(app.getPath('userData'), path.join(app.getPath('temp'), 'dobius-clipboard'), m[0], MAX_IMAGE_SIZE);
+      const bytes = await readSavedImage(path.join(app.getPath('temp'), 'dobius-clipboard'), m[0], MAX_IMAGE_SIZE);
       return bytes ? `data:${MIME_BY_EXT[m[1]]};base64,${bytes.toString('base64')}` : null;
     } catch (err) {
       if (err?.code !== 'ENOENT') console.warn('[terminal] pasted image unreadable:', err?.code || err?.message);

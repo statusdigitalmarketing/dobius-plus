@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 const store = new Map();
 globalThis.window = { localStorage: { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)) } };
-const { recordImageLabel, imageForLabel, labelsOnScreen, watchForImageLabels, imageLinkProvider } = await import('../../src/lib/pasted-images.js');
+const { recordImageLabel, imageForLabel, labelsOnScreen, watchForImageLabels, reserveImageLabel, imageLinkProvider } = await import('../../src/lib/pasted-images.js');
 
 // A tiny stand-in for an xterm buffer: rows of cells, a wide character taking two cells.
 function fakeTerm(rows, cols = 40) {
@@ -74,4 +74,27 @@ term = fakeTerm(['output: [Image #9000]', '> [Image #1]']);
 await new Promise((r) => setTimeout(r, 300));
 assert.equal(imageForLabel('tab-f', 1), '/f/1.png');
 assert.equal(imageForLabel('tab-f', 9000), null);
+// A pasted before B, B saved first: labels follow paste order, not save order. A paste that did not go in is skipped.
+term = fakeTerm(['>']);
+const slotA = reserveImageLabel('tab-g', () => term, labelsOnScreen(term));
+const slotB = reserveImageLabel('tab-g', () => term, labelsOnScreen(term));
+const slotC = reserveImageLabel('tab-g', () => term, labelsOnScreen(term));
+slotB('/g/B.png');
+term = fakeTerm(['> [Image #1] [Image #2]']);
+await new Promise((r) => setTimeout(r, 200));
+assert.equal(imageForLabel('tab-g', 1), null, 'held until A is saved');
+slotA('/g/A.png');
+slotC(null);
+await new Promise((r) => setTimeout(r, 200));
+assert.equal(imageForLabel('tab-g', 1), '/g/A.png');
+assert.equal(imageForLabel('tab-g', 2), '/g/B.png');
+// A place given up after a label was matched to it hands that label to the next place in line.
+term = fakeTerm(['>']);
+const hA = reserveImageLabel('tab-h', () => term, labelsOnScreen(term));
+const hB = reserveImageLabel('tab-h', () => term, labelsOnScreen(term));
+term = fakeTerm(['> [Image #1]']);
+await new Promise((r) => setTimeout(r, 200));
+hA(null); hB('/h/B.png');
+await new Promise((r) => setTimeout(r, 200));
+assert.equal(imageForLabel('tab-h', 1), '/h/B.png');
 console.log('ALL PASS  (pasted-images)');

@@ -96,33 +96,56 @@ export function labelsOnScreen(term) {
 }
 
 /**
- * After image paths were pasted into Claude's prompt: wait for the new [Image #N] labels Claude draws and record them,
- * oldest path to lowest new number, each label as soon as it appears. `before` is labelsOnScreen() taken before the
- * paths went in; a new label is any number not on screen then (never "above the highest", which a printed
- * [Image #9000] would block forever). One watch per tab: a paste made while another is still being watched joins it,
- * so one label can never be given to two pastes. Gives up quietly after `ms` from the latest paste (a label it never
- * saw stays plain text).
+ * Call when an image is pasted into Claude's prompt, BEFORE it is saved: it holds that paste's place in line, and the
+ * returned function hands over the saved path once known (null when the paste did not go in). Claude draws each new
+ * [Image #N] in paste order, so the first new label goes to the first place in line, whichever save finished first.
+ * `before` is labelsOnScreen() at paste time; a new label is any number not on screen then (never "above the highest",
+ * which a printed [Image #9000] would block forever). One watch per tab: a paste made while another is still watched
+ * joins it, keeping the first paste's `before`. Gives up quietly `ms` after the latest paste (a label it never saw
+ * stays plain text).
  */
-const watches = new Map(); // tab id -> { getTerm, seen: Set, paths: [], until }
-export function watchForImageLabels(tabId, getTerm, paths, before, ms = WATCH_MS) {
-  const list = (Array.isArray(paths) ? paths : [paths]).filter((p) => typeof p === 'string');
-  if (!list.length) return;
-  const open = watches.get(tabId);
-  // Joining: keep the first paste's `before` (a later one may already include the earlier paste's label).
-  if (open) { open.paths.push(...list); open.getTerm = getTerm; open.until = Date.now() + ms; return; }
-  const job = { getTerm, seen: new Set(before), paths: list.slice(), until: Date.now() + ms };
-  watches.set(tabId, job);
-  const tick = () => {
-    const fresh = [...labelsOnScreen(job.getTerm())].filter((n) => !job.seen.has(n)).sort((x, y) => x - y);
-    for (const n of fresh) {
-      if (!job.paths.length) break;
-      recordImageLabel(tabId, n, job.paths.shift());
-      job.seen.add(n);
-    }
-    if (!job.paths.length || Date.now() >= job.until) { watches.delete(tabId); return; }
+const watches = new Map(); // tab id -> { getTerm, seen: Set, slots: [{ path, label }], until }
+export function reserveImageLabel(tabId, getTerm, before, ms = WATCH_MS) {
+  let job = watches.get(tabId);
+  if (!job) {
+    job = { getTerm, seen: new Set(before), slots: [], until: 0 };
+    watches.set(tabId, job);
+    const tick = () => {
+      settleSlots(tabId, job);
+      if (!job.slots.length || Date.now() >= job.until) { watches.delete(tabId); return; }
+      setTimeout(tick, WATCH_EVERY_MS);
+    };
     setTimeout(tick, WATCH_EVERY_MS);
-  };
-  setTimeout(tick, WATCH_EVERY_MS);
+  }
+  job.getTerm = getTerm;
+  job.until = Date.now() + ms;
+  const slot = { path: undefined, label: null }; // path: undefined while saving, null when it did not go in
+  job.slots.push(slot);
+  return (path) => { slot.path = typeof path === 'string' ? path : null; settleSlots(tabId, job); };
+}
+
+function settleSlots(tabId, job) {
+  // A paste that did not go in gives its label (if one was already matched to it) back to the line.
+  for (const s of job.slots) if (s.path === null && s.label != null) { job.seen.delete(s.label); s.label = null; }
+  job.slots = job.slots.filter((s) => s.path !== null);
+  const fresh = [...labelsOnScreen(job.getTerm())].filter((n) => !job.seen.has(n)).sort((x, y) => x - y);
+  for (const n of fresh) {
+    const slot = job.slots.find((s) => s.label == null);
+    if (!slot) break;
+    slot.label = n;
+    job.seen.add(n);
+  }
+  // Record in line order as each place has both its label and its saved path.
+  job.slots = job.slots.filter((s) => {
+    if (s.label == null || typeof s.path !== 'string') return true;
+    recordImageLabel(tabId, s.label, s.path);
+    return false;
+  });
+}
+
+/** Several images whose paths are already known, pasted together (oldest path gets the lowest new number). */
+export function watchForImageLabels(tabId, getTerm, paths, before, ms = WATCH_MS) {
+  for (const p of (Array.isArray(paths) ? paths : [paths])) if (typeof p === 'string') reserveImageLabel(tabId, getTerm, before, ms)(p);
 }
 
 /** An xterm link provider that turns known [Image #N] labels into links calling onOpen(path, n). */

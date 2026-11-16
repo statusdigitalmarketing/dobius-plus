@@ -5,7 +5,7 @@ import '@xterm/xterm/css/xterm.css';
 import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
 import { isWindows } from '../../../shared/platform.js';
 import { Lightbox } from './ChatPane';
-import { labelsOnScreen, watchForImageLabels } from '../../lib/pasted-images.js';
+import { labelsOnScreen, reserveImageLabel } from '../../lib/pasted-images.js';
 
 
 function isChatTab(id) {
@@ -317,15 +317,16 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
           if (!blob) return;
           // Straight into Claude's prompt: note which [Image #N] Claude draws for it, so the label opens this image.
           // (The command bar gets no label: Claude reads a typed path as a file.)
-          const before = promptEdit ? labelsOnScreen(termRef.current) : null;
+          // Its place in line is held now, before saving, so two quick pastes keep their order.
+          const label = promptEdit ? reserveImageLabel(id, () => termRef.current, labelsOnScreen(termRef.current)) : null;
           const saved = (async () => {
             const base64 = arrayBufferToBase64(await blob.arrayBuffer());
             return window.electronAPI.saveClipboardImage(base64, item.type);
           })();
           const inPrompt = insertPath(saved);
-          if (before) {
-            Promise.all([inPrompt, saved]).then(([took, p]) => { if (took && p) watchForImageLabels(id, () => termRef.current, [p], before); },
-              (err) => console.warn('[terminal] pasted image not saved:', err?.message || err));
+          if (label) {
+            Promise.all([inPrompt, saved]).then(([took, p]) => label(took && p ? p : null),
+              (err) => { label(null); console.warn('[terminal] pasted image not saved:', err?.message || err); });
           }
           return;
         }
@@ -458,7 +459,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
       {pastedPreview?.url && <Lightbox url={pastedPreview.url} alt="Pasted image, full size" onClose={() => { setPastedPreview(null); requestAnimationFrame(() => containerRef.current?.querySelector('.xterm-helper-textarea')?.focus()); }} />}
       {pastedPreview?.gone && (
         <div role="status" style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', zIndex: 30, background: 'var(--surface)', color: 'var(--fg)', border: '1px solid var(--border)', borderRadius: 8, padding: '6px 12px', fontSize: 12 }}>
-          That image is no longer on this computer.
+          That image can't be shown any more (Dobius restarted, or the file was removed).
         </div>
       )}
       {/* Search bar */}
