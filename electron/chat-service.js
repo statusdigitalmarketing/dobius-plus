@@ -454,14 +454,22 @@ export async function answerSelectorWithText(id, num, text, token, stillOk = () 
   try { live = await liveSelectorForTab(id); } catch { live = null; }
   if (!live || selectorFingerprint(live) !== fp) return { ok: false, stale: true };
   const freeLabel = String(optOf(live)?.label ?? '');
+  const freeDetail = optOf(live)?.detail;
   if (!FREE_TEXT_LABEL.test(freeLabel.trim())) return { ok: false, reason: 'not-free-text' };
+  // The words as the row shows them: a long answer wraps onto indented rows, which the parser reads as the option's
+  // detail. Compared with whitespace collapsed, or (a word cut at the edge) with none at all.
+  const squash = (t) => String(t ?? '').replace(/\s+/g, '');
+  const showsLine = (o) => {
+    const shown = `${o?.label ?? ''} ${o?.detail ?? ''}`;
+    return collapse(shown) === line || squash(shown) === squash(line);
+  };
   // The card as it reads with words typed into the free row: everything else exactly as read.
   const typedCard = (sel) => {
-    if (!sel || !selected(sel) || collapse(optOf(sel)?.label) !== line) return false;
+    if (!sel || !selected(sel) || !showsLine(optOf(sel))) return false;
     // Every own property kept, non-enumerable ones too: the fingerprint reads `context`, which a spread would drop.
     const asRead = Object.create(Object.getPrototypeOf(sel), {
       ...Object.getOwnPropertyDescriptors(sel),
-      options: { value: sel.options.map((o) => (o?.num === num ? { ...o, label: freeLabel } : o)), enumerable: true, writable: true, configurable: true },
+      options: { value: sel.options.map((o) => (o?.num === num ? { ...o, label: freeLabel, detail: freeDetail } : o)), enumerable: true, writable: true, configurable: true },
     });
     return selectorFingerprint(asRead) === fp;
   };

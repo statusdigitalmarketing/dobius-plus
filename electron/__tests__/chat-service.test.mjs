@@ -691,6 +691,18 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   await writeRawInput('a', '\x15');
   assert.deepEqual(await erased, { ok: false, reason: 'cancelled' });
   assert.deepEqual(writes.map((w) => w[1]), ['3', PASTE('teal'), '\x15']);
+  // A long answer wraps onto an indented row: still recognized as the typed answer, and Enter goes.
+  const long = 'I would like a deep purple shade with blue undertones and a little bit of red mixed in';
+  const wrapped = (sel) => card(sel, sel === 3 ? 'I would like a deep purple shade with blue undertones and a little bit of red\r\n     mixed in' : 'Type something.');
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', wrapped(1)); emitOutput('a');
+  const r8 = await readSelectorForAnswer('a');
+  const wrapAns = answerSelectorWithText('a', 3, long, r8.token);
+  await writesReach(1);
+  buffers.set('a', card(3)); emitOutput('a');
+  await writesReach(2);
+  buffers.set('a', wrapped(3)); emitOutput('a');
+  assert.deepEqual(await wrapAns, { ok: true });
+  assert.deepEqual(writes.map((w) => w[1]), ['3', PASTE(long), '\r']);
   // Someone types into the tab while the input opens: nothing is pasted.
   reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
   const r5 = await readSelectorForAnswer('a');
