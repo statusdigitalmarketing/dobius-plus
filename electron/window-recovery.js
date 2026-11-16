@@ -65,6 +65,7 @@ export function installWindowRecovery({ app, isQuitting, log, allWindows, delayM
   const total = []; // every reload's time, app-wide
   const navs = new WeakMap(); // webContents -> main-frame navigations started (a newer one supersedes a queued reload)
   let timer = null;
+  let lastReloadAt = -Infinity; // the gap is kept from the last reload that ran, even when the queue emptied between
 
   // One reload at a time, RECOVERY_GAP_MS apart: when memory pressure kills many windows at once they come back one by
   // one, not all in the same millisecond (each reload respawns its window's shells). App-wide cap on top of the
@@ -93,6 +94,7 @@ export function installWindowRecovery({ app, isQuitting, log, allWindows, delayM
         log('window.recovery-stopped', `${why}: ${MAX_RECOVERIES} reloads in ${RECOVERY_WINDOW_MS / 60_000} min, leaving it`);
       } else {
         log('diag.window-recovery', `reloading a window after ${why}`);
+        lastReloadAt = now();
         try {
           const url = recoveryUrl(wc.getURL?.());
           if (url) wc.loadURL(url); else wc.reload();
@@ -106,7 +108,7 @@ export function installWindowRecovery({ app, isQuitting, log, allWindows, delayM
     if (pending.has(wc) || queue.length >= MAX_QUEUED) return;
     pending.add(wc);
     queue.push({ wc, why, nav: navs.get(wc) || 0 });
-    if (!timer) timer = setTimeout(drain, delayMs);
+    if (!timer) timer = setTimeout(drain, Math.max(delayMs, lastReloadAt + gapMs - now()));
   };
 
   app.on('web-contents-created', (_e, wc) => {

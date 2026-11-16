@@ -147,3 +147,18 @@ test('a torn-off window comes back with its saved tab set', async () => {
   await wait(30);
   assert.deepEqual([win.reloads, win.loaded], [0, ['file:///a/index.html?project=%2Fp&tearOffTab=term-%2Fp-3&tearOffRestore=1']]);
 });
+
+test('the gap holds when the queue empties between deaths', async () => {
+  const { open, state } = rig(60);
+  const a = open('window');
+  const b = open('window');
+  a.emit('render-process-gone', {}, { reason: 'oom' });
+  await wait(20);
+  assert.equal(a.reloads, 1);
+  state.clock += 10; // 10 ms later, with the queue empty, another window dies
+  b.emit('render-process-gone', {}, { reason: 'oom' });
+  await wait(25);
+  assert.equal(b.reloads, 0, 'not after the short first delay');
+  await wait(60);
+  assert.equal(b.reloads, 1, 'after the gap from the last reload');
+});
