@@ -19,6 +19,10 @@ const asar = require('@electron/asar'); // electron-builder's own dependency, so
 const asarPath = process.argv[2];
 if (!asarPath) { console.error('usage: verify-packaged-deps.mjs <app.asar>'); process.exit(2); }
 
+// @electron/asar looks a path up with the OS separator: on Windows `node_modules/x/package.json` throws and
+// `node_modules\x\package.json` works (Max, testing 2.2.35 on Windows). A no-op on the Mac.
+const native = (p) => p.split('/').join(path.sep);
+
 const files = new Set(asar.listPackage(asarPath).map((f) => f.replace(/\\/g, '/').replace(/^\/+/, '')));
 
 // Whether a FILE is really in the app (a folder does not count, Codex r4): a non-folder entry in the asar header, and
@@ -26,7 +30,7 @@ const files = new Set(asar.listPackage(asarPath).map((f) => f.replace(/\\/g, '/'
 function present(rel) {
   if (!files.has(rel)) return false;
   let stat;
-  try { stat = asar.statFile(asarPath, rel); }
+  try { stat = asar.statFile(asarPath, native(rel)); }
   catch { return false; } // statFile throws only for a path the header does not hold, which files.has just ruled out
   if (!stat || stat.files) return false;
   if (!stat.unpacked) return true;
@@ -37,8 +41,8 @@ function present(rel) {
 function manifest(rel) {
   if (!present(rel)) return { error: files.has(rel) ? 'listed as unpacked but not on disk' : 'not in the app' };
   let stat;
-  try { stat = asar.statFile(asarPath, rel); } catch (e) { return { error: `unreadable (${e.code || e.message})` }; }
-  const text = stat?.unpacked ? readFileSync(path.join(`${asarPath}.unpacked`, rel), 'utf8') : asar.extractFile(asarPath, rel).toString('utf8');
+  try { stat = asar.statFile(asarPath, native(rel)); } catch (e) { return { error: `unreadable (${e.code || e.message})` }; }
+  const text = stat?.unpacked ? readFileSync(path.join(`${asarPath}.unpacked`, rel), 'utf8') : asar.extractFile(asarPath, native(rel)).toString('utf8');
   try { return { json: JSON.parse(text) }; } catch (e) { return { error: `not valid JSON (${e.message})` }; }
 }
 
