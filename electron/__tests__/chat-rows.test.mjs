@@ -337,6 +337,9 @@ console.log('PASS  row keys survive a sliding window');
   // An injected skill body (a command row) is not a boundary either: the exchange stays open (Codex r2 P1).
   const skill = foldTurns([...rows, { role: 'user', content: '/review (skill)', command: true }, claude(tool('Read'))]);
   assert.deepEqual(skill.slice(-4).map((s) => s.kind), ['row', 'row', 'row', 'row']);
+  // Hook context Claude injected (main flags it `meta`) is not a boundary either (Codex r3 P1).
+  const meta = foldTurns([...rows, { role: 'user', content: 'SessionStart hook context', meta: true }]);
+  assert.deepEqual(meta.slice(-3).map((s) => s.kind), ['row', 'row', 'row']);
   // A turn's anchor is the next SENT message, skipping a stale queued row right after it (Codex r2 P2).
   const stale = [you('a'), claude(tool('Bash'), txt('done')), { role: 'user', content: 'later', queued: true }, you('different')];
   assert.deepEqual(foldTurns(stale)[1], { kind: 'turn', start: 1, end: 1, steps: 1, summary: 'done', anchor: 3 });

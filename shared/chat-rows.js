@@ -421,11 +421,12 @@ export function stepSummary(steps) {
 export function foldTurns(rows) {
   const list = Array.isArray(rows) ? rows : [];
   let lastPerson = -1;
-  // Only a message the person actually sent is a boundary. A queued send (Codex P1) and a command row (an injected
+  // Only a message the person actually sent is a boundary. A queued send (Codex P1), injected meta text and a command row (an injected
   // skill body Claude invoked itself, a compaction chip, a `!` command: Codex r2 P1) can sit inside an exchange Claude
   // is still working on, and folding there would hide the tool it is running. Erring this way only leaves a finished
   // exchange open a little longer.
-  const sent = (r) => r?.role === 'user' && !r.queued && !r.command;
+  // `meta`: text Claude injected itself (hook context), flagged by main's entryToMessage (Codex r3 P1).
+  const sent = (r) => r?.role === 'user' && !r.queued && !r.command && !r.meta;
   for (let i = list.length - 1; i >= 0; i--) if (sent(list[i])) { lastPerson = i; break; }
   const out = [];
   let i = 0;
