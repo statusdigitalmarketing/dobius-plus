@@ -21,6 +21,7 @@ const MAX_TABS = 40; // tabs remembered; the oldest-touched tab is dropped first
 const LABEL_RE = /\[Image #(\d{1,4})\]/g;
 const WATCH_MS = 4000;
 const WATCH_EVERY_MS = 120;
+const SAVE_WAIT_MS = 16000; // an unsaved paste holds its place this long (prompt-edit gives up on it at 15 s)
 
 let cache = null;
 function load() {
@@ -112,16 +113,24 @@ export function reserveImageLabel(tabId, getTerm, before, ms = WATCH_MS) {
     watches.set(tabId, job);
     const tick = () => {
       settleSlots(tabId, job);
-      if (!job.slots.length || Date.now() >= job.until) { watches.delete(tabId); return; }
+      // A paste still being saved keeps the watch (and its place in line) alive, up to the paste queue's own limit.
+      const saving = job.slots.some((s) => s.path === undefined && Date.now() - s.at < SAVE_WAIT_MS);
+      if (!job.slots.length || (Date.now() >= job.until && !saving)) { watches.delete(tabId); return; }
       setTimeout(tick, WATCH_EVERY_MS);
     };
     setTimeout(tick, WATCH_EVERY_MS);
+  } else if (!job.slots.length) {
+    job.seen = new Set(before); // everything before was settled: this paste's own screen is the baseline
   }
   job.getTerm = getTerm;
   job.until = Date.now() + ms;
-  const slot = { path: undefined, label: null }; // path: undefined while saving, null when it did not go in
+  const slot = { path: undefined, label: null, at: Date.now() }; // path: undefined while saving, null if not in
   job.slots.push(slot);
-  return (path) => { slot.path = typeof path === 'string' ? path : null; settleSlots(tabId, job); };
+  return (path) => {
+    slot.path = typeof path === 'string' ? path : null;
+    if (slot.path) job.until = Math.max(job.until, Date.now() + ms); // its label may take a moment to be drawn
+    settleSlots(tabId, job);
+  };
 }
 
 function settleSlots(tabId, job) {

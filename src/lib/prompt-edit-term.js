@@ -147,6 +147,14 @@ export function attachPromptEditing(term, send, held = () => {}) {
     return term.modes.bracketedPasteMode ? `\x1b[200~${t}\x1b[201~` : t;
   };
 
+  // Tell a paste's caller once whether it went in (dropped items: no).
+  const reportPaste = (item, delivered) => {
+    const cb = item.done;
+    item.done = null;
+    if (cb) { try { cb(delivered); } catch (err) { console.warn('[prompt-edit] paste callback failed:', err?.message || err); } }
+  };
+  const dropQueue = () => { for (const it of queue) reportPaste(it, false); queue.length = 0; };
+
   // One queued item. Returns false when it failed and the rest must go.
   const run = async (item) => {
     if (item.paste) {
@@ -154,17 +162,19 @@ export function attachPromptEditing(term, send, held = () => {}) {
       const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(false), PASTE_WAIT_MS); });
       const text = await Promise.race([item.paste, timedOut]);
       clearTimeout(timer);
-      if (text === false || disposed) return false; // gave up waiting: drop what was typed after it
+      // `done(delivered)`: the caller learns whether this paste really reached Claude's prompt.
+      const finish = (ok, delivered) => { reportPaste(item, delivered); return ok; };
+      if (text === false || disposed) return finish(false, false); // gave up waiting: drop what was typed after it
       // After an Enter or a quit key the screen may not show the result
       // yet: give it time before trusting it as the destination.
       const sinceEnter = performance.now() - lastEnterAt;
       if (sinceEnter < AFTER_ENTER_MS) await new Promise((r) => setTimeout(r, AFTER_ENTER_MS - sinceEnter));
-      if (disposed || !inPrompt()) return false;    // the prompt it was pasted into is gone
-      if (!text) return true;                       // nothing to paste (save failed)
-      if (item.sel === MID_EDIT) return true;       // pasted onto a selection we could not read
-      if (item.sel) return replace(item.sel, pasteData(text));
+      if (disposed || !inPrompt()) return finish(false, false); // the prompt it was pasted into is gone
+      if (!text) return finish(true, false);                     // nothing to paste (save failed)
+      if (item.sel === MID_EDIT) return finish(true, false);     // pasted onto a selection we could not read
+      if (item.sel) { const ok = await replace(item.sel, pasteData(text)); return finish(ok, !!ok); }
       send(pasteData(text));
-      return true;
+      return finish(true, true);
     }
     const { data, sel } = item;
     // Keys that can submit or quit: Enter, Ctrl+C, Ctrl+D. Option+Enter
@@ -188,7 +198,7 @@ export function attachPromptEditing(term, send, held = () => {}) {
       while (queue.length && !disposed) {
         if (!(await run(queue.shift()))) {
           console.debug(`[prompt-edit] prompt changed under an edit or paste; ${queue.length} queued input(s) dropped`);
-          queue.length = 0;
+          dropQueue();
         }
         // Input that waited goes out paced, as it was typed: in one burst
         // Claude reads it as a paste, and an Enter in it as a new line.
@@ -218,7 +228,7 @@ export function attachPromptEditing(term, send, held = () => {}) {
   // Only into Claude's prompt, and only if that is still showing when the
   // paste is ready. Returns false (caller handles the paste) anywhere else.
   // `promise` resolves to the text to paste, or null.
-  const pasteWhenReady = (promise) => {
+  const pasteWhenReady = (promise, done = null) => {
     const paste = promise.catch((err) => {
       console.warn('[prompt-edit] paste failed:', err?.message || err);
       return null;
@@ -235,7 +245,7 @@ export function attachPromptEditing(term, send, held = () => {}) {
       // the pasted text once the paste lands.
       term.clearSelection();
     }
-    queue.push({ paste, sel });
+    queue.push({ paste, sel, done });
     hold(HELD_PASTE);
     pump();
     return true;
@@ -324,7 +334,7 @@ export function attachPromptEditing(term, send, held = () => {}) {
       disposed = true;
       for (const type of armEvents) el?.removeEventListener(type, arm, true);
       el?.removeEventListener('mousedown', onMouseDown, true);
-      queue.length = 0;
+      dropQueue();
       if (holding) { holding = false; held(null); }
     },
   };

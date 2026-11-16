@@ -97,4 +97,28 @@ await new Promise((r) => setTimeout(r, 200));
 hA(null); hB('/h/B.png');
 await new Promise((r) => setTimeout(r, 200));
 assert.equal(imageForLabel('tab-h', 1), '/h/B.png');
+// A slow save outlives the watch window: its place in line holds, so a later quick paste does not take its label.
+term = fakeTerm(['>']);
+const iA = reserveImageLabel('tab-i', () => term, labelsOnScreen(term), 150);
+await new Promise((r) => setTimeout(r, 400)); // past A's window, A still saving
+const iB = reserveImageLabel('tab-i', () => term, labelsOnScreen(term), 150);
+iB('/i/B.png');
+iA('/i/A.png');
+term = fakeTerm(['> [Image #1] [Image #2]']);
+await new Promise((r) => setTimeout(r, 300));
+assert.equal(imageForLabel('tab-i', 1), '/i/A.png');
+assert.equal(imageForLabel('tab-i', 2), '/i/B.png');
+// A finished watch takes the next paste's own baseline: text printed in between is not that paste's label.
+term = fakeTerm(['>']);
+const jA = reserveImageLabel('tab-j', () => term, labelsOnScreen(term));
+term = fakeTerm(['> [Image #1]']);
+jA('/j/A.png');
+term = fakeTerm(['printed: [Image #9000]', '> [Image #1]']);
+const jB = reserveImageLabel('tab-j', () => term, labelsOnScreen(term));
+jB('/j/B.png');
+term = fakeTerm(['printed: [Image #9000]', '> [Image #1] [Image #2]']);
+await new Promise((r) => setTimeout(r, 300));
+assert.equal(imageForLabel('tab-j', 1), '/j/A.png');
+assert.equal(imageForLabel('tab-j', 2), '/j/B.png');
+assert.equal(imageForLabel('tab-j', 9000), null);
 console.log('ALL PASS  (pasted-images)');

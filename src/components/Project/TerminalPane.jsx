@@ -298,8 +298,9 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
       const promptEdit = containerRef.current?.contains(e.target) ? promptEditRef.current : null;
       // pathPromise resolves to a file path or null. The terminal takes its
       // place in the input queue now, so keys typed while it saves wait.
-      const insertPath = async (pathPromise) => {
-        if (promptEdit?.pasteWhenReady(pathPromise.then((p) => (p ? shellEscape(p) : null)))) return true;
+      // onDelivered(true|false): only for a paste prompt-edit took, once it knows whether the path reached Claude.
+      const insertPath = async (pathPromise, onDelivered = null) => {
+        if (promptEdit?.pasteWhenReady(pathPromise.then((p) => (p ? shellEscape(p) : null)), onDelivered)) return true;
         const p = await pathPromise;
         if (!p) return false;
         setInput((prev) => {
@@ -323,9 +324,12 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
             const base64 = arrayBufferToBase64(await blob.arrayBuffer());
             return window.electronAPI.saveClipboardImage(base64, item.type);
           })();
-          const inPrompt = insertPath(saved);
+          // The label goes to this image only if its path really reached Claude's prompt (a paste dropped because
+          // the prompt went away gives its place up).
+          const delivered = label ? (ok) => saved.then((p) => label(ok && p ? p : null), () => label(null)) : null;
+          const inPrompt = insertPath(saved, delivered);
           if (label) {
-            Promise.all([inPrompt, saved]).then(([took, p]) => label(took && p ? p : null),
+            inPrompt.then((took) => { if (!took) label(null); },
               (err) => { label(null); console.warn('[terminal] pasted image not saved:', err?.message || err); });
           }
           return;
