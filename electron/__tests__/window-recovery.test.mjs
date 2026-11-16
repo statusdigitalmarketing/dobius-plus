@@ -1,0 +1,96 @@
+// window-recovery.js: a dead or failed page is reloaded (capped), a dead GPU repaints every window, nothing during quit.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { allowRecovery, renderGoneNeedsReload, loadFailNeedsReload, gpuGoneNeedsRepaint, installWindowRecovery, MAX_RECOVERIES } from '../window-recovery.js';
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+function fakeWc(type = 'window') {
+  const wc = new EventEmitter();
+  wc.reloads = 0; wc.invalidates = 0; wc.destroyed = false;
+  wc.getType = () => type;
+  wc.isDestroyed = () => wc.destroyed;
+  wc.reload = () => { wc.reloads += 1; };
+  wc.invalidate = () => { wc.invalidates += 1; };
+  return wc;
+}
+function rig() {
+  const app = new EventEmitter();
+  const logs = [];
+  const state = { quitting: false, clock: 1_000_000, windows: [] };
+  installWindowRecovery({ app, isQuitting: () => state.quitting, log: (k, d) => logs.push([k, d]), allWindows: () => state.windows, delayMs: 5, now: () => state.clock });
+  const open = (type) => { const wc = fakeWc(type); app.emit('web-contents-created', {}, wc); state.windows.push({ webContents: wc, isDestroyed: () => false }); return wc; };
+  return { app, logs, state, open };
+}
+
+test('pure rules', () => {
+  const t = [];
+  for (let i = 0; i < MAX_RECOVERIES; i += 1) assert.equal(allowRecovery(t, 1000 + i), true);
+  assert.equal(allowRecovery(t, 2000), false, 'the cap holds inside the window');
+  assert.equal(allowRecovery(t, 1000 + 10 * 60_000), true, 'the oldest ages out');
+  assert.equal(renderGoneNeedsReload({ reason: 'crashed' }), true);
+  assert.equal(renderGoneNeedsReload({ reason: 'oom' }), true);
+  assert.equal(renderGoneNeedsReload({ reason: 'killed' }), true);
+  assert.equal(renderGoneNeedsReload({ reason: 'clean-exit' }), false);
+  assert.equal(loadFailNeedsReload(-102, true), true);
+  assert.equal(loadFailNeedsReload(-3, true), false, 'a replaced navigation is not a failure');
+  assert.equal(loadFailNeedsReload(-102, false), false, 'a subframe is not the window');
+  assert.equal(gpuGoneNeedsRepaint({ type: 'GPU', reason: 'crashed' }), true);
+  assert.equal(gpuGoneNeedsRepaint({ type: 'GPU', reason: 'clean-exit' }), false);
+  assert.equal(gpuGoneNeedsRepaint({ type: 'Utility', reason: 'crashed' }), false);
+});
+
+test('a crashed window page is reloaded once per death, and only app windows', async () => {
+  const { open, logs } = rig();
+  const win = open('window');
+  const pane = open('webview');
+  win.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 5 });
+  win.emit('did-fail-load', {}, -2, 'failed', 'file:///x', true); // a second event for the same death
+  pane.emit('render-process-gone', {}, { reason: 'crashed' });
+  await wait(30);
+  assert.equal(win.reloads, 1);
+  assert.equal(pane.reloads, 0, 'a webview pane is never reloaded by us');
+  assert.equal(logs.filter(([k]) => k === 'diag.window-recovery').length, 1);
+  win.emit('render-process-gone', {}, { reason: 'clean-exit' });
+  win.emit('did-fail-load', {}, -3, 'aborted', 'file:///x', true);
+  win.emit('did-fail-load', {}, -2, 'failed', 'https://x', false);
+  await wait(30);
+  assert.equal(win.reloads, 1, 'clean exit, aborted navigation and subframes do nothing');
+});
+
+test('a page that keeps dying stops after the cap and is reported', async () => {
+  const { open, logs, state } = rig();
+  const win = open('window');
+  for (let i = 0; i < MAX_RECOVERIES + 2; i += 1) {
+    win.emit('render-process-gone', {}, { reason: 'crashed' });
+    await wait(20);
+    state.clock += 1000;
+  }
+  assert.equal(win.reloads, MAX_RECOVERIES);
+  assert.equal(logs.filter(([k]) => k === 'window.recovery-stopped').length, 2);
+});
+
+test('nothing is reloaded while quitting, or once the window is gone', async () => {
+  const { open, state } = rig();
+  const a = open('window');
+  const b = open('window');
+  b.emit('render-process-gone', {}, { reason: 'crashed' });
+  b.destroyed = true;
+  state.quitting = true;
+  a.emit('render-process-gone', {}, { reason: 'crashed' });
+  await wait(30);
+  assert.equal(a.reloads, 0);
+  assert.equal(b.reloads, 0);
+});
+
+test('a dead GPU process repaints every window once, without reloading', async () => {
+  const { app, open, logs } = rig();
+  const a = open('window');
+  const b = open('window');
+  app.emit('child-process-gone', {}, { type: 'GPU', reason: 'crashed', exitCode: 5 });
+  app.emit('child-process-gone', {}, { type: 'GPU', reason: 'crashed', exitCode: 5 });
+  app.emit('child-process-gone', {}, { type: 'Utility', reason: 'crashed' });
+  await wait(30);
+  assert.deepEqual([a.invalidates, b.invalidates, a.reloads, b.reloads], [1, 1, 0, 0]);
+  assert.match(logs.find(([k]) => k === 'diag.window-recovery')[1], /repainted 2 window/);
+});
