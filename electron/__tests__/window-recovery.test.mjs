@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { allowRecovery, renderGoneNeedsReload, loadFailNeedsReload, gpuGoneNeedsRepaint, installWindowRecovery, MAX_RECOVERIES } from '../window-recovery.js';
+import { allowRecovery, renderGoneNeedsReload, loadFailNeedsReload, gpuGoneNeedsRepaint, installWindowRecovery, MAX_RECOVERIES, MAX_TOTAL_RECOVERIES } from '../window-recovery.js';
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 function fakeWc(type = 'window') {
@@ -14,11 +14,11 @@ function fakeWc(type = 'window') {
   wc.invalidate = () => { wc.invalidates += 1; };
   return wc;
 }
-function rig() {
+function rig(gap) {
   const app = new EventEmitter();
   const logs = [];
-  const state = { quitting: false, clock: 1_000_000, windows: [] };
-  installWindowRecovery({ app, isQuitting: () => state.quitting, log: (k, d) => logs.push([k, d]), allWindows: () => state.windows, delayMs: 5, now: () => state.clock });
+  const state = { quitting: false, clock: 1_000_000, windows: [], gap };
+  installWindowRecovery({ app, isQuitting: () => state.quitting, log: (k, d) => logs.push([k, d]), allWindows: () => state.windows, delayMs: 5, gapMs: state.gap ?? 5, now: () => state.clock });
   const open = (type) => { const wc = fakeWc(type); app.emit('web-contents-created', {}, wc); state.windows.push({ webContents: wc, isDestroyed: () => false }); return wc; };
   return { app, logs, state, open };
 }
@@ -93,4 +93,17 @@ test('a dead GPU process repaints every window once, without reloading', async (
   await wait(30);
   assert.deepEqual([a.invalidates, b.invalidates, a.reloads, b.reloads], [1, 1, 0, 0]);
   assert.match(logs.find(([k]) => k === 'diag.window-recovery')[1], /repainted 2 window/);
+});
+
+test('many windows dying at once reload one at a time, with an app-wide cap', async () => {
+  const { open, logs } = rig(40);
+  const wins = Array.from({ length: 10 }, () => open('window'));
+  for (const w of wins) w.emit('render-process-gone', {}, { reason: 'oom' });
+  await wait(20);
+  assert.equal(wins.reduce((n, w) => n + w.reloads, 0), 1, 'only the first has reloaded so far');
+  await wait(45);
+  assert.equal(wins.reduce((n, w) => n + w.reloads, 0), 2, 'the next one waits a gap');
+  await wait(40 * 12);
+  assert.equal(wins.reduce((n, w) => n + w.reloads, 0), MAX_TOTAL_RECOVERIES, 'the app-wide cap stops the storm');
+  assert.match(logs.find(([k]) => k === 'window.recovery-stopped')[1], /app-wide/);
 });
