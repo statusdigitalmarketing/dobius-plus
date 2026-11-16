@@ -7,6 +7,11 @@
 // plain text. A path sent from the command bar is typed, not pasted, so Claude reads it as a file and draws no label
 // (checked on 2.1.325); nothing is watched then.
 //
+// Accepted: other programs writing [Image #N] text into the tab WHILE a paste is being watched (a few seconds) can
+// still pair a label with the wrong one of the person's own pasted images, e.g. a printed label that scrolls off the
+// live page mid-watch. Rebasing counts as text leaves the page would let Claude's own repaints re-assign labels, which
+// is worse. The preview can only ever show an image Dobius saved (main checks its hash).
+//
 // Accepted: any text in the tab that reads [Image #N] for a recorded N is clickable, so a program printing that string
 // opens the person's own pasted image (shown only to them, nothing leaves the Mac). Claude repaints its prompt, so a
 // label's screen position cannot be tracked to bind the link to the one occurrence Claude drew.
