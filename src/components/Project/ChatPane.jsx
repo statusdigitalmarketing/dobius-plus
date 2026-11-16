@@ -686,10 +686,11 @@ export default function ChatPane({ tabId, visible }) {
     if (sel?.unsettled) {
       setSelector((cur) => (cur ? { ...cur, token: '' } : cur));
       if (retries > 0) setTimeout(() => { if (mountedRef.current && visibleRef.current) pollSelector(retries - 1); }, 150);
-      return;
+      return 'unsettled';
     }
     const s2 = sel?.selector;
     setSelector(s2 && Array.isArray(s2.options) && s2.options.length > 0 ? { ...s2, token: sel.token, fp: tokenFingerprint(sel.token) } : null);
+    return 'read';
   }, [tabId]);
 
   // Transcript + status poll, only while this pane is on screen.
@@ -929,18 +930,25 @@ export default function ChatPane({ tabId, visible }) {
     atBottomRef.current = true;
     let r = null;
     answeringTabs.add(tabId);
-    try { r = await window.electronAPI?.chatAnswerText?.(tabId, free.num, text, token); } catch (err) { console.warn('[chat] answer failed:', err?.message || err); r = null; }
-    finally { answeringTabs.delete(tabId); }
-    // The draft goes back whether or not this pane is still mounted (deliverDraft finds the pane showing the tab now,
-    // else the saved draft); only the refreshes need this pane.
-    const live = mountedRef.current;
-    if (r?.ok) { revokeAll(imgs); if (live) refreshSoon(); return; }
-    // Pasted but not confirmed (stranded, or a write that may have landed): the words may already sit in Claude's
-    // input, so handing them back would send them twice.
-    if (r?.reason === 'stranded' || r?.uncertain) { revokeAll(imgs); deliverDraft(tabId, (cur) => cur, STRANDED); if (live) pollSelector(5); return; }
-    for (const a of imgs) deliverAttachment(tabId, a);
-    deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, r?.stale ? 'That question changed. Nothing was sent, check it again.' : 'Not sent. Your answer is back in the box.');
-    if (live) pollSelector(5);
+    try {
+      try { r = await window.electronAPI?.chatAnswerText?.(tabId, free.num, text, token); } catch (err) { console.warn('[chat] answer failed:', err?.message || err); r = null; }
+      // The draft goes back whether or not this pane is still mounted (deliverDraft finds the pane showing the tab
+      // now, else the saved draft); only the refreshes need this pane.
+      if (r?.ok) { revokeAll(imgs); if (mountedRef.current) refreshSoon(); }
+      // Pasted but not confirmed (stranded, or a write that may have landed): the words may already sit in Claude's
+      // input, so handing them back would send them twice.
+      else if (r?.reason === 'stranded' || r?.uncertain) { revokeAll(imgs); deliverDraft(tabId, (cur) => cur, STRANDED); }
+      else {
+        for (const a of imgs) deliverAttachment(tabId, a);
+        deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, r?.stale ? 'That question changed. Nothing was sent, check it again.' : 'Not sent. Your answer is back in the box.');
+      }
+      // Sends stay on the card path until a settled read says what is on screen now (another card, a permission
+      // prompt, or Claude's prompt): an Enter in between must not paste into whatever replaced the card.
+      for (let i = 0; i < 12 && mountedRef.current; i += 1) {
+        if ((await pollSelector(0)) === 'read') break;
+        await new Promise((res) => setTimeout(res, 150));
+      }
+    } finally { answeringTabs.delete(tabId); }
   };
 
   const removeAtt = (path) => {
