@@ -13,6 +13,7 @@ import { getQuittingForUpdate, setQuitting, getQuitting, getInstallAttempted } f
 import { projectPathFromTabId } from './tab-id-util.js';
 import { claudeEnvForAccount, expandTilde, pinPluginRoot } from './claude-account-env.js';
 import { installErrorLog, logLine, errorLogPath, setLogSink } from './error-log.js';
+import { installWindowRecovery } from './window-recovery.js';
 import { startErrorReporter, noteFault, isReportable } from './error-reporter.js';
 import { createProblemReporter } from './problem-report.js';
 
@@ -5379,6 +5380,10 @@ function setupCrashLogging() {
 
 app.whenReady().then(() => {
   installErrorLog();
+  // A window whose page process died or failed to load is reloaded instead of left blank (window-recovery.js).
+  installWindowRecovery({ app, isQuitting: getQuitting, log: logLine, allWindows: () => BrowserWindow.getAllWindows(), handoffPending: (wc) => [...tearOffGrants.values()].includes(wc.id),
+    isClosing: (wc) => getWindowEntryByWcId(wc.id)?.closing === true,
+    isSendingTab: (wc) => [...dockingTabs].some((tabId) => terminalOwners.get(tabId) === wc.id) });
   // Phone mode first: its claim gate holds an earlier run's sessions from here on, before any window, History or
   // auto-resume can ask for one. The startup sweep runs in the background.
   void setupPhoneMode().catch((err) => { logLine('phone', `setup failed: ${err?.message || err}`); });
