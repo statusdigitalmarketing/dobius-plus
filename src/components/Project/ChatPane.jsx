@@ -491,7 +491,7 @@ export default function ChatPane({ tabId, visible }) {
   const isActive = useStore((s) => s.activeTabId === tabId);
   const [messages, setMessages] = useState(null); // null = not loaded yet
   const [sessionId, setSessionId] = useState(undefined); // undefined = first poll pending
-  // Older turns you opened (keyed by the person row after each). Only clicks add to it, and a new session starts empty.
+  // Older turns you opened (keyed by the next message you sent after each). Only clicks add to it, and a new session starts empty.
   const [openTurns, setOpenTurns] = useState(() => new Set());
   const toggleTurn = useCallback((k) => setOpenTurns((prev) => {
     const next = new Set(prev);
@@ -1148,7 +1148,7 @@ export default function ChatPane({ tabId, visible }) {
         {messages.length === 0 && shellBlock('No messages yet. Live terminal:')}
         {foldTurns(messages).map((seg) => {
           if (seg.kind === 'row') return renderRow(seg.index);
-          const k = `turn:${keys[seg.end + 1]}`; // the person row after it: stable while the window slides (Codex P2)
+          const k = `turn:${keys[seg.anchor]}`; // the next message you sent: stable while the window slides (Codex P2)
           const rows = [];
           for (let j = seg.start; j <= seg.end; j++) rows.push(renderRow(j));
           return (
