@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { writes, ptys, writeTerminal, emitOutput, emitRawOutput, closing, buffers, inputAges, cols, altAtStart, trimmed } from './fake-terminal-manager.mjs';
 
-const { submitPromptToTab, writeRawInput, selectorToken, submitPending, selectorFingerprint, readSelectorForAnswer, answerSelector, answerSelectorWithText } = await import('../chat-service.js');
+const { submitPromptToTab, submitPromptDetailed, writeRawInput, selectorToken, submitPending, selectorFingerprint, readSelectorForAnswer, answerSelector, answerSelectorWithText } = await import('../chat-service.js');
 let pass = 0;
 const ok = (n) => { console.log(`PASS  ${n}`); pass += 1; };
 const reset = () => { writes.length = 0; ptys.clear(); closing.clear(); buffers.clear(); inputAges.clear(); trimmed.clear(); };
@@ -734,5 +734,29 @@ ok('own words answer only the Type something row, and Enter only once the card s
   cols.delete('a');
 }
 ok('a strict read never reports no prompt for a screen that has not settled');
+
+// 25. A plain Chat send (guardPrompt) never types into a question card or permission prompt: refused before the paste
+// when one is on screen, Enter withheld when one appears after it, and an ordinary prompt still gets both.
+{
+  const rule = '─'.repeat(80);
+  const perm = ['', rule, ' Bash command', '   rm -rf build', ' Do you want to proceed?', '❯ 1. Yes', '  2. No', '', 'Esc to cancel', ''].join('\r\n');
+  const plain = ['', rule, '❯ ', rule, ''].join('\r\n');
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', perm); emitOutput('a');
+  assert.deepEqual(await submitPromptDetailed('a', 'hello', () => true, () => {}, { guardPrompt: true }), { ok: false, reason: 'prompt_open' });
+  assert.deepEqual([...writes], [], 'nothing typed into the permission prompt');
+  buffers.set('a', plain); emitOutput('a');
+  assert.deepEqual(await submitPromptDetailed('a', 'hello', () => true, () => {}, { guardPrompt: true }), { ok: true });
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('hello'), '\r']);
+  writes.length = 0;
+  let stranded = false;
+  const late = submitPromptDetailed('a', 'again', () => true, () => { stranded = true; }, { guardPrompt: true });
+  for (let i = 0; i < 50 && writes.length < 1; i += 1) await new Promise((res) => setTimeout(res, 10));
+  buffers.set('a', perm); emitOutput('a');
+  assert.deepEqual(await late, { ok: false, reason: 'stranded', uncertain: true });
+  assert.equal(stranded, true);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('again')], 'no Enter onto the prompt that appeared');
+  cols.delete('a');
+}
+ok('a plain Chat send refuses a prompt on screen and withholds Enter from one that appears');
 
 console.log(`\n${pass} passed`);

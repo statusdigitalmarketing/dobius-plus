@@ -886,7 +886,7 @@ export default function ChatPane({ tabId, visible }) {
       setEchoes((cur) => [...cur, { content: text, at: Date.now(), sid, base }]);
     }
     if (ok) refreshSoon();
-    return r === 'stranded' ? 'stranded' : ok;
+    return r === 'stranded' || r === 'prompt' ? r : ok;
   };
 
   const send = async () => {
@@ -908,7 +908,12 @@ export default function ChatPane({ tabId, visible }) {
     const ok = await submit(text, { echo: !!sessionId });
     // Typed but not entered: the text is already in the terminal's input
     // line, so handing it back here would send it twice.
-    if (ok === 'stranded') { revokeAll(imgs); deliverDraft(tabId, (cur) => cur, STRANDED); } else if (!ok) {
+    if (ok === 'stranded') { revokeAll(imgs); deliverDraft(tabId, (cur) => cur, STRANDED); } else if (ok === 'prompt') {
+      // A card or permission prompt is up (main checks the screen before pasting): nothing was typed. Show it.
+      for (const a of imgs) deliverAttachment(tabId, a);
+      deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, 'Claude is asking you something. Answer it above first, then send this.');
+      if (mountedRef.current) pollSelector(5);
+    } else if (!ok) {
       // Keep what they wrote, images back as thumbnails.
       for (const a of imgs) deliverAttachment(tabId, a);
       deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, NOT_SENT);

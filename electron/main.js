@@ -50,7 +50,7 @@ import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { createSnoozeStore } from './tab-snooze.js';
 import { dropClaudeChildMarkers } from './claude-child-env.js';
-import { terminalTextTail, terminalScreenText, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, answerSelectorWithText, activityForTab, submitPending, setPhoneTabCheck } from './chat-service.js';
+import { terminalTextTail, terminalScreenText, submitPromptToTab, submitPromptDetailed, writeRawInput, readSelectorForAnswer, answerSelector, answerSelectorWithText, activityForTab, submitPending, setPhoneTabCheck } from './chat-service.js';
 import { launchCommandFor, claudeLaunchOptions, normalizeNewTabModel, normalizeNewTabPermissionMode, CLAUDE_AUTH_ENV } from '../shared/new-tab.js';
 import { sanitizeAccountPin } from '../shared/tab-label.js';
 import { renderScreenLines } from './screen-render.js';
@@ -1299,9 +1299,11 @@ function setupDataHandlers() {
     cancelAutoResumeTab(tabId); // user input wins over a queued resume, as in terminal:write
     // true, false, or 'stranded': pasted, but the Enter was withheld because
     // other input reached the tab first, so the text sits in its input line.
+    // guardPrompt: never pasted into, or confirmed onto, a question card or permission prompt ('prompt': the draft
+    // comes back and the pane shows the card to answer instead).
     let stranded = false;
-    const ok = await submitPromptToTab(tabId, text, () => ownsTerminal(senderId, tabId), () => { stranded = true; });
-    return ok ? true : (stranded ? 'stranded' : false);
+    const r = await submitPromptDetailed(tabId, text, () => ownsTerminal(senderId, tabId), () => { stranded = true; }, { guardPrompt: true });
+    return r.ok ? true : r.reason === 'prompt_open' ? 'prompt' : (stranded ? 'stranded' : false);
   });
   // --- Chat model picker (Asana 1220098108555124) ------------------------------
   // What a tab's Claude runs (from its session's usage record) and what it can

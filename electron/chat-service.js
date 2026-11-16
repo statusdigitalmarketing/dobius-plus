@@ -553,7 +553,7 @@ export function submitPromptToTab(id, text, stillOk = () => true, onStranded = (
  * the Enter was withheld: the text sits in the input line, see onStranded).
  * @returns {Promise<{ok: boolean, reason?: string}>}
  */
-export function submitPromptDetailed(id, text, stillOk0 = () => true, onStranded = () => {}, { beforeEnter = null } = {}) {
+export function submitPromptDetailed(id, text, stillOk0 = () => true, onStranded = () => {}, { beforeEnter = null, guardPrompt = false } = {}) {
   if (onPhone(id)) return Promise.resolve(refused('on_phone'));
   const stillOk = () => !onPhone(id) && stillOk0();
   // Strip control chars except \t and \n (multi-line paste is legitimate); \r
@@ -564,10 +564,30 @@ export function submitPromptDetailed(id, text, stillOk0 = () => true, onStranded
   if (!stillOk()) return Promise.resolve(refused('not_allowed'));
   const q = queueFor(id);
   return new Promise((resolve) => {
-    q.items.push({ clean, pty, stillOk, gen: q.gen, resolve, onStranded, beforeEnter });
+    q.items.push({ clean, pty, stillOk, gen: q.gen, resolve, onStranded, beforeEnter: beforeEnter || (guardPrompt ? noPromptBeforeEnter(id) : null), guardPrompt });
     if (!q.running) drainSubmits(id, q);
   });
 }
+
+/**
+ * Is a question card or permission prompt on the tab's screen? For plain sends (desktop Chat): a paste plus Enter
+ * there would answer it (a permission prompt's highlighted "1. Yes"). It does not wait for a quiet screen, so a
+ * message sent while Claude streams still goes: a read raced by output is read again, and a screen that keeps moving
+ * with no prompt in any read counts as none (prompts stop and wait; only their timer ticks). A render that fails
+ * counts as a prompt (unknown is refused).
+ */
+async function promptOnScreen(id) {
+  for (let i = 0; i < 3; i += 1) {
+    const out = terminalRawOutputSeq(id);
+    let sel;
+    try { sel = await liveSelectorForTab(id); } catch (err) { console.warn('[chat-service] prompt check failed:', err?.message || err); return true; }
+    if (sel) return true;
+    if (terminalRawOutputSeq(id) === out) return false;
+  }
+  return false;
+}
+// The pre-Enter hook for a plain send: no prompt on screen. outSeq null: output may keep moving (Claude streaming).
+const noPromptBeforeEnter = (id) => async () => ((await promptOnScreen(id)) ? null : { outSeq: null });
 
 const DONE = Object.freeze({ ok: true });
 const refused = (reason) => ({ ok: false, reason });
@@ -655,6 +675,12 @@ async function drainSubmits(id, q) {
         it.resolve(DONE);
         continue;
       }
+      if (it.guardPrompt) {
+        const prompt = await promptOnScreen(id);
+        skip = skipReason(id, q, it);
+        if (skip) { it.resolve(refused(skip)); continue; }
+        if (prompt) { it.resolve(refused('prompt_open')); continue; }
+      }
       it.touched = true;
       writeTerminal(id, `\x1b[200~${it.clean}\x1b[201~`);
       const pastedAt = terminalInputSeq(id);
@@ -694,7 +720,7 @@ async function drainSubmits(id, q) {
         let seen = null;
         try { seen = await it.beforeEnter(); } catch (err) { console.warn('[chat-service] pre-Enter check failed:', err?.message || err); seen = null; }
         const gone = terminalInstance(id) !== it.pty || terminalClosing(id);
-        if (!seen || gone || it.gen !== q.gen || terminalInputSeq(id) !== pastedAt || terminalRawOutputSeq(id) !== seen.outSeq) {
+        if (!seen || gone || it.gen !== q.gen || terminalInputSeq(id) !== pastedAt || (seen.outSeq != null && terminalRawOutputSeq(id) !== seen.outSeq)) {
           // Same accounting as the check above: a Ctrl+C/Ctrl+U with no other writer erased the pasted words, so
           // they are plainly unsent (the caller gives them back); anything else may have landed.
           const foreign = (terminalInputSeq(id) - pastedAt) - ((q.cancelWrites || 0) - cancelsAt);
