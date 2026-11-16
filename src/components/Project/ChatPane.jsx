@@ -923,14 +923,17 @@ export default function ChatPane({ tabId, visible }) {
     setSelector(null);
     atBottomRef.current = true;
     let r = null;
-    try { r = await window.electronAPI?.chatAnswerText?.(tabId, free.num, text, token); } catch { r = null; }
-    if (!mountedRef.current) return;
-    if (r?.ok) { revokeAll(imgs); refreshSoon(); return; }
-    // Pasted but the Enter withheld: the words already sit in Claude's input, so handing them back would send them twice.
-    if (r?.reason === 'stranded') { revokeAll(imgs); deliverDraft(tabId, (cur) => cur, STRANDED); pollSelector(5); return; }
+    try { r = await window.electronAPI?.chatAnswerText?.(tabId, free.num, text, token); } catch (err) { console.warn('[chat] answer failed:', err?.message || err); r = null; }
+    // The draft goes back whether or not this pane is still mounted (deliverDraft finds the pane showing the tab now,
+    // else the saved draft); only the refreshes need this pane.
+    const live = mountedRef.current;
+    if (r?.ok) { revokeAll(imgs); if (live) refreshSoon(); return; }
+    // Pasted but not confirmed (stranded, or a write that may have landed): the words may already sit in Claude's
+    // input, so handing them back would send them twice.
+    if (r?.reason === 'stranded' || r?.uncertain) { revokeAll(imgs); deliverDraft(tabId, (cur) => cur, STRANDED); if (live) pollSelector(5); return; }
     for (const a of imgs) deliverAttachment(tabId, a);
     deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, r?.stale ? 'That question changed. Nothing was sent, check it again.' : 'Not sent. Your answer is back in the box.');
-    pollSelector(5);
+    if (live) pollSelector(5);
   };
 
   const removeAtt = (path) => {

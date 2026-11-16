@@ -426,40 +426,80 @@ export async function answerSelector(id, data, token, stillOk0 = () => true, bef
 /**
  * Answer a question card with your own words (Asana 1220550214785317): option `num` must be the card's "Type
  * something." row, on the live screen AND on the card the token was read from (the same fingerprint). Its number is
- * pressed through answerSelector (every check it makes), then, once Claude shows that row selected with its input open,
- * the text goes in through the usual guarded paste plus Enter. New lines become spaces: the input is one line.
- * Returns { ok, stale?, reason? }; `reason` 'not-free-text' (that row is not the free-text option), 'not-open' (the
- * input never showed) or the submit's own reason.
+ * pressed through answerSelector (every check it makes). Then, on a read with nothing typed or drawn during it, the
+ * same card (fingerprint) with that row selected and still empty, the words are pasted in the same tick. The Enter
+ * goes out only after a fresh read shows the same card, that row selected and reading exactly the pasted words, with
+ * nothing typed or drawn since (Claude Code 2.1.325 shows the input in place of "Type something.", captured live).
+ * Anything else (a permission prompt that replaced the card, a person typing) leaves the words in the input
+ * unsubmitted: 'stranded', uncertain. New lines become spaces: the input is one line.
+ * Returns { ok, stale?, reason?, uncertain? }; `reason` 'not-free-text', 'not-open' (the input never showed),
+ * 'interrupted' (other input reached the tab first) or the submit's own reason.
  */
 const FREE_TEXT_OPEN_MS = 2000;
+const FREE_TEXT_SHOW_MS = 1500;
+const collapse = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
 export async function answerSelectorWithText(id, num, text, token, stillOk = () => true, beforeWrite = () => {}) {
   if (!Number.isInteger(num) || num < 1 || num > 9 || typeof text !== 'string' || typeof token !== 'string') return { ok: false };
-  const line = text.replace(/\s*[\r\n]+\s*/g, ' ').trim();
+  const line = collapse(text.replace(/[\x00-\x1F\x7F]/g, ' '));
   if (!line) return { ok: false };
   const fp = token.split('|')[1];
-  const isFree = (sel) => {
-    const opt = Array.isArray(sel?.options) ? sel.options.find((o) => o?.num === num) : null;
-    return !!opt && FREE_TEXT_LABEL.test(String(opt.label ?? '').trim());
-  };
+  const optOf = (sel) => (Array.isArray(sel?.options) ? sel.options.find((o) => o?.num === num) : null);
+  const selected = (sel) => (Array.isArray(sel?.options) ? sel.options[sel.selectedIndex] : null)?.num === num;
   let live = null;
   try { live = await liveSelectorForTab(id); } catch { live = null; }
   if (!live || selectorFingerprint(live) !== fp) return { ok: false, stale: true };
-  if (!isFree(live)) return { ok: false, reason: 'not-free-text' };
+  const freeLabel = String(optOf(live)?.label ?? '');
+  if (!FREE_TEXT_LABEL.test(freeLabel.trim())) return { ok: false, reason: 'not-free-text' };
+  // The card as it reads with words typed into the free row: everything else exactly as read.
+  const typedCard = (sel) => {
+    if (!sel || !selected(sel) || collapse(optOf(sel)?.label) !== line) return false;
+    // Every own property kept, non-enumerable ones too: the fingerprint reads `context`, which a spread would drop.
+    const asRead = Object.create(Object.getPrototypeOf(sel), {
+      ...Object.getOwnPropertyDescriptors(sel),
+      options: { value: sel.options.map((o) => (o?.num === num ? { ...o, label: freeLabel } : o)), enumerable: true, writable: true, configurable: true },
+    });
+    return selectorFingerprint(asRead) === fp;
+  };
   const r = await answerSelector(id, String(num), token, stillOk, beforeWrite);
   if (!r?.ok) return r || { ok: false };
-  // The input is open once the free-text row is the selected one and still reads "Type something." (empty).
+  // Same PTY and nothing typed since our own key: the last thing in the tab is the number we pressed.
+  const inputKey = () => { const pty = terminalInstance(id); return pty ? `${ptySerials.get(pty)}:${terminalInputSeq(id)}` : ''; };
+  const key0 = inputKey();
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  // A read that counts: settled, and neither input nor output reached the tab while it was rendered.
+  const readQuiet = async () => {
+    const tok = selectorToken(id);
+    if (!tok) return null;
+    let sel = null;
+    try { sel = await liveSelectorForTab(id); } catch { sel = null; }
+    return sel && selectorToken(id) === tok ? { sel, out: terminalRawOutputSeq(id) } : null;
+  };
   const started = Date.now();
   for (;;) {
-    await new Promise((res) => setTimeout(res, 80));
+    await sleep(80);
     if (!stillOk()) return { ok: false, reason: 'not_allowed' };
-    let now = null;
-    try { now = await liveSelectorForTab(id); } catch { now = null; }
-    const at = Array.isArray(now?.options) ? now.options[now.selectedIndex] : null;
-    if (at && at.num === num && isFree(now)) break;
+    if (inputKey() !== key0 || submitPending(id)) return { ok: false, reason: 'interrupted' };
+    const read = await readQuiet();
+    if (read && inputKey() === key0) {
+      if (selectorFingerprint(read.sel) !== fp) return { ok: false, stale: true };
+      if (selected(read.sel)) {
+        // Pasted in this same tick, and only while nothing has moved since the read.
+        const guard = () => stillOk() && inputKey() === key0 && terminalRawOutputSeq(id) === read.out;
+        const beforeEnter = async () => {
+          const until = Date.now() + FREE_TEXT_SHOW_MS;
+          for (;;) {
+            const shown = await readQuiet();
+            if (shown && typedCard(shown.sel)) return { outSeq: shown.out };
+            if (Date.now() > until) return null;
+            await sleep(80);
+          }
+        };
+        const sent = await submitPromptDetailed(id, line, guard, () => {}, { beforeEnter });
+        return sent.ok ? { ok: true } : { ok: false, reason: sent.reason, ...(sent.uncertain ? { uncertain: true } : {}) };
+      }
+    }
     if (Date.now() - started > FREE_TEXT_OPEN_MS) return { ok: false, reason: 'not-open' };
   }
-  const sent = await submitPromptDetailed(id, line, stillOk);
-  return sent.ok ? { ok: true } : { ok: false, reason: sent.reason };
 }
 
 const SUBMIT_ENTER_DELAY_MS = 250;
@@ -508,7 +548,7 @@ export function submitPromptToTab(id, text, stillOk = () => true, onStranded = (
  * the Enter was withheld: the text sits in the input line, see onStranded).
  * @returns {Promise<{ok: boolean, reason?: string}>}
  */
-export function submitPromptDetailed(id, text, stillOk0 = () => true, onStranded = () => {}) {
+export function submitPromptDetailed(id, text, stillOk0 = () => true, onStranded = () => {}, { beforeEnter = null } = {}) {
   if (onPhone(id)) return Promise.resolve(refused('on_phone'));
   const stillOk = () => !onPhone(id) && stillOk0();
   // Strip control chars except \t and \n (multi-line paste is legitimate); \r
@@ -519,7 +559,7 @@ export function submitPromptDetailed(id, text, stillOk0 = () => true, onStranded
   if (!stillOk()) return Promise.resolve(refused('not_allowed'));
   const q = queueFor(id);
   return new Promise((resolve) => {
-    q.items.push({ clean, pty, stillOk, gen: q.gen, resolve, onStranded });
+    q.items.push({ clean, pty, stillOk, gen: q.gen, resolve, onStranded, beforeEnter });
     if (!q.running) drainSubmits(id, q);
   });
 }
@@ -641,6 +681,19 @@ async function drainSubmits(id, q) {
         const uncertain = !erased;
         it.resolve({ ...refused(gone ? 'tab_exited' : erased ? 'cancelled' : 'stranded'), ...(uncertain ? { uncertain: true } : {}) });
         continue;
+      }
+      // A caller that knows what the screen must show before Enter (a card's free-text answer) checks it now, on a
+      // fresh read; the Enter goes only if nothing at all reached the tab since that read. Otherwise the text stays
+      // in the input, never confirmed into whatever replaced it (a permission prompt's "1. Yes").
+      if (it.beforeEnter) {
+        let seen = null;
+        try { seen = await it.beforeEnter(); } catch (err) { console.warn('[chat-service] pre-Enter check failed:', err?.message || err); seen = null; }
+        const gone = terminalInstance(id) !== it.pty || terminalClosing(id);
+        if (!seen || gone || it.gen !== q.gen || terminalInputSeq(id) !== pastedAt || terminalRawOutputSeq(id) !== seen.outSeq) {
+          if (!gone) it.onStranded();
+          it.resolve({ ...refused(gone ? 'tab_exited' : 'stranded'), uncertain: true });
+          continue;
+        }
       }
       writeTerminal(id, '\r');
       it.resolve(DONE);

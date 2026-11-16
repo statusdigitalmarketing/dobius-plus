@@ -635,11 +635,15 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
 // are pasted and Enter sends them. Any other row is refused (its number would pick it), and so is a changed card.
 {
   const rule = '─'.repeat(80);
-  const card = (sel) => ['', rule, ' ☐ Color ', 'Pick a color',
+  const card = (sel, typed = 'Type something.') => ['', rule, ' ☐ Color ', 'Pick a color',
     `${sel === 1 ? '❯' : ' '} 1. Red`, '     Choose red',
     `${sel === 2 ? '❯' : ' '} 2. Blue`, '     Choose blue',
-    `${sel === 3 ? '❯' : ' '} 3. Type something.`, rule, '  4. Chat about this',
+    `${sel === 3 ? '❯' : ' '} 3. ${typed}`, rule, '  4. Chat about this',
     'Enter to select · ↑/↓ to navigate · Esc to cancel', ''].join('\r\n');
+  const perm = ['', rule, ' Bash command', '   rm -rf build', ' Do you want to proceed?', '❯ 1. Yes', '  2. No', ''].join('\r\n');
+  const tick = (ms) => new Promise((res) => setTimeout(res, ms));
+  // Waits until the writes reach `n` entries (or gives up), so a step reacts to what was just written.
+  const writesReach = async (n) => { for (let i = 0; i < 60 && writes.length < n; i += 1) await tick(20); };
   reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
   const r = await readSelectorForAnswer('a');
   assert.ok(r?.token, 'the card reads as answerable');
@@ -657,8 +661,42 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   await new Promise((res) => setTimeout(res, 40));
   assert.deepEqual(writes.map((w) => w[1]), ['3'], 'nothing pasted before the input shows');
   buffers.set('a', card(3)); emitOutput('a');
+  await writesReach(2);
+  assert.deepEqual(writes.map((w) => w[1]), ['3', PASTE('purple haze')]);
+  // The Enter waits until the card shows those words in the free row.
+  await tick(400);
+  assert.equal(writes.length, 2, 'no Enter while the row still reads empty');
+  buffers.set('a', card(3, 'purple haze')); emitOutput('a');
   assert.deepEqual(await pending, { ok: true });
   assert.deepEqual(writes.map((w) => w[1]), ['3', PASTE('purple haze'), '\r']);
+  // The card is replaced by a permission prompt after the paste: no Enter (its option 1 is Yes), and the words are
+  // reported as possibly typed, never as unsent.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
+  const r4 = await readSelectorForAnswer('a');
+  const swapped = answerSelectorWithText('a', 3, 'teal', r4.token);
+  await writesReach(1);
+  buffers.set('a', card(3)); emitOutput('a');
+  await writesReach(2);
+  buffers.set('a', perm); emitOutput('a');
+  assert.deepEqual(await swapped, { ok: false, reason: 'stranded', uncertain: true });
+  assert.deepEqual(writes.map((w) => w[1]), ['3', PASTE('teal')], 'no Enter into the permission prompt');
+  // Someone types into the tab while the input opens: nothing is pasted.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
+  const r5 = await readSelectorForAnswer('a');
+  const typedOver = answerSelectorWithText('a', 3, 'teal', r5.token);
+  await writesReach(1);
+  writeTerminal('a', 'x');
+  buffers.set('a', card(3)); emitOutput('a');
+  assert.deepEqual(await typedOver, { ok: false, reason: 'interrupted' });
+  assert.deepEqual(writes.map((w) => w[1]), ['3', 'x']);
+  // A different question shows up with its row 3 selected: refused as a changed card.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
+  const r6 = await readSelectorForAnswer('a');
+  const other = answerSelectorWithText('a', 3, 'teal', r6.token);
+  await writesReach(1);
+  buffers.set('a', card(3).replace('Pick a color', 'Pick a size')); emitOutput('a');
+  assert.deepEqual(await other, { ok: false, stale: true });
+  assert.deepEqual(writes.map((w) => w[1]), ['3']);
   // The input never opens (the card went away): nothing is pasted.
   reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
   const r3 = await readSelectorForAnswer('a');
@@ -669,6 +707,6 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   assert.deepEqual(writes.map((w) => w[1]), ['3']);
   cols.delete('a');
 }
-ok('own words answer only the Type something row, after its input opens');
+ok('own words answer only the Type something row, and Enter only once the card shows them');
 
 console.log(`\n${pass} passed`);
