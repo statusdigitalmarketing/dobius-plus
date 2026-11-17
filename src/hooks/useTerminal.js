@@ -175,13 +175,15 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       // 1220593667736841). Open them like plain URLs instead: in the default browser, no prompt. Main only opens
       // http(s); anything else is ignored.
       linkHandler: {
-        activate: (_event, uri) => { window.electronAPI?.openExternal?.(uri); },
+        // A drag that starts and ends on the link is a selection, not a click: xterm activates it anyway (Codex P2).
+        activate: (_event, uri) => { if (!termRef.current?.hasSelection()) window.electronAPI?.openExternal?.(uri); },
         allowNonHttpProtocols: false,
       },
     });
 
     const fitAddon = new FitAddon();
     const webLinksAddon = new WebLinksAddon((_event, url) => {
+      if (term.hasSelection()) return; // selecting text across a URL, not clicking it
       if (window.electronAPI?.openExternal) {
         window.electronAPI.openExternal(url);
       }
