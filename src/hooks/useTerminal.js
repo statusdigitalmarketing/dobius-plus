@@ -9,7 +9,7 @@ import { useStore } from '../store/store';
 import { takePendingScrollback, drawableLine } from '../lib/pending-scrollback';
 import { attachPromptEditing } from '../lib/prompt-edit-term';
 import { takePendingLaunch } from '../lib/pending-launch';
-import { isWindows } from '../../shared/platform.js';
+import { isWindows, currentPlatform } from '../../shared/platform.js';
 import { rowFacts } from '../../shared/screen-rows.js';
 
 // States carried by the Dobius status marker (OSC 777;dobius;<state>), emitted by
@@ -161,6 +161,9 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
   useEffect(() => {
     if (!containerRef.current || !window.electronAPI) return;
 
+    // A link opens on a plain left click only: xterm activates on any button (a right or middle click, or a Mac
+    // Control-click, is a context menu, not "open"), and a drag that ends on the link is a selection (Codex P2 x2).
+    const openOnClick = (event) => event?.button === 0 && !(event.ctrlKey && currentPlatform() === 'darwin') && !termRef.current?.hasSelection();
     const term = new Terminal({
       theme: theme || DEFAULT_THEME,
       fontFamily: buildTerminalFontFamily(fontFamily),
@@ -170,10 +173,19 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       cursorStyle: 'bar',
       scrollback: 10000,
       allowProposedApi: true,
+      // Links a program marks up itself (OSC 8; Claude Code prints its links this way). xterm's default asks "Do you
+      // want to navigate to ...?" and then calls window.open(), which nav-guard denies, so OK opened nothing (Asana
+      // 1220593667736841). Open them like plain URLs instead: in the default browser, no prompt. Main only opens
+      // http(s); anything else is ignored.
+      linkHandler: {
+        activate: (event, uri) => { if (openOnClick(event)) window.electronAPI?.openExternal?.(uri); },
+        allowNonHttpProtocols: false,
+      },
     });
 
     const fitAddon = new FitAddon();
-    const webLinksAddon = new WebLinksAddon((_event, url) => {
+    const webLinksAddon = new WebLinksAddon((event, url) => {
+      if (!openOnClick(event)) return;
       if (window.electronAPI?.openExternal) {
         window.electronAPI.openExternal(url);
       }
