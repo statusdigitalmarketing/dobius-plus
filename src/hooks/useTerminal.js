@@ -170,6 +170,14 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       cursorStyle: 'bar',
       scrollback: 10000,
       allowProposedApi: true,
+      // Links a program marks up itself (OSC 8; Claude Code prints its links this way). xterm's default asks "Do you
+      // want to navigate to ...?" and then calls window.open(), which nav-guard denies, so OK opened nothing (Asana
+      // 1220593667736841). Open them like plain URLs instead: in the default browser, no prompt. Main only opens
+      // http(s); anything else is ignored.
+      linkHandler: {
+        activate: (_event, uri) => { window.electronAPI?.openExternal?.(uri); },
+        allowNonHttpProtocols: false,
+      },
     });
 
     const fitAddon = new FitAddon();
