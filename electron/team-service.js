@@ -261,10 +261,19 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
       if (err.code === 'INBOX_FULL') notify('inbox-full', { name: from.name });
       return { status: 503, json: { ok: false } };
     }
-    // Started before the dedupe record is written: if that write fails (500), the sender's retry is acknowledged by
-    // the `existing` path in receive(), and this one filing is already under way (never a second one).
+    // The dedupe record is durable BEFORE anything is filed, as deliverJob does before typing: without it, a row
+    // evicted later and a retried send would file a second issue (Codex P1, PR 30). If it cannot be written, this
+    // report is not filed at all and the sender is told.
+    try {
+      store.records.set(...staged);
+    } catch (err) {
+      console.error('[team] could not save the record for an incoming report:', err.message);
+      try { store.patchMessage('in', from.id, env.id, { state: 'not filed', note: 'Could not save a record of it, so it was not filed (filing it could have made a duplicate).' }); } catch { /* the row stays filing: recover() makes it check reports */ }
+      changed();
+      report(from.id, env.id, 'failed', 'could not save a record of it, so it was not filed');
+      return { status: 500, json: { ok: false } };
+    }
     startFiling(from.id, env.id);
-    store.records.set(...staged);
     store.countAccepted(from.id);
     changed();
     return { status: 200, json: { ok: true, receipt } };
@@ -1116,7 +1125,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   /** What the UI lists: everything a person has to act on, plus the newest 200 (actionable ones never fall off). */
   function messagesForUi() {
     const all = store.messages();
-    const act = new Set(['held', 'needs attention', 'unconfirmed', 'not delivered', 'waiting', 'routing', 'queued', 'sending']);
+    const act = new Set(['held', 'needs attention', 'unconfirmed', 'not delivered', 'waiting', 'routing', 'queued', 'sending', 'filing', 'not filed', 'check reports']);
     const recent = new Set(all.slice(-200));
     // Rows show the teammate's CURRENT name (a rename after the row was written must not leave a stale label).
     const current = store.peers(); // read once for the whole list

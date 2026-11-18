@@ -2071,3 +2071,37 @@ test('report r2: a report left "check reports" can be dismissed once a person ha
   assert.equal(a.store.messages().find((m) => m.dir === 'in').state, 'dismissed');
   a2.stop(); b.svc.stop();
 });
+
+test('report r4: a report whose dedupe record cannot be saved is never filed, and the sender hears why', async () => {
+  const tn = net();
+  let filed = 0;
+  const a = install('Sam', tn, { fileReport: async () => { filed += 1; return { ok: true, url: 'https://github.com/o/r/issues/1' }; } });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  const realSet = a.store.records.set;
+  a.store.records.set = () => { throw new Error('disk full'); };
+  const sent = b.svc.send('Sam', REPORT, { kind: 'report' });
+  await b.svc.pump(); await flush(); await flush();
+  a.store.records.set = realSet;
+  assert.equal(filed, 0, 'nothing filed without a durable record');
+  const row = a.store.messages().find((m) => m.dir === 'in');
+  assert.equal(row.state, 'not filed');
+  await a.svc.pumpReports?.(); await flush();
+  const out = b.store.messages().find((m) => m.id === sent.id);
+  assert.equal(out.stage, 'failed');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('report r4: unresolved report rows stay in the UI list after 200 newer rows', async () => {
+  const tn = net();
+  const a = install('Sam', tn, { fileReport: async () => ({ ok: false, reason: 'no access' }) });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.svc.send('Sam', REPORT, { kind: 'report' });
+  await b.svc.pump(); await flush(); await flush();
+  const row = a.store.messages().find((m) => m.dir === 'in');
+  assert.equal(row.state, 'not filed');
+  for (let i = 0; i < 210; i += 1) a.store.putMessage({ dir: 'out', id: `x${i}`, peer: row.peer, peerName: 'B', kind: 'note', text: 't', at: now(), state: 'delivered' });
+  assert.ok(a.svc.messagesForUi().some((m) => m.id === row.id), 'the not-filed report is still listed');
+  a.svc.stop(); b.svc.stop();
+});
