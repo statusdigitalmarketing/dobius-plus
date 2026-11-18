@@ -1742,11 +1742,14 @@ export function addApnsToken({ token, pairToken, pairingId, seq }, canTake = () 
   // regAt is renewed every time (Apple may hand back the very token it called Unregistered, and a drop judged before
   // this registration must not remove it, Codex round 22); addedAt, which sends use, stays.
   if (mine && mine.token === token) {
+    // An explicitly older frame (a lower seq) never renames where taps go (Codex PR 31); read before seq moves.
+    const older = seqOk !== null && typeof mine.seq === 'number' && seqOk < mine.seq;
     const keepSeq = seqOk !== null && (typeof mine.seq !== 'number' || seqOk > mine.seq) ? seqOk : mine.seq;
     mine.seq = keepSeq;
     // The phone's id for this Mac can change under the same pairing (its record replaced or migrated): the newest
     // registration names it, or every tap carries an id the phone no longer has ("no longer paired", 2026-11-18).
-    if (id && mine.pairingId !== id) mine.pairingId = id;
+    // ponytail: same seq (iOS gave the same token) cannot be ordered; the latest frame wins there.
+    if (id && mine.pairingId !== id && !older) mine.pairingId = id;
     mine.regAt = Math.max(Date.now(), (mine.regAt || 0) + 1);
     saveConfig(config);
     return mine;

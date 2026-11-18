@@ -163,3 +163,15 @@ test('2026-11-18: a refused take never changes the id the owning phone\'s taps c
   assert.equal(e.pairingId, 'phone-old-id', 'another pairing cannot rename where the owner\'s taps go');
   cm.removeApnsTokensByPairToken('OLD');
 });
+
+test('2026-11-18: a late, older registration from the same pairing never renames the id taps carry', () => {
+  const T7 = '5b'.repeat(32);
+  cm.addApnsToken({ token: T7, pairToken: 'Q', pairingId: 'current-id', seq: 2000 });
+  cm.addApnsToken({ token: T7, pairToken: 'Q', pairingId: 'obsolete-id', seq: 1000 });
+  const e = cm.getApnsTokens().find((t) => t.pairToken === 'Q');
+  assert.equal(e.pairingId, 'current-id');
+  assert.equal(e.seq, 2000);
+  cm.addApnsToken({ token: T7, pairToken: 'Q', pairingId: 'newer-id', seq: 2000 });
+  assert.equal(cm.getApnsTokens().find((t) => t.pairToken === 'Q').pairingId, 'newer-id', 'the same age still updates');
+  cm.removeApnsTokensByPairToken('Q');
+});
