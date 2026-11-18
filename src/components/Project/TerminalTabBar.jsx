@@ -33,8 +33,6 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
   const setNewTabPickerOpen = useStore((s) => s.setNewTabPickerOpen);
   const addBrowserTab = useStore((s) => s.addBrowserTab);
   const reorderTabs = useStore((s) => s.reorderTabs);
-  const closeOtherTabs = useStore((s) => s.closeOtherTabs);
-  const closeTabsToRight = useStore((s) => s.closeTabsToRight);
   const monitoredTabs = useStore((s) => s.monitoredTabs);
   const toggleMonitor = useStore((s) => s.toggleMonitor);
   const currentProjectPath = useStore((s) => s.currentProjectPath);
@@ -213,7 +211,7 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
       scrollback = state?.scrollback || null;
     }
     await autoCheckpoint(tabId);
-    // Decided on the tabs as they are NOW, after the awaits: another close (Close Others, Cmd+W, a second sidebar
+    // Decided on the tabs as they are NOW, after the awaits: another close (Cmd+W, a second sidebar
     // close) may have run meanwhile. A tab already gone is left alone, and the last tab is never killed: removeTab
     // keeps the last tab, so killing it would leave a tab with a dead terminal (Codex sidebar round 2).
     const live = useStore.getState().terminalTabs;
@@ -806,7 +804,6 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
           y={contextMenu.y}
           tabId={contextMenu.tabId}
           tabCount={tabs.length}
-          tabIndex={tabs.findIndex((t) => t.id === contextMenu.tabId)}
           isPinned={!!tabs.find((t) => t.id === contextMenu.tabId)?.pinned}
           isTeamOrchestrator={teamTab === contextMenu.tabId}
           onTeamOrchestrator={window.electronAPI?.teamSettings ? () => {
@@ -838,14 +835,6 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
             const target = contextMenu.tabId;
             setContextMenu(null);
             snoozeTabNow(target, until);
-          }}
-          onCloseOthers={() => {
-            closeOtherTabs(contextMenu.tabId);
-            setContextMenu(null);
-          }}
-          onCloseToRight={() => {
-            closeTabsToRight(contextMenu.tabId);
-            setContextMenu(null);
           }}
           onDock={tearOffTabId ? () => {
             setContextMenu(null);
@@ -958,7 +947,7 @@ function timeAgo(ts) {
   return `${Math.floor(diff / 86400000)}d ago`;
 }
 
-function ContextMenu({ x, y, tabCount, tabIndex, canSnooze, onSnooze, isPinned, isTeamOrchestrator, onTeamOrchestrator, isProjectOrchestrator, onProjectOrchestrator, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onCopyLastResponse, onContinueAccount, onDock, onDismiss }) {
+function ContextMenu({ x, y, tabCount, canSnooze, onSnooze, isPinned, isTeamOrchestrator, onTeamOrchestrator, isProjectOrchestrator, onProjectOrchestrator, isSplit, isMonitored, onMonitor, onRename, onClose, onPin, onSplit, onCopyLastResponse, onContinueAccount, onDock, onDismiss }) {
   const recentlyClosedTabs = useStore((s) => s.recentlyClosedTabs);
   const reopenClosedTab = useStore((s) => s.reopenClosedTab);
   // Kept inside the window: opened low in the sidebar it would otherwise run off the bottom, out of reach (Codex).
@@ -1055,9 +1044,8 @@ function ContextMenu({ x, y, tabCount, tabIndex, canSnooze, onSnooze, isPinned, 
     // Windows applies no saved account to a terminal, so moving would do nothing there (Max, 2026-11-09).
     ...(onContinueAccount ? [{ label: 'Move to account…', onClick: onContinueAccount }] : []),
     { type: 'divider' },
+    // Only this tab: Close Others and Close to Right closed working tabs by mistake (Brett, Asana 1220678819527538).
     { label: 'Close', onClick: onClose, disabled: tabCount <= 1 },
-    { label: 'Close Others', onClick: onCloseOthers, disabled: tabCount <= 1 },
-    { label: 'Close to Right', onClick: onCloseToRight, disabled: tabIndex >= tabCount - 1 },
   ];
 
   // Snooze picks, beside the menu. Rendered inside the menu's own element so its clicks and focus count as the menu's.

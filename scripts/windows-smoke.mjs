@@ -168,9 +168,10 @@ try {
   await page.locator('button[draggable="true"]').first().click({ button: 'right' });
   const menu = await waitFor(async () => {
     const t = await page.evaluate(() => document.body.innerText);
-    return t.includes('Close Others') ? t : null;
+    return /\bRename\b/.test(t) && /\b(Pin|Unpin) Tab\b/.test(t) ? t : null; // rows every tab menu has (Close Others is gone, 2.2.40)
   }, 10000, 500);
   step('tab menu opens without Move to account', !!menu && !menu.includes('Move to account'), menu ? '' : 'menu did not open');
+  step('tab menu has no Close Others or Close to Right', !!menu && !/Close Others|Close to Right/.test(menu));
   await page.screenshot({ path: path.join(out, '6-tab-menu.png') });
   await page.keyboard.press('Escape');
 
