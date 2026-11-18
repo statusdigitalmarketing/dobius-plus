@@ -116,11 +116,15 @@ test('relayedIssue: one clean title line, attribution by fingerprint, a forged m
     peer: FP, id: '6f1c2d3e-0000-4000-8000-000000000001', selfName: 'Sam "the boss" <x>',
   });
   assert.equal(title, '[report] Tabs froze after sleep');
-  assert.match(body, /^what I saw/);
-  assert.doesNotMatch(body, /ffff\/1111/, 'the sender cannot plant a marker');
+  assert.match(body, /\n\nwhat I saw\n/);
+  assert.doesNotMatch(body, /<!-- dobius-relayed-report ffff/, 'the sender cannot plant a marker');
+  assert.equal(body.split('<!--').length - 1, 1, 'only our own marker opens a comment');
   assert.match(body, /fingerprint abcde-12345\./);
   assert.match(body, /calls itself "Sam the boss x"\./, 'the chosen name is quoted and cleaned, never the attribution');
-  assert.match(body, new RegExp(`<!-- dobius-relayed-report ${FP}/6f1c2d3e-0000-4000-8000-000000000001 -->$`));
+  assert.match(body, new RegExp(`^> Relayed by .*\\n<!-- dobius-relayed-report ${FP}/6f1c2d3e-0000-4000-8000-000000000001 -->\\n`));
+  const hidden = relayedIssue({ text: 't\nbody <!-- never closed', peer: FP, id: 'x' }).body;
+  assert.ok(hidden.indexOf('Relayed by') < hidden.indexOf('never closed'), 'an unclosed comment in their text cannot hide the attribution');
+  assert.doesNotMatch(hidden, /body <!--/);
   assert.equal(relayedIssue({ text: '[report] Already tagged\nbody', peer: FP, id: 'x' }).title, '[report] Already tagged');
   assert.equal(relayedIssue({ text: '', peer: FP, id: 'x' }).title, '[report] A problem in Dobius+');
   assert.equal(relayedIssue({ text: 'x'.repeat(300), peer: FP, id: 'x' }).title.length, 120);
@@ -130,7 +134,7 @@ test('relayText round-trips through relayedIssue', () => {
   const rep = buildReport({ text: 'It crashed\nmore detail', env: ENV, home: '/Users/sam' });
   const issue = relayedIssue({ text: relayText(rep), peer: FP, id: 'x' });
   assert.equal(issue.title, rep.title);
-  assert.ok(issue.body.startsWith(rep.body), 'the body arrives whole, the footer after it');
+  assert.ok(issue.body.endsWith(rep.body.replace(/<!--/g, '&lt;!--').replace(/--!?>/g, '--&gt;')), 'the body arrives whole, after the attribution');
 });
 
 test('fileRelayedReport files with this computer’s gh, and says why when it cannot', async () => {

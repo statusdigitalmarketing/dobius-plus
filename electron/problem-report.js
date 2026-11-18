@@ -97,12 +97,14 @@ export function relayedIssue({ text, peer, id, selfName = '' }) {
   const name = String(selfName).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029"`<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
   const fp = String(peer || '').replace(/[^0-9a-z]/gi, '').slice(0, 64);
   const mid = String(id || '').replace(/[^0-9a-f-]/gi, '').slice(0, 36);
+  // The attribution goes FIRST, and every HTML comment opener or closer in their text is defanged: an unclosed `<!--`
+  // in the text could otherwise hide the attribution and the marker in the rendered issue, or forge a marker.
+  const said = (nl < 0 ? '' : s.slice(nl + 1)).replace(/^\n+/, '').replace(/<!--/g, '&lt;!--').replace(/--!?>/g, '--&gt;');
   const body = [
-    (nl < 0 ? '' : s.slice(nl + 1)).replace(/^\n+/, '').replace(/<!--\s*dobius-relayed-report[^>]*-->/g, ''),
-    '',
-    '---',
-    `Relayed by a linked teammate's Dobius, fingerprint ${shortFp(fp)}.${name ? ` Their Dobius calls itself "${name}".` : ''}`,
+    `> Relayed by a linked teammate's Dobius, fingerprint ${shortFp(fp)}.${name ? ` Their Dobius calls itself "${name}".` : ''}`,
     `<!-- dobius-relayed-report ${fp}/${mid} -->`,
+    '',
+    said,
   ].join('\n');
   return { title, body };
 }
