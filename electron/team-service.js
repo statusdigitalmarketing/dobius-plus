@@ -283,9 +283,24 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const key = `${peer}|${id}`;
     if (filing.has(key)) return;
     filing.add(key);
-    fileChain = fileChain.then(() => fileOne(peer, id)).catch((err) => {
+    let settled = true;
+    fileChain = fileChain.then(async () => { settled = await fileOne(peer, id) !== false; }).catch((err) => {
       console.error('[team] filing a report failed:', err?.message || err);
-    }).finally(() => filing.delete(key));
+    }).finally(() => {
+      // A result that could not be saved keeps its guard for the life of this process: never filed a second time.
+      if (settled) filing.delete(key);
+    });
+  }
+
+  /** Saves a filing's result, retrying a failed write (bounded, about 10 min) without filing again (Codex PR 30). */
+  async function settleFiling(peer, id, patch) {
+    for (let attempt = 0; ; attempt += 1) {
+      try { store.patchMessage('in', peer, id, patch); return true; } catch (err) {
+        console.error('[team] could not save a report\'s filing result:', err.message);
+        if (stopped || attempt >= 40) return false;
+        await sleep(15000);
+      }
+    }
   }
 
   async function fileOne(peer, id) {
@@ -306,15 +321,16 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     if (recent.length) filedTimes.set(peer, recent); else filedTimes.delete(peer);
     const why = String(result?.reason || 'it could not be filed').replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, ' ').slice(0, 200);
     if (result?.ok && result.url) {
-      store.patchMessage('in', peer, id, { state: 'filed', note: result.url, url: result.url, filedAt: now() });
+      if (!await settleFiling(peer, id, { state: 'filed', note: result.url, url: result.url, filedAt: now() })) return false;
       report(peer, id, 'done', result.url);
       notify('report', { name: row.peerName || '', url: result.url });
     } else {
-      store.patchMessage('in', peer, id, { state: 'not filed', note: why });
+      if (!await settleFiling(peer, id, { state: 'not filed', note: why })) return false;
       report(peer, id, 'failed', why);
       notify('report', { name: row.peerName || '', error: why });
     }
     changed();
+    return true;
   }
 
   // ---------- delivery queue (one at a time) ----------

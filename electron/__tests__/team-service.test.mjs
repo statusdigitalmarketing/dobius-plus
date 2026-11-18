@@ -2105,3 +2105,26 @@ test('report r4: unresolved report rows stay in the UI list after 200 newer rows
   assert.ok(a.svc.messagesForUi().some((m) => m.id === row.id), 'the not-filed report is still listed');
   a.svc.stop(); b.svc.stop();
 });
+
+test('report r5: a filing result that fails to save once is saved on retry, and the issue is filed once', async () => {
+  const tn = net();
+  let filed = 0;
+  const a = install('Sam', tn, { fileReport: async () => { filed += 1; return { ok: true, url: 'https://github.com/o/r/issues/7' }; } });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  const realPatch = a.store.patchMessage;
+  let fails = 1;
+  a.store.patchMessage = (...args) => { if (args[3]?.state === 'filed' && fails > 0) { fails -= 1; throw new Error('ENOSPC'); } return realPatch.apply(a.store, args); };
+  const sent = b.svc.send('Sam', REPORT, { kind: 'report' });
+  await b.svc.pump();
+  for (let i = 0; i < 6; i += 1) await flush();
+  a.store.patchMessage = realPatch;
+  const row = a.store.messages().find((m) => m.dir === 'in');
+  assert.equal(row.state, 'filed');
+  assert.equal(row.url, 'https://github.com/o/r/issues/7');
+  assert.equal(filed, 1);
+  // A same-id retry from the sender never files again.
+  await b.svc.retry?.(sent.id); await b.svc.pump(); await flush();
+  assert.equal(filed, 1);
+  a.svc.stop(); b.svc.stop();
+});
