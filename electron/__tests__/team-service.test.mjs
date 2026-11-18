@@ -53,6 +53,7 @@ function install(name, tailnet, opts = {}) {
     deliverDeps: opts.deliverDeps || (() => null),
     notify: (e, p) => { events.push([e, p]); opts.onNotify?.(e, p); },
     now, sleep: async (ms) => { clock += ms; hooks.onSleep?.(); },
+    fileReport: opts.fileReport || null,
   });
   tailnet.hosts.set(host, svc);
   return { store, svc, events, host, name, hooks };
@@ -1896,4 +1897,234 @@ test('a sent message their Mac reported a problem with stays listed after it dro
   a.store.putMessage({ dir: 'out', id: out, peer: 'p', text: 'x', state: 'delivered', stage: 'failed', at: clock });
   for (let i = 0; i < 205; i += 1) a.store.putMessage({ dir: 'in', id: `dddddddd-0000-4000-8000-${String(i).padStart(12, '0')}`, peer: 'p', text: 'x', state: 'routed', at: clock });
   assert.equal(a.svc.messagesForUi().some((m) => m.id === out), true);
+});
+
+// ---------- problem reports through a teammate (docs/report-via-team.md) ----------
+
+const flush = () => new Promise((r) => setImmediate(r));
+const REPORT = '[report] Tabs froze\n\nReported from Dobius+ 9.9.9.\n\n## What happened\n\nTabs froze';
+
+test('report: filed once with the receiver’s gh, never typed into a tab; the sender sees it filed', async () => {
+  const tn = net();
+  const filed = [];
+  const a = install('Sam', tn, {
+    deliverDeps: () => { throw new Error('a report must never reach the delivery queue'); },
+    fileReport: async (x) => { filed.push(x); return { ok: true, url: 'https://github.com/o/r/issues/12' }; },
+  });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  a.store.setSettings({ orchestratorTab: 'term-x-1' }); // pinned and Auto-route on: still never routed
+  const s = b.svc.send('Sam', REPORT, { kind: 'report' });
+  assert.equal(s.ok, true, s.error);
+  await b.svc.pump();
+  await flush(); await flush();
+  const row = a.store.messages().find((m) => m.dir === 'in');
+  assert.equal(row.kind, 'report');
+  assert.equal(row.state, 'filed');
+  assert.equal(row.url, 'https://github.com/o/r/issues/12');
+  assert.equal(filed.length, 1);
+  assert.equal(filed[0].text, REPORT);
+  assert.equal(filed[0].peer, b.svc.status().fp, 'attributed by fingerprint');
+  assert.equal(a.events.some(([e, p]) => e === 'report' && p.url), true);
+  assert.equal(a.events.some(([e]) => e === 'message'), false, 'no "team message" toast or phone alert');
+  await pumpAll(a.svc, b.svc);
+  const out = b.store.messages().find((m) => m.dir === 'out');
+  assert.equal(out.stage, 'done');
+  assert.equal(out.stageNote, 'https://github.com/o/r/issues/12');
+  // A retry under the same id (a lost receipt) is acknowledged, never filed again.
+  b.store.patchMessage('out', out.peer, out.id, { state: 'queued', nextAt: 0 });
+  await b.svc.pump(); await flush();
+  assert.equal(filed.length, 1);
+  assert.equal(b.store.messages().find((m) => m.dir === 'out').state, 'delivered');
+  // Send again would be a new id, so a second issue: refused for a report.
+  assert.match(b.svc.sendAgain(out.id).error, /Retry/);
+  a.svc.stop(); b.svc.stop();
+});
+
+test('report: a receiver that cannot file says why; more than 10 an hour from one teammate are not filed', async () => {
+  const tn = net();
+  let n = 0;
+  const a = install('Sam', tn, { fileReport: async () => { n += 1; return n === 1 ? { ok: false, reason: 'their GitHub login cannot see the reports repo either' } : { ok: true, url: `https://github.com/o/r/issues/${n}` }; } });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.svc.send('Sam', REPORT, { kind: 'report' });
+  await b.svc.pump(); await flush(); await flush();
+  assert.equal(a.store.messages().find((m) => m.dir === 'in').state, 'not filed');
+  await pumpAll(a.svc, b.svc);
+  const out = b.store.messages().find((m) => m.dir === 'out');
+  assert.equal(out.stage, 'failed');
+  assert.match(out.stageNote, /cannot see the reports repo either/);
+  for (let i = 0; i < 10; i += 1) b.svc.send('Sam', `${REPORT} ${i}`, { kind: 'report' });
+  await b.svc.pump();
+  for (let i = 0; i < 12; i += 1) await flush();
+  const rows = a.store.messages().filter((m) => m.dir === 'in');
+  assert.equal(rows.length, 11);
+  assert.equal(n, 10, 'the 11th in the hour never reached gh');
+  assert.equal(rows.filter((m) => m.state === 'filed').length, 9);
+  assert.match(rows.at(-1).note, /too many reports/);
+  a.svc.stop(); b.svc.stop();
+});
+
+test('report: one left filing by a quit is never filed again; a person checks the repo and the sender is told', async () => {
+  const tn = net();
+  let calls = 0;
+  const a = install('Sam', tn, { fileReport: () => { calls += 1; return new Promise(() => {}); } }); // gh never answers
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.svc.send('Sam', REPORT, { kind: 'report' });
+  await b.svc.pump(); await flush();
+  assert.equal(a.store.messages().find((m) => m.dir === 'in').state, 'filing');
+  assert.equal(calls, 1);
+  a.svc.stop();
+  // Dobius restarts on the same storage: a new service, the same rows.
+  let after = 0;
+  const a2 = createTeamService({ store: a.store, request: tn.request, endpoint: () => ({ host: a.host, port: 8420 }), deliverDeps: () => null, notify: () => {}, now, sleep: async () => {}, fileReport: async () => { after += 1; return { ok: true, url: 'https://github.com/o/r/issues/1' }; } });
+  tn.hosts.set(a.host, a2);
+  a2.start();
+  const row = a.store.messages().find((m) => m.dir === 'in');
+  assert.equal(row.state, 'check reports');
+  // The sender retries (its receipt was lost): acknowledged, still never filed.
+  const out = b.store.messages().find((m) => m.dir === 'out');
+  b.store.patchMessage('out', out.peer, out.id, { state: 'queued', nextAt: 0 });
+  await b.svc.pump(); await flush();
+  assert.equal(after, 0);
+  await pumpAll(a2, b.svc);
+  assert.equal(b.store.messages().find((m) => m.dir === 'out').stage, 'needs attention');
+  a2.stop(); b.svc.stop();
+});
+
+test('report: a signed status settles a row whose receipts were all lost, and no attempt sets it back', async () => {
+  const tn = net();
+  const a = install('Sam', tn, { fileReport: async () => ({ ok: true, url: 'https://github.com/o/r/issues/3' }) });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  // Every answer to /team/message is lost on the way back (the receiver did store it).
+  const real = tn.request;
+  tn.hosts.set(a.host, a.svc);
+  const lossy = async (req) => { const r = await real(req); return req.path === '/team/message' ? { error: 'ECONNRESET', reached: true } : r; };
+  const b2 = createTeamService({ store: b.store, request: lossy, endpoint: () => ({ host: b.host, port: 8420 }), deliverDeps: () => null, notify: () => {}, now, sleep: async () => {} });
+  tn.hosts.set(b.host, b2);
+  b.svc.stop();
+  b2.send('Sam', REPORT, { kind: 'report' });
+  await b2.pump(); await flush(); await flush();
+  assert.equal(b.store.messages().find((m) => m.dir === 'out').receipt, undefined, 'no receipt ever came back');
+  await a.svc.pumpReports();
+  const out = b.store.messages().find((m) => m.dir === 'out');
+  assert.equal(out.stage, 'done');
+  assert.equal(out.state, 'delivered', 'the signed status proved it arrived');
+  clock += 25 * 3600 * 1000;
+  await b2.pump();
+  assert.equal(b.store.messages().find((m) => m.dir === 'out').state, 'delivered', 'never unconfirmed after that');
+  a.svc.stop(); b2.stop();
+});
+
+test('store: a report being filed is never the row dropped at the cap', () => {
+  const s = createTeamStore({ dir: tmp(), box, now });
+  s.putMessage({ dir: 'in', id: 'f0000000-0000-4000-8000-000000000000', peer: 'p', kind: 'report', text: 'x', at: clock, state: 'filing' });
+  for (let i = 0; i < 500; i += 1) s.putMessage({ dir: 'in', id: `r-${i}`, peer: 'p', kind: 'ask', text: 'x', at: clock, state: 'routed' });
+  const list = s.messages();
+  assert.equal(list.length, 500);
+  assert.equal(list.some((m) => m.state === 'filing'), true);
+  assert.equal(list.some((m) => m.id === 'r-0'), false, 'the oldest handled row went instead');
+});
+
+test('report r2: a row a status settled while the pump awaited another row is never sent or reopened', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let sends = 0;
+  const slow = async (req) => { if (req.path === '/team/message') { sends += 1; if (sends === 1) await gate; } return tn.request(req); };
+  const b2 = createTeamService({ store: b.store, request: slow, endpoint: () => ({ host: b.host, port: 8420 }), deliverDeps: () => null, notify: () => {}, now, sleep: async () => {} });
+  b.svc.stop();
+  b2.send('Sam', 'first');
+  const second = b2.send('Sam', 'second');
+  const run = b2.pump();
+  await flush();
+  // While the first request hangs, a signed status settles the second (its receipt was lost earlier).
+  b.store.patchMessage('out', b.store.messages().find((m) => m.id === second.id).peer, second.id, { state: 'delivered', reached: true, stage: 'done', lastSeq: 1 });
+  release();
+  await run;
+  assert.equal(sends, 1, 'the settled row was not sent again');
+  assert.equal(b.store.messages().find((m) => m.id === second.id).state, 'delivered');
+  clock += 25 * 3600 * 1000;
+  await b2.pump();
+  assert.equal(b.store.messages().find((m) => m.id === second.id).state, 'delivered', 'never unconfirmed at the deadline');
+  b2.stop(); a.svc.stop();
+});
+
+test('report r2: a report left "check reports" can be dismissed once a person has looked', async () => {
+  const tn = net();
+  const a = install('Sam', tn, { fileReport: () => new Promise(() => {}) });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.svc.send('Sam', REPORT, { kind: 'report' });
+  await b.svc.pump(); await flush();
+  a.svc.stop();
+  const a2 = createTeamService({ store: a.store, request: tn.request, endpoint: () => ({ host: a.host, port: 8420 }), deliverDeps: () => null, notify: () => {}, now, sleep: async () => {} });
+  a2.start();
+  const row = a.store.messages().find((m) => m.dir === 'in');
+  assert.equal(row.state, 'check reports');
+  assert.equal(a2.dismiss('in', row.peer, row.id).ok, true);
+  assert.equal(a.store.messages().find((m) => m.dir === 'in').state, 'dismissed');
+  a2.stop(); b.svc.stop();
+});
+
+test('report r4: a report whose dedupe record cannot be saved is never filed, and the sender hears why', async () => {
+  const tn = net();
+  let filed = 0;
+  const a = install('Sam', tn, { fileReport: async () => { filed += 1; return { ok: true, url: 'https://github.com/o/r/issues/1' }; } });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  const realSet = a.store.records.set;
+  a.store.records.set = () => { throw new Error('disk full'); };
+  const sent = b.svc.send('Sam', REPORT, { kind: 'report' });
+  await b.svc.pump(); await flush(); await flush();
+  a.store.records.set = realSet;
+  assert.equal(filed, 0, 'nothing filed without a durable record');
+  const row = a.store.messages().find((m) => m.dir === 'in');
+  assert.equal(row.state, 'not filed');
+  await a.svc.pumpReports?.(); await flush();
+  const out = b.store.messages().find((m) => m.id === sent.id);
+  assert.equal(out.stage, 'failed');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('report r4: unresolved report rows stay in the UI list after 200 newer rows', async () => {
+  const tn = net();
+  const a = install('Sam', tn, { fileReport: async () => ({ ok: false, reason: 'no access' }) });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.svc.send('Sam', REPORT, { kind: 'report' });
+  await b.svc.pump(); await flush(); await flush();
+  const row = a.store.messages().find((m) => m.dir === 'in');
+  assert.equal(row.state, 'not filed');
+  for (let i = 0; i < 210; i += 1) a.store.putMessage({ dir: 'out', id: `x${i}`, peer: row.peer, peerName: 'B', kind: 'note', text: 't', at: now(), state: 'delivered' });
+  assert.ok(a.svc.messagesForUi().some((m) => m.id === row.id), 'the not-filed report is still listed');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('report r5: a filing result that fails to save once is saved on retry, and the issue is filed once', async () => {
+  const tn = net();
+  let filed = 0;
+  const a = install('Sam', tn, { fileReport: async () => { filed += 1; return { ok: true, url: 'https://github.com/o/r/issues/7' }; } });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  const realPatch = a.store.patchMessage;
+  let fails = 1;
+  a.store.patchMessage = (...args) => { if (args[3]?.state === 'filed' && fails > 0) { fails -= 1; throw new Error('ENOSPC'); } return realPatch.apply(a.store, args); };
+  const sent = b.svc.send('Sam', REPORT, { kind: 'report' });
+  await b.svc.pump();
+  for (let i = 0; i < 6; i += 1) await flush();
+  a.store.patchMessage = realPatch;
+  const row = a.store.messages().find((m) => m.dir === 'in');
+  assert.equal(row.state, 'filed');
+  assert.equal(row.url, 'https://github.com/o/r/issues/7');
+  assert.equal(filed, 1);
+  // A same-id retry from the sender never files again.
+  await b.svc.retry?.(sent.id); await b.svc.pump(); await flush();
+  assert.equal(filed, 1);
+  a.svc.stop(); b.svc.stop();
 });

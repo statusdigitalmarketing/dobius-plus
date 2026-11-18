@@ -25,6 +25,29 @@ export function teamOrchestratorTab() {
   try { const t = store?.settings()?.orchestratorTab; return typeof t === 'string' && t ? t : null; } catch { return null; }
 }
 
+/** Linked teammates a problem report can go through (docs/report-via-team.md): enabled ones, oldest link first. */
+export function reportTeammates() {
+  try {
+    if (!service) return [];
+    store.loadIdentity();
+    return Object.values(store.peers()).filter((p) => p.enabled)
+      .sort((a, b) => (a.linkedAt || 0) - (b.linkedAt || 0))
+      .map((p) => ({ id: p.id, name: oneLine(p.name, 80) || shortFp(p.id) }));
+  } catch (err) {
+    console.warn('[team] could not list teammates for a report:', err?.message || err);
+    return [];
+  }
+}
+
+/** Queue a problem report to one teammate, who files it with its own gh. Answers like service.send. */
+export function sendReportToTeammate(peerId, text) {
+  if (!service) return { ok: false, error: 'the team link is not set up on this computer' };
+  try { store.loadIdentity(); } catch { return { ok: false, error: 'the team link is not available on this computer' }; }
+  const peer = store.peers()[peerId];
+  if (!peer || !peer.enabled) return { ok: false, error: 'that teammate is not linked any more' };
+  return service.send(peer.id, text, { kind: 'report' });
+}
+
 export function getTeamService() {
   if (!service) return null;
   try { store.loadIdentity(); } catch { return null; } // no secure storage: the routes answer 404
@@ -50,7 +73,7 @@ function toast(title, body) {
  *   bridgeOpenDeps: createBridgeOpenDeps(...) from main.js, the same guards /openTab uses.
  */
 // onMessage(peerName): a team message arrived (the phone notifier; the name only, never the text).
-export function initTeam({ bridgeOpenDeps: w, endpoint, endpointProblem, onMessage = () => {} }) {
+export function initTeam({ bridgeOpenDeps: w, endpoint, endpointProblem, onMessage = () => {}, fileReport = null }) {
   if (service) return service;
   store = createTeamStore({
     dir: path.join(app.getPath('userData'), 'team'),
@@ -65,6 +88,7 @@ export function initTeam({ bridgeOpenDeps: w, endpoint, endpointProblem, onMessa
     request: teamRequest,
     endpoint,
     endpointProblem,
+    fileReport,
     deliverDeps: (tabId, authorized) => ({
       authorized,
       tabAlive: w.tabAlive,
@@ -111,6 +135,10 @@ export function initTeam({ bridgeOpenDeps: w, endpoint, endpointProblem, onMessa
       }
       if (event === 'handoff-held') toast('Team request not handed over', `A message for ${p.to} could not be typed into the orchestrator tab: ${p.note || 'unknown reason'}. Nothing was sent.`);
       if (event === 'inbox-full') toast('Team inbox full', `A message from ${p.name} was refused: act on the waiting ones in Tasks > Team.`);
+      if (event === 'report') {
+        const who = oneLine(p.name, 80) || 'a teammate';
+        toast(p.url ? `Filed a problem report from ${who}` : `Could not file a problem report from ${who}`, p.url || `${p.error || 'unknown reason'}. It is in Tasks > Team.`);
+      }
       broadcast('team:changed', { event });
     },
   });
