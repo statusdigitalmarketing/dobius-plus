@@ -138,3 +138,30 @@ test('round 23: an entry without regAt, re-registered mid-send, survives the lat
   cm.removeApnsToken(t, 111, undefined); // the send had captured no regAt
   assert.equal(cm.getApnsTokens().some((x) => x.token === t), true);
 });
+
+test('2026-11-18: the same pairing re-registering under a new phone id updates the id taps carry', () => {
+  const T5 = 'ef'.repeat(32);
+  const first = cm.addApnsToken({ token: T5, pairToken: 'R', pairingId: 'old-id' });
+  assert.equal(first.pairingId, 'old-id');
+  const again = cm.addApnsToken({ token: T5, pairToken: 'R', pairingId: 'new-id' });
+  assert.equal(again.addedAt, first.addedAt, 'the same entry, so a send in flight still reaches it');
+  assert.equal(cm.getApnsTokens().find((t) => t.pairToken === 'R').pairingId, 'new-id');
+  cm.addApnsToken({ token: T5, pairToken: 'R', pairingId: 'bad id with spaces' });
+  assert.equal(cm.getApnsTokens().find((t) => t.pairToken === 'R').pairingId, 'new-id', 'an invalid id never replaces a good one');
+  cm.addApnsToken({ token: T5, pairToken: 'R' });
+  assert.equal(cm.getApnsTokens().find((t) => t.pairToken === 'R').pairingId, 'new-id', 'a registration without an id keeps it');
+  cm.removeApnsTokensByPairToken('R');
+});
+
+test('2026-11-18: a re-paired phone whose old pairing still owns its token gets taps under the id it uses now', () => {
+  const T6 = '9a'.repeat(32);
+  cm.addApnsToken({ token: T6, pairToken: 'OLD', pairingId: 'phone-old-id' });
+  // Re-paired at a new address; the old pairing is still paired on this Mac, so it keeps the token.
+  assert.deepEqual(cm.addApnsToken({ token: T6, pairToken: 'NEW', pairingId: 'phone-new-id' }, () => false), { taken: true });
+  const e = cm.getApnsTokens().find((t) => t.token === T6);
+  assert.equal(e.pairToken, 'OLD', 'ownership unchanged: unpairing the old pairing still stops it');
+  assert.equal(e.pairingId, 'phone-new-id', 'taps name the pairing the phone has now');
+  cm.addApnsToken({ token: T6, pairToken: 'NEW', pairingId: '' }, () => false);
+  assert.equal(cm.getApnsTokens().find((t) => t.token === T6).pairingId, 'phone-new-id', 'no id never clears it');
+  cm.removeApnsTokensByPairToken('OLD');
+});

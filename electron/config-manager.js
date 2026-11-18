@@ -1730,7 +1730,14 @@ export function addApnsToken({ token, pairToken, pairingId, seq }, canTake = () 
   if (Array.isArray(config.apnsOptOuts) && config.apnsOptOuts.includes(optOutKey(pairToken))) return { optedOut: true };
   const list = Array.isArray(config.apnsTokens) ? config.apnsTokens : [];
   const prior = list.find((t) => t?.token === token);
-  if (prior && prior.pairToken !== pairToken && !canTake(prior)) return { taken: true };
+  const id = typeof pairingId === 'string' && /^[\w.:-]{1,64}$/.test(pairingId) ? pairingId : null;
+  if (prior && prior.pairToken !== pairToken && !canTake(prior)) {
+    // Ownership stays with the older pairing (unpairing it still stops the pushes), but this phone, which holds the
+    // device token only iOS gave it, is the one tapping: taps carry the id it uses now, not the one of a pairing it
+    // replaced at a new address and could not unregister there ("no longer paired" on every tap, 2026-11-18).
+    if (id && prior.pairingId !== id) { prior.pairingId = id; saveConfig(config); }
+    return { taken: true };
+  }
   const seqOk = typeof seq === 'number' && Number.isFinite(seq) && seq > 0 ? Math.round(seq) : null;
   const mine = list.find((t) => t?.pairToken === pairToken);
   if (mine && mine.token !== token && seqOk !== null && typeof mine.seq === 'number' && seqOk < mine.seq) return { stale: true, haveSeq: mine.seq };
@@ -1741,6 +1748,9 @@ export function addApnsToken({ token, pairToken, pairingId, seq }, canTake = () 
   if (mine && mine.token === token) {
     const keepSeq = seqOk !== null && (typeof mine.seq !== 'number' || seqOk > mine.seq) ? seqOk : mine.seq;
     mine.seq = keepSeq;
+    // The phone's id for this Mac can change under the same pairing (its record replaced or migrated): the newest
+    // registration names it, or every tap carries an id the phone no longer has ("no longer paired", 2026-11-18).
+    if (id && mine.pairingId !== id) mine.pairingId = id;
     mine.regAt = Math.max(Date.now(), (mine.regAt || 0) + 1);
     saveConfig(config);
     return mine;
@@ -1748,7 +1758,7 @@ export function addApnsToken({ token, pairToken, pairingId, seq }, canTake = () 
   const entry = {
     token,
     pairToken,
-    pairingId: typeof pairingId === 'string' && /^[\w.:-]{1,64}$/.test(pairingId) ? pairingId : null,
+    pairingId: id,
     // A token that moved to another pairing keeps the host Apple already took it on.
     env: prior && APNS_ENVS.has(prior.env) ? prior.env : 'auto',
     addedAt: Date.now(),
