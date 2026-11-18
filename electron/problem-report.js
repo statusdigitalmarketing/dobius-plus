@@ -95,7 +95,7 @@ export function relayedIssue({ text, peer, id, selfName = '' }) {
   const prefixed = /^\[report\]/i.test(t) ? t : `[report] ${t}`;
   const title = prefixed.length > 120 ? `${prefixed.slice(0, 117)}...` : prefixed;
   const name = String(selfName).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029"`<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
-  const fp = String(peer || '').replace(/[^0-9a-z]/gi, '').slice(0, 64);
+  const fp = String(peer || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64); // base64url, like team fingerprints
   const mid = String(id || '').replace(/[^0-9a-f-]/gi, '').slice(0, 36);
   // The attribution goes FIRST, and every HTML comment opener or closer in their text is defanged: an unclosed `<!--`
   // in the text could otherwise hide the attribution and the marker in the rendered issue, or forge a marker.

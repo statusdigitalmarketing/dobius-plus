@@ -35,7 +35,8 @@ const REPORT_STAGES = {
   'needs attention': { label: 'may be filed, they need to check', color: '#F87300' },
 };
 // Only a GitHub issue link is offered to open: the note came from the teammate's Mac.
-const ISSUE_URL = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/\d+$/;
+// No `.` or `..` segment: the browser would normalise it into another page (Codex PR 30).
+const ISSUE_URL = /^https:\/\/github\.com\/(?!\.\.?\/)[\w.-]+\/(?!\.\.?\/)[\w.-]+\/issues\/\d+$/;
 const issueLink = (m) => {
   const u = m.kind !== 'report' ? null : m.dir === 'in' ? (m.state === 'filed' ? m.url : null) : (m.stage === 'done' ? m.stageNote : null);
   return typeof u === 'string' && ISSUE_URL.test(u) ? u : null;

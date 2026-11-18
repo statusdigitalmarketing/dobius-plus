@@ -2027,3 +2027,47 @@ test('store: a report being filed is never the row dropped at the cap', () => {
   assert.equal(list.some((m) => m.state === 'filing'), true);
   assert.equal(list.some((m) => m.id === 'r-0'), false, 'the oldest handled row went instead');
 });
+
+test('report r2: a row a status settled while the pump awaited another row is never sent or reopened', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let sends = 0;
+  const slow = async (req) => { if (req.path === '/team/message') { sends += 1; if (sends === 1) await gate; } return tn.request(req); };
+  const b2 = createTeamService({ store: b.store, request: slow, endpoint: () => ({ host: b.host, port: 8420 }), deliverDeps: () => null, notify: () => {}, now, sleep: async () => {} });
+  b.svc.stop();
+  b2.send('Sam', 'first');
+  const second = b2.send('Sam', 'second');
+  const run = b2.pump();
+  await flush();
+  // While the first request hangs, a signed status settles the second (its receipt was lost earlier).
+  b.store.patchMessage('out', b.store.messages().find((m) => m.id === second.id).peer, second.id, { state: 'delivered', reached: true, stage: 'done', lastSeq: 1 });
+  release();
+  await run;
+  assert.equal(sends, 1, 'the settled row was not sent again');
+  assert.equal(b.store.messages().find((m) => m.id === second.id).state, 'delivered');
+  clock += 25 * 3600 * 1000;
+  await b2.pump();
+  assert.equal(b.store.messages().find((m) => m.id === second.id).state, 'delivered', 'never unconfirmed at the deadline');
+  b2.stop(); a.svc.stop();
+});
+
+test('report r2: a report left "check reports" can be dismissed once a person has looked', async () => {
+  const tn = net();
+  const a = install('Sam', tn, { fileReport: () => new Promise(() => {}) });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.svc.send('Sam', REPORT, { kind: 'report' });
+  await b.svc.pump(); await flush();
+  a.svc.stop();
+  const a2 = createTeamService({ store: a.store, request: tn.request, endpoint: () => ({ host: a.host, port: 8420 }), deliverDeps: () => null, notify: () => {}, now, sleep: async () => {} });
+  a2.start();
+  const row = a.store.messages().find((m) => m.dir === 'in');
+  assert.equal(row.state, 'check reports');
+  assert.equal(a2.dismiss('in', row.peer, row.id).ok, true);
+  assert.equal(a.store.messages().find((m) => m.dir === 'in').state, 'dismissed');
+  a2.stop(); b.svc.stop();
+});

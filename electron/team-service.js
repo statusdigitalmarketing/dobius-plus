@@ -346,7 +346,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   function dismiss(dir, peer, id) {
     const msg = store.messages().find((x) => x.dir === dir && x.peer === peer && x.id === id);
     const stuck = msg?.state === 'routing' && current !== `${peer}|${id}`;
-    if (!msg || (!stuck && !['held', 'needs attention', 'unconfirmed', 'not delivered'].includes(msg.state))) return { ok: false, error: 'nothing to dismiss' };
+    if (!msg || (!stuck && !['held', 'needs attention', 'unconfirmed', 'not delivered', 'check reports'].includes(msg.state))) return { ok: false, error: 'nothing to dismiss' };
     store.patchMessage(dir, peer, id, { state: 'dismissed', note: null });
     changed();
     return { ok: true };
@@ -921,8 +921,11 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     let retryLater = false;
     try {
       const t = now();
-      for (const msg of store.messages().filter((x) => x.dir === 'out' && (x.state === 'queued' || x.state === 'sending'))) {
+      for (const snap of store.messages().filter((x) => x.dir === 'out' && (x.state === 'queued' || x.state === 'sending'))) {
         if (stopped) return;
+        // Read afresh: an earlier row's request was awaited, and a signed status may have settled this one meanwhile.
+        const msg = store.messages().find((x) => x.dir === 'out' && x.peer === snap.peer && x.id === snap.id);
+        if (!msg || (msg.state !== 'queued' && msg.state !== 'sending')) continue;
         try {
           if (t >= msg.deadline) {
             const maybe = msg.reached || msg.state === 'sending';
@@ -998,7 +1001,11 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     }
   }
 
-  async function attemptSend(msg) {
+  async function attemptSend(snapshot) {
+    // The pump's list was read before earlier rows' requests: a signed status may have settled this one meanwhile
+    // (receiveStatus), and a stale copy must never set it back to sending (Codex PR 30).
+    const msg = store.messages().find((x) => x.dir === 'out' && x.peer === snapshot.peer && x.id === snapshot.id);
+    if (!msg || (msg.state !== 'queued' && msg.state !== 'sending')) return;
     const peer = store.peers()[msg.peer];
     const n = (msg.attempts || 0) + 1;
     const backoff = BACKOFF_MS[Math.min(n - 1, BACKOFF_MS.length - 1)];

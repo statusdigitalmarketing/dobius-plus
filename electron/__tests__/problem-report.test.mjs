@@ -173,3 +173,10 @@ test('relay: the same report goes to send(), under the team limit even at the lo
     assert.equal((await submit.relay({ text: '  ', send: () => ({ ok: true }) })).reason, 'empty');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('relayedIssue keeps a base64url fingerprint whole (underscore and dash)', () => {
+  const fp = 'ab_cd-efghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ';
+  const { body } = relayedIssue({ text: 't\nb', peer: fp, id: 'x' });
+  assert.match(body, /fingerprint ab_cd--efgh\./);
+  assert.ok(body.includes(`<!-- dobius-relayed-report ${fp}/`));
+});
