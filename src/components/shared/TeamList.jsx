@@ -22,6 +22,24 @@ const STATES = {
   held: { label: 'waiting for you', color: '#F87300' },
   'needs attention': { label: 'check the tab', color: 'var(--danger)' },
   dismissed: { label: 'dismissed', color: 'var(--dim)' },
+  // A teammate's problem report this Mac files for them (docs/report-via-team.md).
+  filing: { label: 'filing the report', color: 'var(--accent)' },
+  filed: { label: 'report filed', color: '#3FB950' },
+  'not filed': { label: 'not filed', color: 'var(--danger)' },
+  'check reports': { label: 'may be filed, check the reports repo', color: '#F87300' },
+};
+// What the teammate's Mac reported back about a problem report this Mac sent through it.
+const REPORT_STAGES = {
+  done: { label: 'filed', color: '#3FB950' },
+  failed: { label: 'not filed', color: 'var(--danger)' },
+  'needs attention': { label: 'may be filed, they need to check', color: '#F87300' },
+};
+// Only a GitHub issue link is offered to open: the note came from the teammate's Mac.
+// No `.` or `..` segment: the browser would normalise it into another page (Codex PR 30).
+const ISSUE_URL = /^https:\/\/github\.com\/(?!\.\.?\/)[\w.-]+\/(?!\.\.?\/)[\w.-]+\/issues\/\d+$/;
+const issueLink = (m) => {
+  const u = m.kind !== 'report' ? null : m.dir === 'in' ? (m.state === 'filed' ? m.url : null) : (m.stage === 'done' ? m.stageNote : null);
+  return typeof u === 'string' && ISSUE_URL.test(u) ? u : null;
 };
 // What the teammate's Mac reported back about a message this Mac sent (docs/team-communicator.md, "Lifecycle").
 const STAGES = {
@@ -36,9 +54,10 @@ const STAGES = {
 };
 // The label, colour and start time of where a message is now.
 function stageOf(m) {
+  if (m.dir === 'out' && m.kind === 'report' && REPORT_STAGES[m.stage]) return { ...REPORT_STAGES[m.stage], since: m.stageAt || m.at, note: issueLink(m) ? null : m.stageNote };
   if (m.dir === 'out' && m.stage && STAGES[m.stage]) return { ...STAGES[m.stage], since: m.stageAt || m.at, note: m.stageNote };
   const st = STATES[m.state] || { label: m.state, color: 'var(--dim)' };
-  return { ...st, since: (m.dir === 'out' ? m.deliveredAt : m.routedAt) || m.at, note: m.note };
+  return { ...st, since: (m.dir === 'out' ? m.deliveredAt : m.filedAt || m.routedAt) || m.at, note: issueLink(m) ? null : m.note };
 }
 export { needsPerson };
 
@@ -123,6 +142,7 @@ export default function TeamList({ query }) {
           <span style={{ color: 'var(--dim)' }}>{isReply ? '↳' : ''}{m.dir === 'in' ? '←' : '→'}</span>
           <span style={{ color: 'var(--fg)', fontWeight: 600 }}>{m.peerName || m.peer.slice(0, 10)}</span>
           {m.kind === 'reply' && <span style={{ color: 'var(--dim)' }}>reply</span>}
+          {m.kind === 'report' && <span style={{ color: 'var(--dim)' }}>problem report</span>}
           <span style={{ color: st.color }}>{st.label}</span>
           <span style={{ color: 'var(--dim)' }} title="How long it has been in this state">{ago(st.since)}</span>
           <span style={{ color: 'var(--dim)', marginLeft: 'auto' }}>{m.id.slice(0, 8)} {ago(m.at)}</span>
@@ -151,15 +171,16 @@ export default function TeamList({ query }) {
           </div>
         )}
         <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+          {issueLink(m) && <button style={small()} title={issueLink(m)} onClick={() => api.openExternal?.(issueLink(m))}>Open issue</button>}
           {m.dir === 'in' && (m.state === 'held' || m.state === 'waiting') && <button style={small()} onClick={() => act(api.teamRouteNow(m.peer, m.id))}>Send to orchestrator</button>}
           {m.dir === 'in' && <button style={small('var(--dim)')} onClick={() => { setReplyTo(replyTo === key ? null : key); setReplyText(''); }}>Reply</button>}
           {m.dir === 'out' && (m.state === 'unconfirmed' || m.state === 'not delivered') && (
             <button style={small()} title="Same message id: a copy that did arrive is not delivered twice" onClick={() => act(api.teamRetry(m.id))}>Retry</button>
           )}
-          {m.dir === 'out' && ['unconfirmed', 'not delivered', 'conflict'].includes(m.state) && (
+          {m.dir === 'out' && m.kind !== 'report' && ['unconfirmed', 'not delivered', 'conflict'].includes(m.state) && (
             <button style={small('var(--dim)')} title="A new message: they may see it twice" onClick={() => act(api.teamSendAgain(m.id))}>Send again</button>
           )}
-          {['held', 'needs attention', 'unconfirmed', 'not delivered', 'routing'].includes(m.state) && (
+          {['held', 'needs attention', 'unconfirmed', 'not delivered', 'routing', 'check reports', 'not filed'].includes(m.state) && (
             // Clears it for good (it can leave the list and frees its place in a full inbox); Done only hides it.
             <button style={small('var(--dim)')} title="Clear it for good: it stops counting, can leave the list and frees its place in a full inbox" onClick={() => act(api.teamDismiss(m.dir, m.peer, m.id))}>Dismiss</button>
           )}

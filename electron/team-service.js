@@ -37,8 +37,12 @@ const REPORTS_PER_MIN = 10;
 const REPORT_PAUSE_MS = 15 * 60 * 1000;
 const LINK_POLL_MS = 2000;
 const SIG_HEADER = 'x-dobius-team-sig';
+// A teammate's problem reports this Mac files for them (docs/report-via-team.md): at most this many per teammate an
+// hour, on top of the team rate limits. The times are kept per teammate and pruned to the last hour (bounded).
+const REPORT_FILES_PER_HOUR = 10;
+const HOUR_MS = 3600 * 1000;
 
-export function createTeamService({ store, request, endpoint, endpointProblem = () => null, deliverDeps, notify = () => {}, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+export function createTeamService({ store, request, endpoint, endpointProblem = () => null, deliverDeps, notify = () => {}, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), fileReport = null }) {
   const invites = new Map(); // inviteId -> { secret, expiresAt, joiner, decision, conf? }
   const unlinkedAt = new Map(); // peer id -> when this person unlinked it (a join in flight must not undo that)
   let pumpTimer = null;
@@ -214,6 +218,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
       if (existing.state === 'waiting') enqueueDelivery(from.id, env.id);
       return { status: 200, json: { ok: true, receipt: r.receipt } };
     }
+    if (env.kind === 'report') return receiveReport(env, from, hash, staged, r.receipt);
     const s = store.settings();
     const routable = from.autoRoute && s.orchestratorTab;
     try {
@@ -236,6 +241,96 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     if (!routable) report(from.id, env.id, 'held', from.autoRoute ? 'no orchestrator tab is pinned' : 'Auto-route is off for this sender');
     enqueueDelivery(from.id, env.id);
     return { status: 200, json: { ok: true, receipt: r.receipt } };
+  }
+
+  // ---------- a teammate's problem report (docs/report-via-team.md) ----------
+
+  const filing = new Set(); // `${peer}|${id}` being filed in this process
+  const filedTimes = new Map(); // peer -> times this Mac filed (or refused) their reports in the last hour
+  let fileChain = Promise.resolve(); // one filing at a time
+
+  // Stored and acknowledged like any message, but never typed into a tab and never in the delivery queue.
+  function receiveReport(env, from, hash, staged, receipt) {
+    try {
+      store.putMessage({
+        dir: 'in', id: env.id, peer: from.id, peerName: from.name, kind: 'report', replyTo: null,
+        text: env.text, hash, firstSentAt: env.firstSentAt, at: now(), state: 'filing', note: null,
+      });
+    } catch (err) {
+      console.error('[team] could not store an incoming report:', err.message);
+      if (err.code === 'INBOX_FULL') notify('inbox-full', { name: from.name });
+      return { status: 503, json: { ok: false } };
+    }
+    // The dedupe record is durable BEFORE anything is filed, as deliverJob does before typing: without it, a row
+    // evicted later and a retried send would file a second issue (Codex P1, PR 30). If it cannot be written, this
+    // report is not filed at all and the sender is told.
+    try {
+      store.records.set(...staged);
+    } catch (err) {
+      console.error('[team] could not save the record for an incoming report:', err.message);
+      try { store.patchMessage('in', from.id, env.id, { state: 'not filed', note: 'Could not save a record of it, so it was not filed (filing it could have made a duplicate).' }); } catch { /* the row stays filing: recover() makes it check reports */ }
+      changed();
+      report(from.id, env.id, 'failed', 'could not save a record of it, so it was not filed');
+      return { status: 500, json: { ok: false } };
+    }
+    startFiling(from.id, env.id);
+    store.countAccepted(from.id);
+    changed();
+    return { status: 200, json: { ok: true, receipt } };
+  }
+
+  function startFiling(peer, id) {
+    const key = `${peer}|${id}`;
+    if (filing.has(key)) return;
+    filing.add(key);
+    let settled = true;
+    fileChain = fileChain.then(async () => { settled = await fileOne(peer, id) !== false; }).catch((err) => {
+      console.error('[team] filing a report failed:', err?.message || err);
+    }).finally(() => {
+      // A result that could not be saved keeps its guard for the life of this process: never filed a second time.
+      if (settled) filing.delete(key);
+    });
+  }
+
+  /** Saves a filing's result, retrying a failed write (bounded, about 10 min) without filing again (Codex PR 30). */
+  async function settleFiling(peer, id, patch) {
+    for (let attempt = 0; ; attempt += 1) {
+      try { store.patchMessage('in', peer, id, patch); return true; } catch (err) {
+        console.error('[team] could not save a report\'s filing result:', err.message);
+        if (stopped || attempt >= 40) return false;
+        await sleep(15000);
+      }
+    }
+  }
+
+  async function fileOne(peer, id) {
+    const row = store.messages().find((x) => x.dir === 'in' && x.peer === peer && x.id === id);
+    if (!row || row.state !== 'filing') return;
+    const recent = (filedTimes.get(peer) || []).filter((t) => now() - t < HOUR_MS);
+    let result;
+    if (typeof fileReport !== 'function') result = { ok: false, reason: 'this Dobius cannot file reports' };
+    else if (recent.length >= REPORT_FILES_PER_HOUR) result = { ok: false, reason: 'too many reports in the last hour, try again later' };
+    else {
+      recent.push(now());
+      try {
+        result = await fileReport({ text: row.text, peer, id, selfName: store.peers()[peer]?.selfName || store.peers()[peer]?.name || row.peerName || '' });
+      } catch (err) {
+        result = { ok: false, reason: String(err?.message || err) };
+      }
+    }
+    if (recent.length) filedTimes.set(peer, recent); else filedTimes.delete(peer);
+    const why = String(result?.reason || 'it could not be filed').replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, ' ').slice(0, 200);
+    if (result?.ok && result.url) {
+      if (!await settleFiling(peer, id, { state: 'filed', note: result.url, url: result.url, filedAt: now() })) return false;
+      report(peer, id, 'done', result.url);
+      notify('report', { name: row.peerName || '', url: result.url });
+    } else {
+      if (!await settleFiling(peer, id, { state: 'not filed', note: why })) return false;
+      report(peer, id, 'failed', why);
+      notify('report', { name: row.peerName || '', error: why });
+    }
+    changed();
+    return true;
   }
 
   // ---------- delivery queue (one at a time) ----------
@@ -276,7 +371,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   function dismiss(dir, peer, id) {
     const msg = store.messages().find((x) => x.dir === dir && x.peer === peer && x.id === id);
     const stuck = msg?.state === 'routing' && current !== `${peer}|${id}`;
-    if (!msg || (!stuck && !['held', 'needs attention', 'unconfirmed', 'not delivered'].includes(msg.state))) return { ok: false, error: 'nothing to dismiss' };
+    if (!msg || (!stuck && !['held', 'needs attention', 'unconfirmed', 'not delivered', 'check reports', 'not filed'].includes(msg.state))) return { ok: false, error: 'nothing to dismiss' };
     store.patchMessage(dir, peer, id, { state: 'dismissed', note: null });
     changed();
     return { ok: true };
@@ -607,7 +702,11 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     // A row that is gone (or a report already applied) is still acked, so the reporter stops.
     if (row && rep.seq > (row.lastSeq || 0)) {
       const timeline = [...(Array.isArray(row.timeline) ? row.timeline : []), { state: rep.state, at: rep.at, note: rep.note, replyId: rep.replyId }].slice(-TIMELINE_MAX);
-      store.patchMessage('out', from.id, rep.id, { timeline, stage: rep.state, stageAt: rep.at, stageNote: rep.note, lastSeq: rep.seq });
+      // A signed status about this message proves it arrived: settle the transport too, so a lost receipt cannot leave
+      // it queued, then unconfirmed with Retry and Send again offered for something already handled (Codex PR 30).
+      const settle = ['queued', 'sending', 'unconfirmed', 'not delivered'].includes(row.state)
+        ? { state: 'delivered', reached: true, deliveredAt: row.deliveredAt || now(), note: null } : {};
+      store.patchMessage('out', from.id, rep.id, { timeline, stage: rep.state, stageAt: rep.at, stageNote: rep.note, lastSeq: rep.seq, ...settle });
       changed();
     }
     return { status: 200, json: { ok: true, ack: r.ack } };
@@ -829,6 +928,8 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   function sendAgain(id) {
     const msg = store.messages().find((x) => x.dir === 'out' && x.id === id);
     if (!msg) return { ok: false, error: 'no such message' };
+    // A new id could become a second issue on their side; Retry keeps the id, so a filed copy is not filed again.
+    if (msg.kind === 'report') return { ok: false, error: 'a report is only retried under the same id; use Retry' };
     return send(msg.peer, msg.text, { kind: msg.kind, replyTo: msg.replyTo });
   }
 
@@ -845,8 +946,11 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     let retryLater = false;
     try {
       const t = now();
-      for (const msg of store.messages().filter((x) => x.dir === 'out' && (x.state === 'queued' || x.state === 'sending'))) {
+      for (const snap of store.messages().filter((x) => x.dir === 'out' && (x.state === 'queued' || x.state === 'sending'))) {
         if (stopped) return;
+        // Read afresh: an earlier row's request was awaited, and a signed status may have settled this one meanwhile.
+        const msg = store.messages().find((x) => x.dir === 'out' && x.peer === snap.peer && x.id === snap.id);
+        if (!msg || (msg.state !== 'queued' && msg.state !== 'sending')) continue;
         try {
           if (t >= msg.deadline) {
             const maybe = msg.reached || msg.state === 'sending';
@@ -922,7 +1026,11 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     }
   }
 
-  async function attemptSend(msg) {
+  async function attemptSend(snapshot) {
+    // The pump's list was read before earlier rows' requests: a signed status may have settled this one meanwhile
+    // (receiveStatus), and a stale copy must never set it back to sending (Codex PR 30).
+    const msg = store.messages().find((x) => x.dir === 'out' && x.peer === snapshot.peer && x.id === snapshot.id);
+    if (!msg || (msg.state !== 'queued' && msg.state !== 'sending')) return;
     const peer = store.peers()[msg.peer];
     const n = (msg.attempts || 0) + 1;
     const backoff = BACKOFF_MS[Math.min(n - 1, BACKOFF_MS.length - 1)];
@@ -947,6 +1055,9 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
       // Anything but a VERIFIED receipt is retried until the deadline, a 409 included: a status code is not signed,
       // so whatever answers at that address (a reassigned name) cannot end the retries.
       const why = r.error || (r.status === 200 ? 'the receipt did not check out' : `answer ${r.status}`);
+      // A signed status that landed while this attempt was out already settled the row: keep it delivered.
+      const cur = store.messages().find((x) => x.dir === 'out' && x.peer === msg.peer && x.id === msg.id);
+      if (cur?.state === 'delivered') { changed(); return; }
       store.patchMessage('out', msg.peer, msg.id, { state: 'queued', reached, nextAt: now() + backoff, note: why });
     }
     changed();
@@ -994,6 +1105,11 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
           report(m.peer, m.id, 'needs attention', 'their Dobius quit while it was being typed; someone has to check their orchestrator tab');
         }
         if (m.dir === 'in' && m.state === 'waiting') enqueueDelivery(m.peer, m.id);
+        // A report cut off mid-filing may already be an issue: never filed again, a person checks the repo.
+        if (m.dir === 'in' && m.state === 'filing' && !filing.has(`${m.peer}|${m.id}`)) {
+          store.patchMessage('in', m.peer, m.id, { state: 'check reports', note: 'Dobius quit while filing this; it may or may not be in the reports repo' });
+          report(m.peer, m.id, 'needs attention', 'their Dobius quit while filing it; it may or may not be in the reports repo');
+        }
         if (m.dir === 'out' && m.state === 'sending') store.patchMessage('out', m.peer, m.id, { state: 'queued', reached: true });
       } catch (err) {
         console.error('[team] start-up recovery step failed:', err.message);
@@ -1025,7 +1141,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   /** What the UI lists: everything a person has to act on, plus the newest 200 (actionable ones never fall off). */
   function messagesForUi() {
     const all = store.messages();
-    const act = new Set(['held', 'needs attention', 'unconfirmed', 'not delivered', 'waiting', 'routing', 'queued', 'sending']);
+    const act = new Set(['held', 'needs attention', 'unconfirmed', 'not delivered', 'waiting', 'routing', 'queued', 'sending', 'filing', 'not filed', 'check reports']);
     const recent = new Set(all.slice(-200));
     // Rows show the teammate's CURRENT name (a rename after the row was written must not leave a stale label).
     const current = store.peers(); // read once for the whole list
