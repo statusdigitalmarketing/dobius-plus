@@ -4,9 +4,9 @@
 import { isDone } from '../../shared/team-done.js';
 
 // States where a person has to act (TeamList shows their labels).
-const ATTENTION = new Set(['unconfirmed', 'not delivered', 'conflict', 'held', 'needs attention']);
+const ATTENTION = new Set(['unconfirmed', 'not delivered', 'conflict', 'held', 'needs attention', 'check reports']);
 // Still on its way: nothing for a person to do yet, but not finished either.
-const IN_FLIGHT = new Set(['queued', 'sending', 'waiting', 'routing']);
+const IN_FLIGHT = new Set(['queued', 'sending', 'waiting', 'routing', 'filing']);
 // What a teammate's Mac reported that means it went wrong over there.
 const PROBLEM_STAGES = new Set(['held', 'needs attention', 'failed', 'stopped']);
 

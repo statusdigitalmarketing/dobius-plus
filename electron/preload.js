@@ -189,6 +189,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Claude Desktop MCP setup (v1.0.63): status + one-click install.
   errorLogInfo: () => ipcRenderer.invoke('errorLog:info'),
   reportProblem: (text, includeLog) => ipcRenderer.invoke('report:submit', { text, includeLog }),
+  reportRelay: (text, includeLog, peerId) => ipcRenderer.invoke('report:relay', { text, includeLog, peerId }),
   voiceConductorGet: () => ipcRenderer.invoke('voiceConductor:get'),
   voiceConductorSet: (enabled) => ipcRenderer.invoke('voiceConductor:set', enabled),
   errorLogReveal: () => ipcRenderer.invoke('errorLog:reveal'),

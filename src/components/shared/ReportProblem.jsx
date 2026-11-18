@@ -1,6 +1,7 @@
 // Status bar "Report a problem" (Sam, 2026-11-15). A small bug button next to the version opens a popover: say what
 // went wrong, optionally attach the last errors from this computer's log, Send. Main files it to the reports repo
-// through this computer's gh login (electron/problem-report.js); without access the report is copied to paste to Sam.
+// through this computer's gh login (electron/problem-report.js); without access the report is copied to paste to Sam,
+// and a linked teammate's Dobius can file it instead (docs/report-via-team.md).
 //
 // Overlay rules (NOTES 2026-10-19): role="dialog" (the terminal's paste listener and the What's new popup both respect
 // it), keydown stops at the dialog root so window shortcuts never fire while typing, focus returns to the button.
@@ -14,7 +15,8 @@ export default function ReportProblem() {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState('');
   const [includeLog, setIncludeLog] = useState(true);
-  const [state, setState] = useState({ phase: 'idle' }); // idle | sending | sent | copied | error (error may carry `report`)
+  const [state, setState] = useState({ phase: 'idle' }); // idle | sending | sent | offer | relaying | relayed | copied | error (error may carry `report`)
+  const [peerId, setPeerId] = useState(''); // the teammate a report goes through when this computer cannot file it
   const setReportProblemOpen = useStore((s) => s.setReportProblemOpen);
   const btnRef = useRef(null);
   const boxRef = useRef(null);
@@ -22,7 +24,7 @@ export default function ReportProblem() {
 
   const close = () => {
     setOpen(false);
-    if (state.phase !== 'sending') setState({ phase: 'idle' });
+    if (state.phase !== 'sending' && state.phase !== 'relaying') setState({ phase: 'idle' });
     requestAnimationFrame(() => btnRef.current?.focus());
   };
 
@@ -51,7 +53,7 @@ export default function ReportProblem() {
       e.preventDefault();
       if (e.key === 'Escape' && !e.isComposing) {
         setOpen(false);
-        setState((st) => (st.phase === 'sending' ? st : { phase: 'idle' }));
+        setState((st) => (st.phase === 'sending' || st.phase === 'relaying' ? st : { phase: 'idle' }));
         requestAnimationFrame(() => btnRef.current?.focus());
         return;
       }
@@ -119,6 +121,13 @@ export default function ReportProblem() {
       const why = r.reason === 'no-gh'
         ? 'GitHub CLI (gh) is not installed on this computer'
         : r.reason === 'no-access' ? 'this computer’s GitHub login cannot see the reports repo' : 'GitHub did not accept it';
+      // A linked teammate's Dobius can file it with its own GitHub login (docs/report-via-team.md). The person picks.
+      const mates = Array.isArray(r.teammates) ? r.teammates.filter((t) => t && typeof t.id === 'string' && typeof t.name === 'string') : [];
+      if (mates.length) {
+        setPeerId((cur) => (mates.some((m) => m.id === cur) ? cur : mates[0].id));
+        setState({ phase: 'offer', why, teammates: mates, copied });
+        return;
+      }
       setState(copied
         ? { phase: 'copied', message: `Not sent: ${why}. The report is copied, so paste it to Sam.` }
         : { phase: 'error', message: `Not sent: ${why}. Copy the report below and send it to Sam.`, report: `${r.report.title}\n\n${r.report.body}` });
@@ -127,13 +136,39 @@ export default function ReportProblem() {
     setState({ phase: 'error', message: 'Write what went wrong first.' });
   };
 
+  const relay = async () => {
+    if (state.phase !== 'offer' || !text.trim()) return;
+    const offer = state;
+    const mate = offer.teammates.find((m) => m.id === peerId) || offer.teammates[0];
+    setState({ ...offer, phase: 'relaying', note: null });
+    let r;
+    try {
+      r = await window.electronAPI?.reportRelay?.(text, includeLog, mate.id);
+    } catch (err) {
+      r = { ok: false, reason: 'failed', error: String(err?.message || err) };
+    }
+    if (r?.ok) {
+      setText('');
+      setState({ phase: 'relayed', to: mate.name });
+      return;
+    }
+    if (r?.reason === 'busy') { setState({ ...offer, note: 'A report just went out. Try again in a few seconds.' }); return; }
+    const report = r?.report ? `${r.report.title}\n\n${r.report.body}` : null;
+    let copied = false;
+    if (report) { try { await navigator.clipboard.writeText(report); copied = true; } catch { copied = false; } }
+    const why = `Not sent through ${mate.name}: ${r?.error || 'it did not go out'}.`;
+    setState(copied
+      ? { phase: 'copied', message: `${why} The report is copied, so paste it to Sam.` }
+      : { phase: 'error', message: `${why} Copy the report below and send it to Sam.`, report });
+  };
+
   const onKeyDown = (e) => {
     e.stopPropagation();
     if (e.nativeEvent.isComposing) return;
     if (e.key === 'Escape') { e.preventDefault(); close(); return; }
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); return; }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (state.phase === 'offer') relay(); else send(); return; }
     if (e.key === 'Tab') {
-      const f = [...boxRef.current.querySelectorAll('textarea, input, button, a[href]')].filter((n) => !n.disabled);
+      const f = [...boxRef.current.querySelectorAll('textarea, input, select, button, a[href]')].filter((n) => !n.disabled);
       if (!f.length) return;
       const i = f.indexOf(document.activeElement);
       if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); }
@@ -141,7 +176,9 @@ export default function ReportProblem() {
     }
   };
 
-  const sending = state.phase === 'sending';
+  const sending = state.phase === 'sending' || state.phase === 'relaying';
+  const offering = state.phase === 'offer' || state.phase === 'relaying';
+  const mate = offering ? (state.teammates.find((m) => m.id === peerId) || state.teammates[0]) : null;
   return (
     <span className="relative flex items-center">
       <button
@@ -169,9 +206,13 @@ export default function ReportProblem() {
           style={{ width: 320, background: 'var(--surface, var(--bg))', border: '1px solid var(--border)', boxShadow: '0 8px 28px rgba(0,0,0,0.35)', color: 'var(--fg)', fontSize: 13, lineHeight: '16px', userSelect: 'text' }}
         >
           <div style={{ fontWeight: 600 }}>Report a problem</div>
-          {state.phase === 'sent' ? (
+          {state.phase === 'sent' || state.phase === 'relayed' ? (
             <>
-              <p style={{ color: 'var(--dim)', fontSize: 12, lineHeight: '15px' }}>Sent. Thanks, it is in the Dobius+ reports list.</p>
+              <p style={{ color: 'var(--dim)', fontSize: 12, lineHeight: '15px' }}>
+                {state.phase === 'sent'
+                  ? 'Sent. Thanks, it is in the Dobius+ reports list.'
+                  : `Sent to ${state.to}’s Dobius, which files it for you. Tasks > Team shows when it is filed.`}
+              </p>
               <div className="flex justify-end gap-2">
                 <button type="button" className="rounded px-2.5" style={{ height: 22, fontSize: 12, border: '1px solid var(--border)', cursor: 'default' }} onClick={() => setState({ phase: 'idle' })}>Report another</button>
                 <button type="button" className="rounded px-2.5" style={{ height: 22, fontSize: 12, background: 'var(--accent)', color: 'var(--bg)', cursor: 'default' }} onClick={close}>Done</button>
@@ -188,7 +229,7 @@ export default function ReportProblem() {
                 readOnly={sending}
                 placeholder="What went wrong, and what were you doing?"
                 aria-label="What went wrong"
-                onChange={(e) => { if (sending) return; setText(e.target.value); if (state.phase === 'copied' || (state.phase === 'error' && !state.report)) setState({ phase: 'idle' }); }}
+                onChange={(e) => { if (sending) return; setText(e.target.value); if (state.phase === 'copied' || state.phase === 'offer' || (state.phase === 'error' && !state.report)) setState({ phase: 'idle' }); }}
                 className="w-full resize-none rounded p-2"
                 style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--fg)', fontSize: 13, lineHeight: '16px', outline: 'none' }}
               />
@@ -198,6 +239,25 @@ export default function ReportProblem() {
               </label>
               {(state.phase === 'error' || state.phase === 'copied') && (
                 <p role="alert" style={{ fontSize: 12, lineHeight: '15px', color: state.phase === 'copied' ? 'var(--fg)' : '#f85149' }}>{state.message}</p>
+              )}
+              {offering && (
+                <div data-testid="report-offer" className="flex flex-col gap-2 rounded p-2" style={{ border: '1px solid var(--border)', fontSize: 12, lineHeight: '15px' }}>
+                  <p role="status">Not sent from here: {state.why}. Send it through a teammate’s Dobius and it files the report for you.</p>
+                  {state.teammates.length > 1 && (
+                    <select aria-label="Teammate" value={mate.id} disabled={sending} onChange={(e) => setPeerId(e.target.value)}
+                      className="rounded px-1" style={{ height: 22, fontSize: 12, background: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--border)' }}>
+                      {state.teammates.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                    </select>
+                  )}
+                  <div className="flex items-center justify-between gap-2">
+                    <span style={{ fontSize: 11, color: 'var(--dim)' }}>{state.copied ? 'Also copied, just in case.' : ''}</span>
+                    <button type="button" className="rounded px-2.5 truncate" aria-disabled={sending} data-testid="report-relay"
+                      style={{ height: 22, maxWidth: 200, fontSize: 12, background: 'var(--accent)', color: 'var(--bg)', opacity: sending ? 0.5 : 1, cursor: 'default' }}
+                      title={`Send through ${mate.name}`}
+                      onClick={relay}>{state.phase === 'relaying' ? 'Sending' : `Send through ${mate.name}`}</button>
+                  </div>
+                  {state.note && <p role="alert" style={{ color: '#f85149' }}>{state.note}</p>}
+                </div>
               )}
               {state.phase === 'error' && state.report && (
                 // The clipboard refused: the whole report stays here, selected, to copy by hand (Codex PR 18 r1).
@@ -216,9 +276,11 @@ export default function ReportProblem() {
                 <span style={{ fontSize: 11, color: 'var(--dim)' }}>{isWindows() ? 'Ctrl+Enter to send' : '⌘↩ to send'}</span>
                 <div className="flex gap-2">
                   <button type="button" className="rounded px-2.5" style={{ height: 22, fontSize: 12, border: '1px solid var(--border)', cursor: 'default' }} onClick={close}>Cancel</button>
-                  <button type="button" className="rounded px-2.5" disabled={!text.trim()} aria-disabled={sending}
-                    style={{ height: 22, width: 64, fontSize: 12, background: 'var(--accent)', color: 'var(--bg)', opacity: !text.trim() || sending ? 0.5 : 1, cursor: 'default' }}
-                    onClick={send}>{sending ? 'Sending' : 'Send'}</button>
+                  {!offering && (
+                    <button type="button" className="rounded px-2.5" disabled={!text.trim()} aria-disabled={sending}
+                      style={{ height: 22, width: 64, fontSize: 12, background: 'var(--accent)', color: 'var(--bg)', opacity: !text.trim() || sending ? 0.5 : 1, cursor: 'default' }}
+                      onClick={send}>{sending ? 'Sending' : 'Send'}</button>
+                  )}
                 </div>
               </div>
             </>

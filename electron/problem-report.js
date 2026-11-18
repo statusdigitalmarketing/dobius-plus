@@ -4,6 +4,9 @@
 // faults (no token ships in the app). A computer whose gh cannot see that repo gets the report back to copy and paste
 // to Sam instead, so nothing is lost and nothing leaves silently.
 //
+// A computer whose gh cannot file can send the report through a linked teammate's Dobius instead, which files it with
+// ITS gh (docs/report-via-team.md): `relay` here on the sender, `fileRelayedReport` on the teammate's Mac.
+//
 // Bounded: the person's text is capped, the error log is read from its last LOG_TAIL_BYTES only (it only grows, and
 // never whole), at most LOG_LINES lines go out, scrubbed. One report at a time, and a short cooldown after one is sent.
 
@@ -11,6 +14,8 @@ import fs from 'fs';
 import os from 'os';
 import { execFile } from 'child_process';
 import { REPORTS_REPO, findGh, scrub } from './error-reporter.js';
+import { MAX_TEXT as TEAM_MAX_TEXT } from './team-protocol.js';
+import { shortFp } from './team-crypto.js';
 
 export const MAX_TEXT = 4000; // characters of the person's own description
 const LOG_TAIL_BYTES = 32 * 1024; // read from the end of error.log, never the whole file
@@ -64,6 +69,58 @@ export function buildReport({ text, log = '', env, home = os.homedir() }) {
   return { title, body };
 }
 
+const ISSUE_URL = /^https:\/\/github\.com\/\S+\/issues\/\d+$/;
+// gh answers "Could not resolve to a Repository" (or a 404) when this login cannot see the private repo.
+const NO_ACCESS = /could not resolve|not found|404|permission|authentication|gh auth login/i;
+
+async function fileIssue(exec, bin, repo, title, body) {
+  const r = await exec(bin, ['issue', 'create', '-R', repo, '--title', title, '--body', body]);
+  const last = r.out.split('\n').pop();
+  if (r.ok && ISSUE_URL.test(last)) return { ok: true, url: last };
+  return { ok: false, noAccess: NO_ACCESS.test(r.err) };
+}
+
+/** Pure: a report as one team message, title on the first line (fileRelayedReport reads it back). */
+export const relayText = (report) => `${report.title}\n\n${report.body}`;
+
+/**
+ * Pure: the issue a teammate's relayed report becomes on THIS Mac. The text is theirs and untrusted: the title is one
+ * cleaned line, and the attribution is the sender's verified fingerprint, never the name it chose for itself.
+ */
+export function relayedIssue({ text, peer, id, selfName = '' }) {
+  const s = String(text ?? '').replace(/\r/g, '');
+  const nl = s.indexOf('\n');
+  const first = (nl < 0 ? s : s.slice(0, nl)).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim();
+  const t = first || 'A problem in Dobius+';
+  const prefixed = /^\[report\]/i.test(t) ? t : `[report] ${t}`;
+  const title = prefixed.length > 120 ? `${prefixed.slice(0, 117)}...` : prefixed;
+  const name = String(selfName).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029"`<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+  const fp = String(peer || '').replace(/[^0-9a-z]/gi, '').slice(0, 64);
+  const mid = String(id || '').replace(/[^0-9a-f-]/gi, '').slice(0, 36);
+  const body = [
+    (nl < 0 ? '' : s.slice(nl + 1)).replace(/^\n+/, '').replace(/<!--\s*dobius-relayed-report[^>]*-->/g, ''),
+    '',
+    '---',
+    `Relayed by a linked teammate's Dobius, fingerprint ${shortFp(fp)}.${name ? ` Their Dobius calls itself "${name}".` : ''}`,
+    `<!-- dobius-relayed-report ${fp}/${mid} -->`,
+  ].join('\n');
+  return { title, body };
+}
+
+/**
+ * On the teammate's Mac: file a relayed report with this computer's gh. Answers { ok: true, url } or
+ * { ok: false, reason } in words the sender is shown.
+ */
+export async function fileRelayedReport({ text, peer, id, selfName, repo = process.env.DOBIUS_REPORTS_REPO || REPORTS_REPO,
+  ghBin = () => findGh(), exec = run }) {
+  const bin = ghBin();
+  if (!bin) return { ok: false, reason: 'GitHub CLI is not installed on their computer' };
+  const { title, body } = relayedIssue({ text, peer, id, selfName });
+  const r = await fileIssue(exec, bin, repo, title, body);
+  if (r.ok) return { ok: true, url: r.url };
+  return { ok: false, reason: r.noAccess ? 'their GitHub login cannot see the reports repo either' : 'GitHub did not accept it' };
+}
+
 function run(bin, args) {
   return new Promise((resolve) => {
     try {
@@ -90,7 +147,7 @@ export function createProblemReporter({ version, logPath, repo = process.env.DOB
     os: platform === 'darwin' ? `macOS ${os.release()}` : platform === 'win32' ? `Windows ${os.release()}` : `${platform} ${os.release()}`,
     arch: process.arch,
   });
-  return async function submit({ text, includeLog } = {}) {
+  async function submit({ text, includeLog } = {}) {
     if (typeof text !== 'string' || !cleanText(text)) return { ok: false, reason: 'empty' };
     if (inFlight || now() - lastSent < COOLDOWN_MS) return { ok: false, reason: 'busy' };
     inFlight = true;
@@ -99,16 +156,41 @@ export function createProblemReporter({ version, logPath, repo = process.env.DOB
       const report = buildReport({ text, log, env: env() });
       const bin = ghBin();
       if (!bin) return { ok: false, reason: 'no-gh', report };
-      const r = await exec(bin, ['issue', 'create', '-R', repo, '--title', report.title, '--body', report.body]);
-      if (r.ok && /^https:\/\/github\.com\/\S+\/issues\/\d+$/.test(r.out.split('\n').pop())) {
+      const r = await fileIssue(exec, bin, repo, report.title, report.body);
+      if (r.ok) {
         lastSent = now();
-        return { ok: true, url: r.out.split('\n').pop() };
+        return { ok: true, url: r.url };
       }
-      // gh answers "Could not resolve to a Repository" (or a 404) when this login cannot see the private repo.
-      const noAccess = /could not resolve|not found|404|permission|authentication|gh auth login/i.test(r.err);
-      return { ok: false, reason: noAccess ? 'no-access' : 'failed', report };
+      return { ok: false, reason: r.noAccess ? 'no-access' : 'failed', report };
     } finally {
       inFlight = false;
     }
-  };
+  }
+  /**
+   * The same report, handed to `send(text)` (one teammate, team kind 'report') instead of gh. `send` answers like
+   * the team service's send: { ok, to } or { ok: false, error }. Answers { ok: true, to } |
+   * { ok: false, reason: 'empty' | 'busy' | 'failed', error?, report? }.
+   */
+  async function relay({ text, includeLog, send } = {}) {
+    if (typeof text !== 'string' || !cleanText(text)) return { ok: false, reason: 'empty' };
+    if (inFlight || now() - lastSent < COOLDOWN_MS) return { ok: false, reason: 'busy' };
+    inFlight = true;
+    try {
+      const log = includeLog === true && logPath ? readTail(typeof logPath === 'function' ? logPath() : logPath) : '';
+      let report = buildReport({ text, log, env: env() });
+      // Over the team limit only with very long log lines: the description matters more than the log.
+      if (relayText(report).length > TEAM_MAX_TEXT) report = buildReport({ text, log: '', env: env() });
+      let r;
+      try { r = send(relayText(report)); } catch (err) { r = { ok: false, error: String(err?.message || err) }; }
+      if (r?.ok) {
+        lastSent = now();
+        return { ok: true, to: r.to || '' };
+      }
+      return { ok: false, reason: 'failed', error: r?.error || 'not sent', report };
+    } finally {
+      inFlight = false;
+    }
+  }
+  submit.relay = relay;
+  return submit;
 }

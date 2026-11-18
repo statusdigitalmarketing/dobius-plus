@@ -12,7 +12,8 @@ export const SKEW_MS = 5 * 60 * 1000;
 export const CUTOFF_MS = 6 * 24 * 3600 * 1000;      // a message's firstSentAt may be at most this old
 export const RETAIN_MS = 7 * 24 * 3600 * 1000;      // accepted records kept this long from first acceptance
 export const INVITE_MS = 15 * 60 * 1000;
-export const KINDS = new Set(['ask', 'reply', 'note']);
+// 'report': a problem report a linked teammate files with its own gh (docs/report-via-team.md); never typed into a tab.
+export const KINDS = new Set(['ask', 'reply', 'note', 'report']);
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const FP = /^[A-Za-z0-9_-]{43}$/;

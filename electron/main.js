@@ -15,7 +15,7 @@ import { claudeEnvForAccount, expandTilde, pinPluginRoot } from './claude-accoun
 import { installErrorLog, logLine, errorLogPath, setLogSink } from './error-log.js';
 import { installWindowRecovery } from './window-recovery.js';
 import { startErrorReporter, noteFault, isReportable } from './error-reporter.js';
-import { createProblemReporter } from './problem-report.js';
+import { createProblemReporter, fileRelayedReport } from './problem-report.js';
 
 // Stall watchdog (v1.0.70). Wrapped here, at import time, so the very first
 // ipcMain.handle/on registration below is already tracked; armed in whenReady
@@ -117,7 +117,7 @@ import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService,
 import { sendToTab } from './tab-send.js';
 import { createProjectBoard } from './project-board.js';
 import { getLeadTab, setLeadTab, onLeadTabChanged, setTabOwnerResolver } from './agent-spawner.js';
-import { initTeam, stopTeam, handleTeamBridge, getTeamService, teamOrchestratorTab } from './team-main.js';
+import { initTeam, stopTeam, handleTeamBridge, getTeamService, teamOrchestratorTab, reportTeammates, sendReportToTeammate } from './team-main.js';
 import { writeAgentContext } from './agent-context.js';
 import { visibleBuiltinAgents } from './visible-agents.js';
 import { createHandoffCommands, runScriptText } from './handoff-commands.js';
@@ -1157,7 +1157,17 @@ function setupDataHandlers() {
   });
   // Report a problem (status bar bug button): one submitter for the app, so its one-at-a-time rule spans every window.
   const submitProblem = createProblemReporter({ version: app.getVersion(), logPath: () => errorLogPath() });
-  ipcMain.handle('report:submit', (_event, req) => submitProblem({ text: req?.text, includeLog: req?.includeLog === true }));
+  ipcMain.handle('report:submit', async (_event, req) => {
+    const r = await submitProblem({ text: req?.text, includeLog: req?.includeLog === true });
+    // This computer's gh cannot file it: offer the linked teammates whose Dobius can (docs/report-via-team.md).
+    if (!r.ok && (r.reason === 'no-gh' || r.reason === 'no-access')) r.teammates = reportTeammates();
+    return r;
+  });
+  ipcMain.handle('report:relay', (_event, req) => submitProblem.relay({
+    text: req?.text,
+    includeLog: req?.includeLog === true,
+    send: (t) => sendReportToTeammate(typeof req?.peerId === 'string' ? req.peerId.slice(0, 128) : '', t),
+  }));
   ipcMain.handle('errorLog:info', () => ({ path: errorLogPath() }));
   ipcMain.handle('errorLog:reveal', () => {
     const p = errorLogPath();
@@ -4744,7 +4754,7 @@ function setupWindowHandlers() {
   terminalStatus.onHookState((id, state, tag) => phoneAlerts.tabHook(id, state, tag));
   // A tab's program ended with an error (a kill on close never reaches onExit). Never while quitting.
   addTerminalObserver({ onExit: (id, info) => { if (typeof info?.exitCode === 'number' && info.exitCode !== 0 && !getQuitting()) phoneAlerts.tabFailed(id, info.cwd); } });
-  initTeam({ bridgeOpenDeps, endpoint: getTeamEndpoint, endpointProblem: getTeamEndpointProblem, onMessage: (name) => phoneAlerts.teamMessage(name) });
+  initTeam({ bridgeOpenDeps, endpoint: getTeamEndpoint, endpointProblem: getTeamEndpointProblem, onMessage: (name) => phoneAlerts.teamMessage(name), fileReport: (a) => fileRelayedReport(a) });
   setTeamBridge(handleTeamBridge);
   // What a Claude session in a Dobius tab is told it can do (electron/agent-context.js), kept current: at launch,
   // after a Google account change, and every two minutes (written only when the text changed).
