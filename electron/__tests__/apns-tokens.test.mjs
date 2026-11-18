@@ -138,3 +138,40 @@ test('round 23: an entry without regAt, re-registered mid-send, survives the lat
   cm.removeApnsToken(t, 111, undefined); // the send had captured no regAt
   assert.equal(cm.getApnsTokens().some((x) => x.token === t), true);
 });
+
+test('2026-11-18: the same pairing re-registering under a new phone id updates the id taps carry', () => {
+  const T5 = 'ef'.repeat(32);
+  const first = cm.addApnsToken({ token: T5, pairToken: 'R', pairingId: 'old-id' });
+  assert.equal(first.pairingId, 'old-id');
+  const again = cm.addApnsToken({ token: T5, pairToken: 'R', pairingId: 'new-id' });
+  assert.equal(again.addedAt, first.addedAt, 'the same entry, so a send in flight still reaches it');
+  assert.equal(cm.getApnsTokens().find((t) => t.pairToken === 'R').pairingId, 'new-id');
+  cm.addApnsToken({ token: T5, pairToken: 'R', pairingId: 'bad id with spaces' });
+  assert.equal(cm.getApnsTokens().find((t) => t.pairToken === 'R').pairingId, 'new-id', 'an invalid id never replaces a good one');
+  cm.addApnsToken({ token: T5, pairToken: 'R' });
+  assert.equal(cm.getApnsTokens().find((t) => t.pairToken === 'R').pairingId, 'new-id', 'a registration without an id keeps it');
+  cm.removeApnsTokensByPairToken('R');
+});
+
+test('2026-11-18: a refused take never changes the id the owning phone\'s taps carry', () => {
+  const T6 = '9a'.repeat(32);
+  cm.addApnsToken({ token: T6, pairToken: 'OLD', pairingId: 'phone-old-id' });
+  // Re-paired at a new address; the old pairing is still paired on this Mac, so it keeps the token.
+  assert.deepEqual(cm.addApnsToken({ token: T6, pairToken: 'NEW', pairingId: 'phone-new-id' }, () => false), { taken: true });
+  const e = cm.getApnsTokens().find((t) => t.token === T6);
+  assert.equal(e.pairToken, 'OLD', 'ownership unchanged: unpairing the old pairing still stops it');
+  assert.equal(e.pairingId, 'phone-old-id', 'another pairing cannot rename where the owner\'s taps go');
+  cm.removeApnsTokensByPairToken('OLD');
+});
+
+test('2026-11-18: a late, older registration from the same pairing never renames the id taps carry', () => {
+  const T7 = '5b'.repeat(32);
+  cm.addApnsToken({ token: T7, pairToken: 'Q', pairingId: 'current-id', seq: 2000 });
+  cm.addApnsToken({ token: T7, pairToken: 'Q', pairingId: 'obsolete-id', seq: 1000 });
+  const e = cm.getApnsTokens().find((t) => t.pairToken === 'Q');
+  assert.equal(e.pairingId, 'current-id');
+  assert.equal(e.seq, 2000);
+  cm.addApnsToken({ token: T7, pairToken: 'Q', pairingId: 'newer-id', seq: 2000 });
+  assert.equal(cm.getApnsTokens().find((t) => t.pairToken === 'Q').pairingId, 'newer-id', 'the same age still updates');
+  cm.removeApnsTokensByPairToken('Q');
+});

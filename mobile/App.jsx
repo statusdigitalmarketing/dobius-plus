@@ -32,7 +32,7 @@ if (typeof navigator !== 'undefined') {
 // Mac turns into the tab once connected (notifyResolve), never the tab id.
 onNativeTap((tap) => { if (tapHandler) tapHandler(tap); else pendingTaps.push(tap); });
 
-function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, openRequest }) {
+function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, openRequest, onUnknownMac }) {
   const [connection, setConnection] = useState(null);
   const [status, setStatus] = useState('connecting');
   const [problem, setProblem] = useState('');
@@ -124,7 +124,12 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
         resolvedRefs.current.add(openRequest);
         if (typeof m.id === 'string' && m.id) { setOpenTabId(m.id); setOpenNonce((x) => x + 1); setTerminalBack('board'); setView('terminal'); }
         // Unknown or expired: show the board, never leave another tab in front as if it were the one tapped.
-        else setView('board');
+        else {
+          setView('board');
+          // The tap named a Mac this app does not know and this Mac does not know its ref either: it really came from
+          // a Mac that is gone, so say so (App.jsx openSession).
+          if (openRequest.unknownMac) onUnknownMac?.(openRequest);
+        }
       }
     });
     if (connection.status === 'authed') ask();
@@ -258,6 +263,8 @@ export default function App() {
   const errorSeqRef = useRef(0);
   // A tap in the current run closed a connection; the newest tap reconnects.
   const tapClosedRef = useRef(false);
+  // Set by the tap effect: what a tap whose Mac id is unknown does when the Mac on screen does not know its ref.
+  const unknownMacRef = useRef(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
 
   const showPairing = (payload) => {
@@ -418,6 +425,8 @@ export default function App() {
       setError(message);
     };
     const removedMessage = 'That notification came from a Mac that is no longer paired with this app.';
+    // With several Macs saved, the Mac on screen not knowing the tap proves nothing about the others (Codex PR 31).
+    const notHereMessage = (name) => `${name} does not have the tab that notification is about. If it came from another of your Macs, switch to that Mac.`;
     // Taps are numbered and only the NEWEST one acts: an older tap still
     // waiting for the pairing lock leaves the document untouched when it gets
     // its turn, so it cannot switch Macs after a newer tap (Codex High).
@@ -431,10 +440,33 @@ export default function App() {
       // it, but a focused composer or terminal would still take hardware keys.
       document.activeElement?.blur?.();
       if (!target) {
-        // This tap is the newest: end any overlay an earlier tap left up, and
-        // reconnect a Mac an earlier tap disconnected (Codex).
-        setSwitchingTo(null);
+        // This tap is the newest: reconnect a Mac an earlier tap disconnected (Codex).
         if (tapClosedRef.current) { tapClosedRef.current = false; setSessionEpoch((n) => n + 1); }
+        // An App Store tap names its tab by a random ref that only the Mac which
+        // sent it can resolve, so an unknown Mac id need not mean a gone Mac: the
+        // Mac can hold this phone's push token under the id of an older pairing
+        // (re-paired at a new address while the old pairing stays paired there).
+        // Ask the Mac on screen; only if it does not know the ref either is the
+        // Mac gone (MacSession calls onUnknownMac). Never for a tab id (`id`,
+        // Web Push): ids are not unique across Macs and could open the wrong tab.
+        if (ref && !id && view !== 'tasks') {
+          // Behind every save already queued: an older tap's switch may still be saving, and the Mac it lands on
+          // is the one on screen (Codex PR 31). update() never rejects. The overlay stays up (and the session inert)
+          // for the whole wait; once the request is set, MacSession shows the board until the Mac names the tab.
+          // An earlier tap's overlay names the Mac it is switching to: keep that one.
+          const onScreen = stateRef.current.pairings.find((p) => p.id === stateRef.current.activeId)?.name || 'your Mac';
+          setSwitchingTo((cur) => cur ?? onScreen);
+          await writes.current;
+          if (seq !== tapSeqRef.current) return; // superseded: the newer tap finishes
+          setSwitchingTo(null);
+          const shown = stateRef.current.pairings.find((p) => p.id === stateRef.current.activeId);
+          if (shown) {
+            setOpenRequest({ pairingId: shown.id, ref, unknownMac: true, tap: seq, only: stateRef.current.pairings.length === 1 });
+            return;
+          }
+        }
+        // End any overlay an earlier tap left up: this tap is the newest.
+        setSwitchingTo(null);
         cannotOpen(removedMessage);
         return;
       }
@@ -465,9 +497,14 @@ export default function App() {
       openSession({ id: params.get('open'), pairingId: params.get('mac'), view: params.get('view') });
       window.history.replaceState(null, '', window.location.pathname);
     }
+    unknownMacRef.current = (req) => {
+      if (req?.tap !== tapSeqRef.current) return;
+      const shown = stateRef.current.pairings.find((p) => p.id === req.pairingId);
+      cannotOpen(req.only || !shown ? removedMessage : notHereMessage(shown.name));
+    };
     tapHandler = openSession;
     while (pendingTaps.length) openSession(pendingTaps.shift());
-    return () => { tapHandler = null; };
+    return () => { tapHandler = null; unknownMacRef.current = null; };
     // The handler reads current state through stateRef.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [!!state]);
@@ -521,6 +558,7 @@ export default function App() {
         hardware keys must not reach the session underneath (Codex). */}
     <div inert={switchingTo !== null || switcher} className="mac-session-wrap">
     <MacSession key={`${active.id}:${active.token}:${sessionEpoch}`} pairing={active} connectionRef={connectionRef} openRequest={openRequest}
+      onUnknownMac={(req) => unknownMacRef.current?.(req)}
       onMacs={() => { setError(''); setSwitcher(true); }} onRepair={() => showPairing({ host: active.origin })}
       onLeaveDemo={() => update((s) => removePairing(s, active.id))} />
     </div>
