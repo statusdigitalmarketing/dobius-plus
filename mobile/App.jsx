@@ -440,9 +440,7 @@ export default function App() {
       // it, but a focused composer or terminal would still take hardware keys.
       document.activeElement?.blur?.();
       if (!target) {
-        // This tap is the newest: end any overlay an earlier tap left up, and
-        // reconnect a Mac an earlier tap disconnected (Codex).
-        setSwitchingTo(null);
+        // This tap is the newest: reconnect a Mac an earlier tap disconnected (Codex).
         if (tapClosedRef.current) { tapClosedRef.current = false; setSessionEpoch((n) => n + 1); }
         // An App Store tap names its tab by a random ref that only the Mac which
         // sent it can resolve, so an unknown Mac id need not mean a gone Mac: the
@@ -453,15 +451,22 @@ export default function App() {
         // Web Push): ids are not unique across Macs and could open the wrong tab.
         if (ref && !id && view !== 'tasks') {
           // Behind every save already queued: an older tap's switch may still be saving, and the Mac it lands on
-          // is the one on screen (Codex PR 31). update() never rejects.
+          // is the one on screen (Codex PR 31). update() never rejects. The overlay stays up (and the session inert)
+          // for the whole wait; once the request is set, MacSession shows the board until the Mac names the tab.
+          // An earlier tap's overlay names the Mac it is switching to: keep that one.
+          const onScreen = stateRef.current.pairings.find((p) => p.id === stateRef.current.activeId)?.name || 'your Mac';
+          setSwitchingTo((cur) => cur ?? onScreen);
           await writes.current;
           if (seq !== tapSeqRef.current) return; // superseded: the newer tap finishes
+          setSwitchingTo(null);
           const shown = stateRef.current.pairings.find((p) => p.id === stateRef.current.activeId);
           if (shown) {
             setOpenRequest({ pairingId: shown.id, ref, unknownMac: true, tap: seq, only: stateRef.current.pairings.length === 1 });
             return;
           }
         }
+        // End any overlay an earlier tap left up: this tap is the newest.
+        setSwitchingTo(null);
         cannotOpen(removedMessage);
         return;
       }
