@@ -425,6 +425,8 @@ export default function App() {
       setError(message);
     };
     const removedMessage = 'That notification came from a Mac that is no longer paired with this app.';
+    // With several Macs saved, the Mac on screen not knowing the tap proves nothing about the others (Codex PR 31).
+    const notHereMessage = (name) => `${name} does not have the tab that notification is about. If it came from another of your Macs, switch to that Mac.`;
     // Taps are numbered and only the NEWEST one acts: an older tap still
     // waiting for the pairing lock leaves the document untouched when it gets
     // its turn, so it cannot switch Macs after a newer tap (Codex High).
@@ -449,10 +451,16 @@ export default function App() {
         // Ask the Mac on screen; only if it does not know the ref either is the
         // Mac gone (MacSession calls onUnknownMac). Never for a tab id (`id`,
         // Web Push): ids are not unique across Macs and could open the wrong tab.
-        const shown = stateRef.current.pairings.find((p) => p.id === stateRef.current.activeId);
-        if (ref && !id && view !== 'tasks' && shown) {
-          setOpenRequest({ pairingId: shown.id, ref, unknownMac: true, tap: seq });
-          return;
+        if (ref && !id && view !== 'tasks') {
+          // Behind every save already queued: an older tap's switch may still be saving, and the Mac it lands on
+          // is the one on screen (Codex PR 31). update() never rejects.
+          await writes.current;
+          if (seq !== tapSeqRef.current) return; // superseded: the newer tap finishes
+          const shown = stateRef.current.pairings.find((p) => p.id === stateRef.current.activeId);
+          if (shown) {
+            setOpenRequest({ pairingId: shown.id, ref, unknownMac: true, tap: seq, only: stateRef.current.pairings.length === 1 });
+            return;
+          }
         }
         cannotOpen(removedMessage);
         return;
@@ -484,7 +492,11 @@ export default function App() {
       openSession({ id: params.get('open'), pairingId: params.get('mac'), view: params.get('view') });
       window.history.replaceState(null, '', window.location.pathname);
     }
-    unknownMacRef.current = (req) => { if (req?.tap === tapSeqRef.current) cannotOpen(removedMessage); };
+    unknownMacRef.current = (req) => {
+      if (req?.tap !== tapSeqRef.current) return;
+      const shown = stateRef.current.pairings.find((p) => p.id === req.pairingId);
+      cannotOpen(req.only || !shown ? removedMessage : notHereMessage(shown.name));
+    };
     tapHandler = openSession;
     while (pendingTaps.length) openSession(pendingTaps.shift());
     return () => { tapHandler = null; unknownMacRef.current = null; };

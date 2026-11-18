@@ -1731,13 +1731,9 @@ export function addApnsToken({ token, pairToken, pairingId, seq }, canTake = () 
   const list = Array.isArray(config.apnsTokens) ? config.apnsTokens : [];
   const prior = list.find((t) => t?.token === token);
   const id = typeof pairingId === 'string' && /^[\w.:-]{1,64}$/.test(pairingId) ? pairingId : null;
-  if (prior && prior.pairToken !== pairToken && !canTake(prior)) {
-    // Ownership stays with the older pairing (unpairing it still stops the pushes), but this phone, which holds the
-    // device token only iOS gave it, is the one tapping: taps carry the id it uses now, not the one of a pairing it
-    // replaced at a new address and could not unregister there ("no longer paired" on every tap, 2026-11-18).
-    if (id && prior.pairingId !== id) { prior.pairingId = id; saveConfig(config); }
-    return { taken: true };
-  }
+  // A refused take changes nothing, not even the id taps carry: the token arrives over the WebSocket, so this Mac
+  // cannot tell the phone that holds it from another pairing that only knows it (Codex P1, PR 31).
+  if (prior && prior.pairToken !== pairToken && !canTake(prior)) return { taken: true };
   const seqOk = typeof seq === 'number' && Number.isFinite(seq) && seq > 0 ? Math.round(seq) : null;
   const mine = list.find((t) => t?.pairToken === pairToken);
   if (mine && mine.token !== token && seqOk !== null && typeof mine.seq === 'number' && seqOk < mine.seq) return { stale: true, haveSeq: mine.seq };

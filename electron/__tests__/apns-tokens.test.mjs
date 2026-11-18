@@ -153,15 +153,13 @@ test('2026-11-18: the same pairing re-registering under a new phone id updates t
   cm.removeApnsTokensByPairToken('R');
 });
 
-test('2026-11-18: a re-paired phone whose old pairing still owns its token gets taps under the id it uses now', () => {
+test('2026-11-18: a refused take never changes the id the owning phone\'s taps carry', () => {
   const T6 = '9a'.repeat(32);
   cm.addApnsToken({ token: T6, pairToken: 'OLD', pairingId: 'phone-old-id' });
   // Re-paired at a new address; the old pairing is still paired on this Mac, so it keeps the token.
   assert.deepEqual(cm.addApnsToken({ token: T6, pairToken: 'NEW', pairingId: 'phone-new-id' }, () => false), { taken: true });
   const e = cm.getApnsTokens().find((t) => t.token === T6);
   assert.equal(e.pairToken, 'OLD', 'ownership unchanged: unpairing the old pairing still stops it');
-  assert.equal(e.pairingId, 'phone-new-id', 'taps name the pairing the phone has now');
-  cm.addApnsToken({ token: T6, pairToken: 'NEW', pairingId: '' }, () => false);
-  assert.equal(cm.getApnsTokens().find((t) => t.token === T6).pairingId, 'phone-new-id', 'no id never clears it');
+  assert.equal(e.pairingId, 'phone-old-id', 'another pairing cannot rename where the owner\'s taps go');
   cm.removeApnsTokensByPairToken('OLD');
 });
