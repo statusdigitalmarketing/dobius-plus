@@ -604,67 +604,6 @@ export const useStore = create((set, get) => ({
     return { terminalTabs: tabs };
   }),
 
-  closeOtherTabs: (tabId) => {
-    const state = get();
-    // Keep the target tab AND any pinned tabs
-    const kept = state.terminalTabs.filter((t) => t.id === tabId || t.pinned);
-    if (kept.length === 0) return;
-    const removed = state.terminalTabs.filter((t) => t.id !== tabId && !t.pinned);
-    removed.forEach((t) => window.electronAPI?.terminalKill(t.id));
-    const removedIds = new Set(removed.map((t) => t.id));
-    const ra = { ...state.runningAgents };
-    const aa = { ...state.agentActivity };
-    for (const key of Object.keys(ra)) {
-      if (removedIds.has(ra[key])) { delete ra[key]; delete aa[key]; }
-    }
-    const ts = { ...state.tabStatus };
-    for (const id of removedIds) delete ts[id];
-    const hot = { ...state.hookOwnedTabs };
-    for (const id of removedIds) delete hot[id];
-    const hand = { ...state.handoffTabs };
-    for (const id of removedIds) delete hand[id];
-    const bg = { ...state.backgroundTabs };
-    for (const id of removedIds) delete bg[id];
-    const red = { ...state.redAt };
-    for (const id of removedIds) delete red[id];
-    // Clear splitTabId if the split pane was killed — otherwise the layout
-    // stays stuck in split mode pointing at a dead tab and the surviving
-    // active terminal is constrained to half-width with no header to exit.
-    const splitTabId = removedIds.has(state.splitTabId) ? null : state.splitTabId;
-    set({ terminalTabs: kept, activeTabId: tabId, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, hookOwnedTabs: hot, handoffTabs: hand, backgroundTabs: bg, redAt: red, unreadTabs: clearSeen(state.unreadTabs, removedIds), gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
-  },
-
-  closeTabsToRight: (tabId) => {
-    const state = get();
-    const idx = state.terminalTabs.findIndex((t) => t.id === tabId);
-    if (idx === -1) return;
-    const kept = state.terminalTabs.slice(0, idx + 1);
-    // Preserve pinned tabs that are to the right
-    const rightTabs = state.terminalTabs.slice(idx + 1);
-    const pinnedRight = rightTabs.filter((t) => t.pinned);
-    const removed = rightTabs.filter((t) => !t.pinned);
-    removed.forEach((t) => window.electronAPI?.terminalKill(t.id));
-    const removedIds = new Set(removed.map((t) => t.id));
-    const ra = { ...state.runningAgents };
-    const aa = { ...state.agentActivity };
-    for (const key of Object.keys(ra)) {
-      if (removedIds.has(ra[key])) { delete ra[key]; delete aa[key]; }
-    }
-    const ts = { ...state.tabStatus };
-    for (const id of removedIds) delete ts[id];
-    const hot = { ...state.hookOwnedTabs };
-    for (const id of removedIds) delete hot[id];
-    const allKept = [...kept, ...pinnedRight];
-    // A focused split right pane closed: the split's left tab stays on screen, as in removeTab.
-    const splitLeft = state.activeTabId === state.splitTabId && state.splitPrimaryTabId !== state.splitTabId
-      && allKept.some((t) => t.id === state.splitPrimaryTabId) ? state.splitPrimaryTabId : null;
-    const newActive = allKept.find((t) => t.id === state.activeTabId) ? state.activeTabId : (splitLeft || tabId);
-    // Same split-cleanup as closeOtherTabs — kill the split pointer if the
-    // tab it referenced just got removed.
-    const splitTabId = removedIds.has(state.splitTabId) ? null : state.splitTabId;
-    set({ terminalTabs: allKept, activeTabId: newActive, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, hookOwnedTabs: hot, unreadTabs: clearSeen(state.unreadTabs, removedIds), gridSlots: pruneGrid(state.gridSlots, new Set(allKept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
-  },
-
   // Actions
   setActiveView: (view) => set({ activeView: view }),
   toggleSidebar: () => set((s) => ({ sidebarVisible: !s.sidebarVisible })),
