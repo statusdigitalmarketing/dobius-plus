@@ -91,3 +91,11 @@ test('a sent message marked done comes back when the teammate\'s Mac later repor
   assert.equal(isArchived(reported), false);
   assert.equal(isOpen(reported), true);
 });
+
+test('a teammate report: being filed is open, not filed or maybe filed needs a person, filed is handled', () => {
+  const r = (state) => ({ dir: 'in', kind: 'report', state, peer: 'p', id: state, at: 1 });
+  assert.equal(isOpen(r('filing')), true);
+  assert.equal(needsPerson(r('not filed')), true);
+  assert.equal(needsPerson(r('check reports')), true);
+  assert.equal(isOpen(r('filed')), false);
+});

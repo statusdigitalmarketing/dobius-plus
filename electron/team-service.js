@@ -346,7 +346,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   function dismiss(dir, peer, id) {
     const msg = store.messages().find((x) => x.dir === dir && x.peer === peer && x.id === id);
     const stuck = msg?.state === 'routing' && current !== `${peer}|${id}`;
-    if (!msg || (!stuck && !['held', 'needs attention', 'unconfirmed', 'not delivered', 'check reports'].includes(msg.state))) return { ok: false, error: 'nothing to dismiss' };
+    if (!msg || (!stuck && !['held', 'needs attention', 'unconfirmed', 'not delivered', 'check reports', 'not filed'].includes(msg.state))) return { ok: false, error: 'nothing to dismiss' };
     store.patchMessage(dir, peer, id, { state: 'dismissed', note: null });
     changed();
     return { ok: true };

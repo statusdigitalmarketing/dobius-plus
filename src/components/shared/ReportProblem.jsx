@@ -101,7 +101,7 @@ export default function ReportProblem() {
   }, [open, state.phase]);
 
   const send = async () => {
-    if (!text.trim() || state.phase === 'sending') return;
+    if (!text.trim() || state.phase === 'sending' || state.phase === 'relaying') return;
     setState({ phase: 'sending' });
     let r;
     try {
@@ -166,7 +166,7 @@ export default function ReportProblem() {
     e.stopPropagation();
     if (e.nativeEvent.isComposing) return;
     if (e.key === 'Escape') { e.preventDefault(); close(); return; }
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (state.phase === 'offer') relay(); else send(); return; }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (state.phase === 'offer') relay(); else if (state.phase !== 'relaying') send(); return; }
     if (e.key === 'Tab') {
       const f = [...boxRef.current.querySelectorAll('textarea, input, select, button, a[href]')].filter((n) => !n.disabled);
       if (!f.length) return;

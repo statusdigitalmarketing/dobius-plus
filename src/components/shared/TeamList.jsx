@@ -180,7 +180,7 @@ export default function TeamList({ query }) {
           {m.dir === 'out' && m.kind !== 'report' && ['unconfirmed', 'not delivered', 'conflict'].includes(m.state) && (
             <button style={small('var(--dim)')} title="A new message: they may see it twice" onClick={() => act(api.teamSendAgain(m.id))}>Send again</button>
           )}
-          {['held', 'needs attention', 'unconfirmed', 'not delivered', 'routing', 'check reports'].includes(m.state) && (
+          {['held', 'needs attention', 'unconfirmed', 'not delivered', 'routing', 'check reports', 'not filed'].includes(m.state) && (
             // Clears it for good (it can leave the list and frees its place in a full inbox); Done only hides it.
             <button style={small('var(--dim)')} title="Clear it for good: it stops counting, can leave the list and frees its place in a full inbox" onClick={() => act(api.teamDismiss(m.dir, m.peer, m.id))}>Dismiss</button>
           )}

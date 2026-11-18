@@ -4,7 +4,8 @@
 import { isDone } from '../../shared/team-done.js';
 
 // States where a person has to act (TeamList shows their labels).
-const ATTENTION = new Set(['unconfirmed', 'not delivered', 'conflict', 'held', 'needs attention', 'check reports']);
+// 'not filed': a teammate's report this Mac could not file; a person can still file it by hand (Codex PR 30).
+const ATTENTION = new Set(['unconfirmed', 'not delivered', 'conflict', 'held', 'needs attention', 'check reports', 'not filed']);
 // Still on its way: nothing for a person to do yet, but not finished either.
 const IN_FLIGHT = new Set(['queued', 'sending', 'waiting', 'routing', 'filing']);
 // What a teammate's Mac reported that means it went wrong over there.

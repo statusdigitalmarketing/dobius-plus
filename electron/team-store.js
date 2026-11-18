@@ -187,7 +187,7 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
   // 'filing': a teammate's problem report being filed now; 'check reports': Dobius quit while filing one, so it may
   // or may not be in the reports repo (docs/report-via-team.md).
   const IN_FLIGHT = new Set(['queued', 'sending', 'waiting', 'routing', 'filing']);
-  const ATTENTION = new Set(['held', 'needs attention', 'unconfirmed', 'not delivered', 'check reports']);
+  const ATTENTION = new Set(['held', 'needs attention', 'unconfirmed', 'not delivered', 'check reports', 'not filed']);
   // Also kept while it still owes its sender a status report (lifecycle; dropped by the service after 24 h).
   const keep = (m) => IN_FLIGHT.has(m.state) || (ATTENTION.has(m.state) && now() - (m.at || 0) < RETAIN_MS)
     // and the one message whose working/done is being followed right now (the service says which). Pending status
