@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/store';
 import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, askLayout, askCardKey, optionMark, freeTextOption, tokenFingerprint, createPressGuard, stepImages, createImageCache, foldTurns } from '../../../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, askLayout, askCardKey, optionMark, tokenFingerprint, createPressGuard, stepImages, createImageCache, foldTurns } from '../../../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../../../shared/chat-activity.js';
 import ModelMenu from './ModelMenu';
 import './ChatPane.css';
@@ -929,13 +929,16 @@ export default function ChatPane({ tabId, visible }) {
     // One answer at a time: the card is cleared from the pane while it goes in, so a second Enter would otherwise take
     // the plain send path and could land as a new prompt once Claude moves on.
     if (answeringTabs.has(tabId)) { flash('One moment, your answer is still going in.'); return; }
-    const free = freeTextOption(selector);
+    // The card's own free row (the row before "Chat about this"), never a real option reading "Type something".
+    const lf = askLayout(selector).free;
+    const free = lf?.empty ? selector.options.find((o) => o.num === lf.num) : null;
     if (!free) { flash('Claude is waiting for you to pick one of the options above. Pick one, or press Stop to dismiss it and type.'); return; }
     if (!selector.token) { flash('One moment, the question is still updating. Try again.'); return; }
     // The words answer only the card they were typed against (its fingerprint at the last edit): one that replaced it
     // since, even one reading the same, gets a look first (Codex High, round 3).
-    if (ownWordsFpRef.current !== selector.fp) {
-      ownWordsFpRef.current = selector.fp;
+    const stamp = `${selector.fp}|${selector.steps?.current ?? ''}`; // two question tabs can read the same
+    if (ownWordsFpRef.current !== stamp) {
+      ownWordsFpRef.current = stamp;
       flash('The question changed since you typed. Check it, then press Enter again.');
       return;
     }
@@ -1168,7 +1171,7 @@ export default function ChatPane({ tabId, visible }) {
   });
 
   const placeholder = selector
-    ? (freeTextOption(selector) ? 'Type your own answer and press Enter...' : 'Pick an option above first...')
+    ? (askLayout(selector).free?.empty ? 'Type your own answer and press Enter...' : 'Pick an option above first...')
     : sessionId
     ? (claudeLive ? 'Message Claude...' : 'Claude exited. Input goes to the terminal...')
     : (claudeLive ? 'Message Claude...' : 'Type a command for the terminal...');
@@ -1343,7 +1346,7 @@ export default function ChatPane({ tabId, visible }) {
             value={draft}
             rows={1}
             placeholder={placeholder}
-            onChange={(e) => { ownWordsFpRef.current = selector?.fp ?? null; setDraft(e.target.value); }}
+            onChange={(e) => { ownWordsFpRef.current = selector ? `${selector.fp}|${selector.steps?.current ?? ''}` : null; setDraft(e.target.value); }}
             onPaste={onPaste}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {

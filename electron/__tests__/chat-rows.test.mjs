@@ -399,5 +399,8 @@ console.log('PASS  row keys survive a sliding window');
   assert.deepEqual(askLayout({ options: [{ num: 1, label: 'Yes' }, { num: 2, label: 'No' }] }), { multi: false, action: null, chat: null, free: null, main: [{ num: 1, label: 'Yes', detail: '', checked: null }, { num: 2, label: 'No', detail: '', checked: null }] });
   assert.deepEqual(askLayout(null), { multi: false, action: null, chat: null, free: null, main: [] });
   assert.equal(askLayout({ options: [{ num: 1, label: 'Continue' }, { num: 2, label: 'Type something' }] }).free, null, 'a plain menu option is an answer');
+  const oneBoxed = { steps: { current: 1, total: 1, labels: ['Format'] }, options: [{ num: 1, label: '[ ] Markdown' }, { num: 2, label: 'Plain bullets' }, { num: 3, label: 'Type something.' }, { num: 4, label: 'Chat about this' }] };
+  assert.equal(isMultiSelect(oneBoxed), false, 'one answer starting with [ ] is not a multi-select question');
+  assert.equal(askLayout(oneBoxed).free?.num, 3);
   console.log('PASS  question card layout: checkboxes, the free row, a key that survives a tick');
 }

@@ -7,7 +7,7 @@ import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, t
 import { parseSelector, parseSelectorFromScreen, stripAnsi, selectorFingerprint, selectorCountdown, spinnerStatus } from './selector-parser.js';
 export { selectorFingerprint };
 import { renderScreenLines, FILL } from './screen-render.js';
-import { FREE_TEXT_LABEL, optionMark } from '../shared/chat-rows.js';
+import { FREE_TEXT_LABEL, optionMark, askLayout } from '../shared/chat-rows.js';
 
 // The live selector for a tab, via the headless-xterm SCREEN render (v1.0.62).
 // The old strip-and-regex path missed Ink's incremental repaints entirely: on
@@ -377,25 +377,25 @@ export function answerSelector(id, data, token, stillOk0 = () => true, beforeWri
 // ends: between its paste and the redraw that shows the words, a fresh read still shows the empty row, and a second
 // answer read then would paste its words in as well (Codex High). Entries live only while their answer runs.
 const freeTextPending = new Set();
-// Tabs whose last free-text answer ended with its words possibly in the field but not yet drawn (uncertain): every
-// other answer waits FREE_TEXT_HOLD_MS, or a second answer read off the still-empty row would paste again after the
-// first one's own wait gave up (Codex High, round 2). tab id -> { until (ms), pty }: a new terminal under the same id
-// ends it. At most one entry per tab id, removed when found expired.
+// Tabs whose last free-text answer ended with its words possibly in the field but not drawn (uncertain): the card it
+// answered (its fingerprint) is held, so nothing read off that still-empty card can paste the words again or type
+// into them (Codex High, rounds 2 to 4: every timer or output count let a second answer through, or held forever).
+// The hold ends when the card changes (the words showing change it), with a new terminal, or by Esc, which is always
+// let through. tab id -> { pty, fp }; at most one entry per tab id.
 const freeTextHold = new Map();
-const FREE_TEXT_HOLD_MS = 10000;
-const freeTextBusy = (id) => {
+const freeTextBusy = (id, fp, data = '') => {
   if (freeTextPending.has(id)) return true;
   const hold = freeTextHold.get(id);
   if (!hold) return false;
-  if (hold.pty === terminalInstance(id) && (hold.until > Date.now() || terminalRawOutputSeq(id) === hold.out)) return true;
-  freeTextHold.delete(id);
-  return false;
+  if (hold.pty !== terminalInstance(id) || (fp && hold.fp !== fp)) { freeTextHold.delete(id); return false; }
+  return data !== '\x1b';
 };
+const tokenFp = (token) => (typeof token === 'string' ? token.split('|')[1] || '' : '');
 
 // answerSelector with a longer `data` allowed (the free-text answer's own paste) and `own`: the caller IS the
 // free-text answer holding the tab.
 async function answerChecked(id, data, token, stillOk0, beforeWrite, maxLen, own) {
-  if (!own && freeTextBusy(id)) return { ok: false, stale: true };
+  if (!own && freeTextBusy(id, tokenFp(token), data)) return { ok: false, stale: true };
   if (typeof data !== 'string' || !data || data.length > maxLen || typeof token !== 'string') return { ok: false };
   if (onPhone(id)) return { ok: false, onPhone: true };
   const stillOk = () => !onPhone(id) && stillOk0();
@@ -472,9 +472,7 @@ const FREE_TEXT_SHOW_MS = 1500;
 const FREE_TEXT_PASTE_MAX = 8192;
 const collapse = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
 export async function answerSelectorWithText(id, num, text, token, stillOk = () => true, beforeWrite = () => {}) {
-  if (freeTextBusy(id)) return { ok: false, stale: true, reason: 'busy' };
-  // The row's own label as the answer would read as the empty row again (a second answer would add a copy).
-  if (FREE_TEXT_LABEL.test(String(text ?? '').replace(/\s+/g, ' ').trim())) return { ok: false, reason: 'bad_request' };
+  if (freeTextBusy(id, tokenFp(token))) return { ok: false, stale: true, reason: 'busy' };
   const pty0 = terminalInstance(id);
   freeTextPending.add(id);
   let result = null;
@@ -488,9 +486,7 @@ export async function answerSelectorWithText(id, num, text, token, stillOk = () 
     result = { ok: false, reason: 'error', ...(state.pasted ? { uncertain: true } : {}) };
   } finally {
     freeTextPending.delete(id);
-    // Ends after FREE_TEXT_HOLD_MS only once Claude has drawn anything since (a suspended Claude has consumed nothing
-    // and a fresh read would still show the empty row: Codex High, round 3), or when the tab gets a new terminal.
-    if (result?.uncertain) freeTextHold.set(id, { until: Date.now() + FREE_TEXT_HOLD_MS, pty: pty0, out: terminalRawOutputSeq(id) });
+    if (result?.uncertain) freeTextHold.set(id, { pty: pty0, fp: tokenFp(token) });
   }
   return result;
 }
@@ -499,6 +495,9 @@ async function answerFreeText(id, num, text, token, stillOk, beforeWrite, state)
   if (!Number.isInteger(num) || num < 1 || num > 9 || typeof text !== 'string' || typeof token !== 'string') return { ok: false };
   const line = collapse(text.replace(/[\x00-\x1F\x7F]/g, ' '));
   if (!line) return { ok: false };
+  // The row's own label as the answer (checked after control characters become spaces) would read as the empty row
+  // again, and a second answer would add a copy (Codex, rounds 3 and 4).
+  if (FREE_TEXT_LABEL.test(line)) return { ok: false, reason: 'bad_request' };
   const fp = token.split('|')[1];
   const optOf = (sel) => (Array.isArray(sel?.options) ? sel.options.find((o) => o?.num === num) : null);
   const selected = (sel) => (Array.isArray(sel?.options) ? sel.options[sel.selectedIndex] : null)?.num === num;
@@ -509,7 +508,9 @@ async function answerFreeText(id, num, text, token, stillOk, beforeWrite, state)
   const freeDetail = optOf(live)?.detail;
   // Only an AskUserQuestion card (its tab bar parsed as `steps`): a plain menu can have a real option that reads
   // "Type something", and its number would pick it (Codex Medium).
-  if (!live.steps || !FREE_TEXT_LABEL.test(optionMark(freeLabel).text)) return { ok: false, reason: 'not-free-text' };
+  // And it must be the card's own free row (askLayout: the row before "Chat about this"), never a real option that
+  // happens to read "Type something" (Codex Medium, round 4).
+  if (!live.steps || askLayout(live).free?.num !== num || !FREE_TEXT_LABEL.test(optionMark(freeLabel).text)) return { ok: false, reason: 'not-free-text' };
   // A multi-select question draws its rows with checkboxes ("[ ] Type something"): words typed there check the row
   // and Enter would uncheck it, so that card takes its own path below.
   const multi = optionMark(freeLabel).checked !== null;

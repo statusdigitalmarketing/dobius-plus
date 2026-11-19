@@ -813,6 +813,8 @@ ok('own words answer only the Type something row, and Enter only once the card s
   const before = writes.length;
   assert.deepEqual(await answerSelectorWithText('a', 3, 'basil', held?.token || 'x|y'), { ok: false, stale: true, reason: 'busy' });
   assert.equal(writes.length, before, 'nothing written while held');
+  assert.deepEqual(await answerSelector('a', '1', held.token), { ok: false, stale: true }, 'a tick is held too');
+  assert.equal((await answerSelector('a', '\x1b', held.token)).ok, true, 'Esc always goes through');
   // While one answer is in progress, a second one (another phone, the desktop) is refused, with a fresh token too:
   // between the paste and the redraw, a read still shows the empty row, and its words would go in as well.
   reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(3)); emitOutput('a');
@@ -831,6 +833,7 @@ ok('own words answer only the Type something row, and Enter only once the card s
   reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(3)); emitOutput('a');
   const r9 = await readSelectorForAnswer('a');
   assert.deepEqual(await answerSelectorWithText('a', 3, ' type  Something ', r9.token), { ok: false, reason: 'bad_request' });
+  assert.deepEqual(await answerSelectorWithText('a', 3, 'Type\u0000something', r9.token), { ok: false, reason: 'bad_request' }, 'after control characters become spaces');
   assert.deepEqual([...writes], []);
   // A plain numbered menu (no question tab bar) whose option reads "Type something": a real answer, never a field.
   const rule2 = '─'.repeat(80);

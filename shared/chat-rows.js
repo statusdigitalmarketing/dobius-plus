@@ -221,7 +221,11 @@ export function optionMark(label) {
 }
 /** True when the card is a multi-select question (its options carry checkboxes). */
 export function isMultiSelect(sel) {
-  return !!sel && Array.isArray(sel.options) && sel.options.some((o) => optionMark(o?.label).checked !== null);
+  if (!sel || !Array.isArray(sel.options)) return false;
+  // Every row but "Chat about this" carries a box: one answer that merely starts with "[ ]" does not make a
+  // single-select question multi (Codex Medium, round 4).
+  const body = sel.options.filter((o) => !/^chat about this$/i.test(String(o?.label ?? '').trim()));
+  return body.length > 0 && body.every((o) => optionMark(o?.label).checked !== null);
 }
 
 /**

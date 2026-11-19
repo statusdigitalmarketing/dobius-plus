@@ -36,6 +36,9 @@ function loadPhoneOutbox(base, tabId) {
 // Older messages load a page at a time when the reader reaches the top (Sam:
 // "when I scroll to the top I can't find older stuff"), never all at once.
 // The Mac caps one request at 2000 entries.
+// A card as one exact screen: its fingerprint plus the question tab it is on (two tabs can read the same, and the
+// fingerprint does not cover which tab is current).
+const cardStamp = (sel) => `${sel?.fp ?? ''}|${sel?.steps?.current ?? ''}`;
 // Question cards whose "Type something" field keeps its own unsent words (ChatView freeDrafts).
 const FREE_DRAFT_CARDS = 8;
 const HISTORY_PAGE = 200;
@@ -658,8 +661,12 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // The card's fingerprint when its field was last edited: Enter in the field (no tap to bind) sends only to that card.
   const freeFpRef = useRef(null);
   const [askToast, setAskToast] = useState('');
+  // The last selectorText the phone stopped waiting for: a late refusal that wrote nothing gives its words back.
+  const lateReqRef = useRef(null);
   const askViewKey = selector ? askCardKey(selector) : null;
   const freeDraft = (askViewKey && freeDrafts[askViewKey]) || '';
+  const freeDraftsRef = useRef(freeDrafts);
+  freeDraftsRef.current = freeDrafts;
   // Words go only into the field of the card they belong to; a card that comes back (Back to an earlier question)
   // finds its own. Never moved into the message box: words there could be sent again after they already went in.
   const setFreeDraftFor = (key, next) => {
@@ -1072,9 +1079,13 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
             showSelNote('Your words went in, but Claude did not show them yet. Check the card before sending them again.');
           } else {
             setSelBusy(false);
-            setFreeDraftFor(req.key, (cur) => (cur.trim() ? cur : req.text));
-            showSelNote(msg.stale ? 'The question changed before your words went in. Nothing was sent.' : 'Could not send your answer. Nothing was sent.');
+            returnWords(req, msg.stale ? 'The question changed before your words went in. Nothing was sent.' : 'Could not send your answer. Nothing was sent.');
           }
+        } else if (lateReqRef.current?.reqId === msg.reqId) {
+          // After the phone stopped waiting: only a refusal that wrote nothing changes anything (the words come back).
+          const late = lateReqRef.current;
+          lateReqRef.current = null;
+          if (!msg.ok && !msg.uncertain) returnWords(late, 'The Mac answered late: nothing was sent.');
         }
       } else if (msg.type === 'terminalText' && msg.id === tabId) {
         setShellText(typeof msg.text === 'string' ? msg.text : '');
@@ -1583,6 +1594,15 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     connection.send({ type: 'submitPrompt', id: tabId, text: 'claude --continue', gen: w.gen });
   };
 
+  // Words the Mac guarantees it never wrote go back into the field of the card they were typed for; if that field holds
+  // new words by now, the note quotes them instead, so they are never lost silently (Codex Medium, round 4).
+  const returnWords = (req, note) => {
+    const quoted = req.text.length > 60 ? `${req.text.slice(0, 60)}...` : req.text;
+    // Read from the ref: a state updater runs later, during the next render, too late to choose the note.
+    const kept = !!String(freeDraftsRef.current[req.key] || '').trim();
+    if (!kept) setFreeDraftFor(req.key, (cur) => (cur.trim() ? cur : req.text));
+    showSelNote(kept ? `${note} Your words were: "${quoted}"` : note);
+  };
   const showAskToast = () => {
     setAskToast('Answer sent to Claude');
     setTimeout(() => setAskToast(''), 2600);
@@ -1595,7 +1615,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     if (!tabId || !card || !lay.free || selBusy || freeBusy || card.canText !== true || !card.token) return false;
     // selectorText is never queued across a reconnect (a stale answer must not land later): refuse it here instead of
     // letting the connection drop it while the words vanish from the screen (Codex Medium).
-    if (connection.status !== 'authed') { showSelNote('Still connecting to the Mac. Nothing was sent, try again in a moment.'); return false; }
+    // _suspect: a liveness probe after a wake, when the socket may be dead though it still reads open (Codex Medium).
+    if (connection.status !== 'authed' || connection._suspect) { showSelNote('Still connecting to the Mac. Nothing was sent, try again in a moment.'); return false; }
     if (text.length > 2000) { showSelNote('That answer is too long for the card. Keep it under 2000 characters.'); return false; }
     // Those exact words would read as the empty row again, and a second send would add them twice (Codex, round 3).
     if (FREE_TEXT_LABEL.test(text.trim())) { showSelNote('Type your own answer in your own words, not the row\'s label.'); return false; }
@@ -1615,6 +1636,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       const req = freeReqRef.current;
       if (req?.reqId !== reqId) return;
       freeReqRef.current = null;
+      lateReqRef.current = req;
       setFreeBusy(false);
       // Not put back: they may have gone in, and the answer to say so may never arrive.
       showSelNote(`No answer from the Mac yet. Your words may have gone in: check the card before typing "${req.text.length > 40 ? `${req.text.slice(0, 40)}...` : req.text}" again.`);
@@ -1662,8 +1684,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       if (!text || cannotAnswer) return;
       // Enter has no tap to bind it to a card: it answers only the card this field was last edited on (the same
       // fingerprint). Anything since (another question that reads the same, a tick) gets one look first.
-      if (!e && freeFpRef.current !== selector.fp) {
-        freeFpRef.current = selector.fp;
+      if (!e && freeFpRef.current !== cardStamp(selector)) {
+        freeFpRef.current = cardStamp(selector);
         showSelNote('The card changed since you typed. Check it, then press Enter again.');
         return;
       }
@@ -1713,7 +1735,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
             placeholder={multi ? 'Add your own' : 'Type your own answer'} aria-label="Your own answer"
             disabled={selector.token === ''}
             ref={freeInputRef}
-            onChange={(e) => { freeFpRef.current = selector.fp; setFreeDraft(e.target.value); }}
+            onChange={(e) => { freeFpRef.current = cardStamp(selector); setFreeDraft(e.target.value); }}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); if (!e.repeat) sendFree(null); } }}
           />
           <button type="button" className="ask-free-send" disabled={cannotAnswer || !freeDraft.trim()}
