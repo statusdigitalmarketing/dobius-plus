@@ -86,13 +86,23 @@ func normalizeNote(_ raw: String) -> String {
     var out = ""
     var space = false
     for u in raw.unicodeScalars {
-        let blank = CharacterSet.whitespacesAndNewlines.contains(u) || CharacterSet.controlCharacters.contains(u)
-            || u.value == 0x2028 || u.value == 0x2029 || u.value == 0xFEFF || (0x80...0x9f).contains(u.value) // JS \s also matches U+FEFF
-        if blank { space = !out.isEmpty; continue }
+        if isNoteBlank(u) { space = !out.isEmpty; continue }
         if space { out.append(" "); space = false }
         out.unicodeScalars.append(u)
     }
-    return clipUTF8(out, bytes: ShareClient.maxNoteBytes)
+    // Clipping can end on a space the Mac would trim: trimmed again so both sides hold the same text.
+    var clipped = clipUTF8(out, bytes: ShareClient.maxNoteBytes)
+    while clipped.last == " " { clipped.removeLast() }
+    return clipped
+}
+
+/// Exactly what cleanNote turns into a space: C0/C1 controls, DEL, U+2028/2029, and JavaScript's \s. Foundation's
+/// sets are broader (they include format characters such as the U+200D that joins emoji), so they are not used.
+private func isNoteBlank(_ u: Unicode.Scalar) -> Bool {
+    switch u.value {
+    case 0x00...0x20, 0x7f...0xa0, 0x1680, 0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff: return true
+    default: return false
+    }
 }
 
 /// The demo pairing App Review uses (mobile/demo.js): answered here, never sent anywhere.

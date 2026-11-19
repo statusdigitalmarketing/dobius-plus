@@ -67,7 +67,7 @@ export function shareMessage({ note, text, path }) {
 /** The note from the query: one line of plain text, capped. */
 export function cleanNote(raw) {
   if (typeof raw !== 'string') return '';
-  return raw.replace(/[\x00-\x1f\x7f\u0080-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_NOTE_CHARS);
+  return raw.replace(/[\x00-\x1f\x7f\u0080-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_NOTE_CHARS).trim();
 }
 
 /**

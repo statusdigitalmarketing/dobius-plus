@@ -62,7 +62,16 @@ Order: the team orchestrator tab first, then Claude tabs by last activity, then 
   frees the lock and answers 504 `uncertain` (never "sent"); sendToTab's own per-tab lock still keeps a second paste out
   of that tab.
 - `id=<uuid>` (the extension sends one per share): a retry after a lost answer gets the first result again
-  (`repeat: true`) instead of a second paste. At most 200 receipts, for an hour.
+  (`repeat: true`) instead of a second paste; a retry while the first is still running gets 409 `in-progress`
+  (`uncertain`). A receipt answers only for the same tab, kind and note (else 409 `id-reused`). At most 200 receipts,
+  for an hour, never evicting one whose delivery is still running; a delivery that finishes after its deadline replaces
+  the `uncertain` receipt with what happened. Receipts live in one process-wide state, so a phone server restart
+  (certificate renewal) does not forget them.
+- At most 4 deliveries may still be running (past their deadline too); beyond that new shares get 429 `busy`.
+- The device's token is checked on arrival, again once the body has arrived, and again (through `sendToTab`'s
+  `allowed`) right before the paste and right before Enter: a phone removed mid-share types nothing more.
+- Compressed bodies are refused (415). An image is protected from the upload prune while its delivery runs, and for
+  10 minutes after a typed-but-unconfirmed outcome (Claude may still read the queued paste), at most 16 kept.
 
 Replies: `{ ok: true, sent: true, label }`, `{ ok: true, typed: true, note }` (in the box, Enter not seen taken; the
 sheet says so in orange and stays up until Done), `{ ok: false, uncertain: true, error }` (504), or
@@ -80,13 +89,19 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/oct
 2. Mac picker when more than one is paired (the app's active Mac first).
 3. `GET /share/targets` (8 s timeout). The list: orchestrator pinned at the top with a badge, the last-used tab
    selected (falls back to the orchestrator, then the first tab), then recent tabs.
-4. A preview of what is shared and a note field. Send posts once; the button is disabled while the request runs.
+4. A preview of what is shared and a note field. Send posts once; the button is disabled while the request runs. The
+   note is normalized exactly as the Mac's `cleanNote` does (and clipped to 2000 UTF-8 bytes, so the request line stays
+   under Node's 16 KB header limit); the share id changes only when the tab or the normalized note changes, or after a
+   refusal. A lost answer, a busy Mac or an uncertain outcome keeps the id. The pairing is read again from the Keychain
+   at Send, so a Mac removed while the sheet was open is refused.
 5. Networking: an ephemeral URLSession, no cookies, redirects refused (a token never follows a redirect). The
    extension's Info.plist sets `NSAllowsArbitraryLoads`: a Mac paired at a tailnet IP (`http://100.x.y.z:8420`) is an
    IP literal, which no ATS exception covers, and `NSAllowsLocalNetworking` does not cover tailnet addresses (verified in
    the simulator: -1022). The extension only ever connects to origins from the app's own pairing list.
-6. Images are downscaled with ImageIO (`CGImageSourceCreateThumbnailAtIndex`, longest side 2048 px, never decoding the
-   full image) and sent as JPEG at quality 0.85, which keeps a screenshot well under 2 MB and the extension well inside
+6. Images are read as a FILE (`loadFileRepresentation`) and downscaled with ImageIO from disk
+   (`CGImageSourceCreateWithURL` + `CGImageSourceCreateThumbnailAtIndex`, longest side 2048 px, refused above 80 MB,
+   never decoding or loading the full image). Only an item with no file form (the screenshot editor's UIImage, at most
+   16 MP) is drawn down. The extension carries its own `PrivacyInfo.xcprivacy` (UserDefaults, CA92.1) and sent as JPEG at quality 0.85, which keeps a screenshot well under 2 MB and the extension well inside
    its memory limit. Only the first image of a multi-image share is sent (the sheet says so).
 7. Success closes the sheet after a short "Sent to <tab>" confirmation; a refusal shows the Mac's reason and keeps the
    sheet open to pick another tab or retry.
