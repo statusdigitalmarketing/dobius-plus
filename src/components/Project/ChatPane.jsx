@@ -961,6 +961,8 @@ export default function ChatPane({ tabId, visible }) {
       else if (r?.reason === 'stranded' || r?.uncertain) { revokeAll(imgs); deliverDraft(tabId, (cur) => cur, STRANDED); }
       else {
         for (const a of imgs) deliverAttachment(tabId, a);
+        // Words handed back are bound to no card: the next Enter on one asks for a look first (Codex High, round 6).
+        ownWordsFpRef.current = null;
         deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, r?.stale ? 'That question changed. Nothing was sent, check it again.' : 'Not sent. Your answer is back in the box.');
       }
       // Sends stay on the card path until a settled read says what is on screen now (another card, a permission

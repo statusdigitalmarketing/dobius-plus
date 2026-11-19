@@ -519,7 +519,10 @@ async function answerFreeText(id, num, text, token, stillOk, beforeWrite, state)
   // "Type something", and its number would pick it (Codex Medium).
   // And it must be the card's own free row (askLayout: the row before "Chat about this"), never a real option that
   // happens to read "Type something" (Codex Medium, round 4).
-  if (!live.steps || askLayout(live).free?.num !== num || !FREE_TEXT_LABEL.test(optionMark(freeLabel).text)) return { ok: false, reason: 'not-free-text' };
+  // Empty means empty: askLayout's free row reads "Type something" and is not ticked (a ticked one is a half-drawn
+  // answer whose words may already be in: Codex High, round 6).
+  const layFree = askLayout(live).free;
+  if (!live.steps || layFree?.num !== num || !layFree.empty || !FREE_TEXT_LABEL.test(optionMark(freeLabel).text)) return { ok: false, reason: 'not-free-text' };
   // A multi-select question draws its rows with checkboxes ("[ ] Type something"): words typed there check the row
   // and Enter would uncheck it, so that card takes its own path below.
   const multi = optionMark(freeLabel).checked !== null;

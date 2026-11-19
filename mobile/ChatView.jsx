@@ -1604,7 +1604,13 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   const returnWords = (req, note) => {
     // Read from the ref: a state updater runs later, during the next render, too late to choose the note.
     const kept = !!String(freeDraftsRef.current[req.key] || '').trim();
-    if (!kept) { setFreeDraftFor(req.key, (cur) => (cur.trim() ? cur : req.text)); showSelNote(note); return; }
+    if (!kept) {
+      // Mirrored at once, so a second refusal handled before the next render sees the field taken (Codex, round 6).
+      freeDraftsRef.current = { ...freeDraftsRef.current, [req.key]: req.text };
+      setFreeDraftFor(req.key, (cur) => (cur.trim() ? cur : req.text));
+      showSelNote(note);
+      return;
+    }
     // The field holds new words: these go to the message box whole (safe there: it never answers a card, and the Mac
     // said they were never written), never cut short in a passing note (Codex Medium, round 5).
     setDraft((cur) => (cur.trim() ? `${cur.trimEnd()} ${req.text}` : req.text));

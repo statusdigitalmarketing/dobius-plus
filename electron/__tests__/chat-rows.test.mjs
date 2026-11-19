@@ -406,5 +406,8 @@ console.log('PASS  row keys survive a sliding window');
   const oneBoxed = { steps: { current: 1, total: 1, labels: ['Format'] }, options: [{ num: 1, label: '[ ] Markdown' }, { num: 2, label: 'Plain bullets' }, { num: 3, label: 'Type something.' }, { num: 4, label: 'Chat about this' }] };
   assert.equal(isMultiSelect(oneBoxed), false, 'one answer starting with [ ] is not a multi-select question');
   assert.equal(askLayout(oneBoxed).free?.num, 3);
+  assert.equal(askLayout(oneBoxed).main[0].label, '[ ] Markdown', 'a single-select answer keeps its own text');
+  const halfDrawn = { steps: { current: 1, total: 1, labels: ['T'] }, action: 'Submit', options: [{ num: 1, label: '[ ] Cheese' }, { num: 2, label: '[✔] Type something' }, { num: 3, label: 'Chat about this' }] };
+  assert.equal(askLayout(halfDrawn).free?.empty, false, 'a ticked row still reading Type something is not an empty field');
   console.log('PASS  question card layout: checkboxes, the free row, a key that survives a tick');
 }

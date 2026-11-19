@@ -253,7 +253,8 @@ export function askLayout(sel) {
   // real option that reads "Type something", and its number picks it (Codex Medium).
   if (cand && sel?.steps) {
     const m = optionMark(cand.label);
-    const empty = FREE_TEXT_LABEL.test(m.text) && !cand.detail;
+    // A ticked row still reading "Type something" is a half-drawn answer, never an empty field (Codex High, round 6).
+    const empty = FREE_TEXT_LABEL.test(m.text) && !cand.detail && m.checked !== true;
     // A multi-select row keeps the words typed into it ("[✔] extra spicy"): it is the free row while the question
     // draws its own Submit / Next under it. A single-select row only while it still reads "Type something.".
     if (multi ? m.checked !== null && (empty || (action && chat)) : m.checked === null && empty) {
@@ -261,8 +262,10 @@ export function askLayout(sel) {
       cut -= 1;
     }
   }
+  // Marks are taken off only in a multi-select question; a single-select answer that merely starts with "[ ]" keeps
+  // its own text (Codex Low, round 6).
   const main = opts.slice(0, cut).map((o) => {
-    const m = optionMark(o?.label);
+    const m = multi ? optionMark(o?.label) : { text: String(o?.label ?? ''), checked: null };
     return { num: o?.num, label: m.text, detail: o?.detail || '', checked: m.checked };
   });
   return { multi, main, free, chat, action };
