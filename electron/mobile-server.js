@@ -52,6 +52,7 @@ import { transcribeAudio, transcribeAvailable } from './voice-transcribe.js';
 import { getVapidPublicKey, subscribePush } from './push.js';
 import { isAbsPath, baseName } from '../shared/platform.js';
 import { stripControls } from './bridge-open-tab.js';
+import { mountShareRoutes, orderTargets } from './phone-share.js';
 
 // A transcript as one line of plain text: no escape sequence or control key (a Ctrl+C would interrupt the tab).
 const voiceLine = (t) => stripControls(t).slice(0, 4000).replace(/\s*\n\s*/g, ' ').trim();
@@ -727,6 +728,16 @@ export function setVoiceOrchestratorRoute(fn) { voiceOrchestratorRoute = typeof 
 // { id, label }, or null. Read only, nothing is sent.
 let voiceOrchestratorLabel = () => null;
 export function setVoiceOrchestratorLabel(fn) { voiceOrchestratorLabel = typeof fn === 'function' ? fn : () => null; }
+
+// Share sheet delivery (docs/phone-share.md): main installs sendToTab with claudeOnly. Until then a share answers 503.
+let shareDelivery = null;
+export function setShareDelivery(fn) { shareDelivery = typeof fn === 'function' ? fn : null; }
+// The share sheet's tab list: the board's rows, the pinned team orchestrator first.
+function shareTargets() {
+  let orch;
+  try { orch = voiceOrchestratorLabel(); } catch { orch = null; }
+  return { mac: os.hostname().replace(/\.local$/i, '').slice(0, 80), orchestrator: orch?.id || null, tabs: orderTargets(buildTerminalsPayload().list, orch?.id || null) };
+}
 
 // The destination as the phone's confirm card names it. `key` identifies it (a tab id is hashed, not shown): Send
 // carries the key it showed and is refused when the destination changed since, so it never lands somewhere the card
@@ -1511,35 +1522,65 @@ async function doStartMobileServer(stillCurrent) {
   // next upload, so the dir never grows unbounded. bearerOk hoists.
   const UPLOAD_DIR = path.join(os.tmpdir(), 'dobius-mobile-uploads');
   const MAX_UPLOAD_AGE_MS = 24 * 60 * 60 * 1000;
+  const UPLOAD_KEEP_BYTES = 512 * 1024 * 1024;
+  const UPLOAD_KEEP_FILES = 300;
   // Auth runs BEFORE the 25 MB raw parser: it reads only headers, so an
   // unpaired tailnet device is refused before its body is buffered (it used to
   // be read first, letting slow large uploads exhaust main's memory; Codex
   // design audit 2026-11-03). Checked again in the handler as before.
   const uploadAuth = (req, res, next) => (bearerOk(req) ? next() : res.status(401).json({ ok: false, error: 'auth' }));
+  // Saves one upload (the /upload and /share routes): basename-only, control/separator chars stripped, length-capped,
+  // under a unique prefix so nothing is ever overwritten. Prunes entries older than 24h first (one readdir), so the dir
+  // never grows unbounded. Throws on a write failure.
+  // ponytail: the folder is also capped at UPLOAD_KEEP_BYTES / UPLOAD_KEEP_FILES, oldest first, so a day of uploads can
+  // never fill the disk; with the file cap the sync readdir + stats stay a few hundred entries at most.
+  const saveUpload = (body, rawName) => {
+    const safeName = path.basename(rawName).replace(/[^\w.@-]+/g, '_').slice(0, 80) || 'upload';
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+    try {
+      const now = Date.now();
+      const kept = [];
+      for (const f of fs.readdirSync(UPLOAD_DIR)) {
+        const fp = path.join(UPLOAD_DIR, f);
+        try {
+          const st = fs.statSync(fp);
+          if (now - st.mtimeMs > MAX_UPLOAD_AGE_MS) fs.rmSync(fp, { force: true });
+          else if (st.isFile()) kept.push({ fp, size: st.size, at: st.mtimeMs });
+        } catch { /* raced */ }
+      }
+      kept.sort((a, b) => a.at - b.at);
+      let total = kept.reduce((n, k) => n + k.size, 0) + body.length;
+      let count = kept.length + 1;
+      for (const k of kept) {
+        if (total <= UPLOAD_KEEP_BYTES && count <= UPLOAD_KEEP_FILES) break;
+        try { fs.rmSync(k.fp, { force: true }); total -= k.size; count -= 1; } catch { /* raced */ }
+      }
+    } catch { /* prune is best-effort */ }
+    const dest = path.join(UPLOAD_DIR, `up-${Date.now()}-${crypto.randomBytes(3).toString('hex')}-${safeName}`);
+    fs.writeFileSync(dest, body);
+    return dest;
+  };
   expApp.post('/upload', uploadAuth, express.raw({ type: () => true, limit: '25mb' }), (req, res) => {
     if (!bearerOk(req)) return res.status(401).json({ ok: false, error: 'auth' });
     const body = Buffer.isBuffer(req.body) ? req.body : null;
     if (!body || body.length === 0) return res.status(400).json({ ok: false, error: 'empty upload' });
-    // Basename-only, control/separator chars stripped, length-capped. The
-    // unique prefix guarantees no collision/overwrite regardless of the name.
-    const rawName = typeof req.query.name === 'string' ? req.query.name : 'upload';
-    const safeName = path.basename(rawName).replace(/[^\w.@-]+/g, '_').slice(0, 80) || 'upload';
     try {
-      fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-      // Best-effort prune of stale uploads (cheap: one readdir per upload).
-      try {
-        const now = Date.now();
-        for (const f of fs.readdirSync(UPLOAD_DIR)) {
-          const fp = path.join(UPLOAD_DIR, f);
-          try { if (now - fs.statSync(fp).mtimeMs > MAX_UPLOAD_AGE_MS) fs.rmSync(fp, { force: true }); } catch { /* raced */ }
-        }
-      } catch { /* prune is best-effort */ }
-      const dest = path.join(UPLOAD_DIR, `up-${Date.now()}-${crypto.randomBytes(3).toString('hex')}-${safeName}`);
-      fs.writeFileSync(dest, body);
+      const dest = saveUpload(body, typeof req.query.name === 'string' ? req.query.name : 'upload');
       res.json({ ok: true, path: dest, size: body.length });
     } catch (err) {
       res.status(500).json({ ok: false, error: err.code || 'write failed' });
     }
+  });
+
+  // Share sheet (docs/phone-share.md): before the json parser too, with its own auth-first raw parser.
+  mountShareRoutes(expApp, {
+    auth: bearerOk,
+    targets: shareTargets,
+    tabAlive: (id) => listTerminals().some((t) => t.id === id),
+    saveImage: (buf, ext) => saveUpload(buf, `share.${ext}`),
+    deliver: (tabId, message, images) => (shareDelivery ? shareDelivery(tabId, message, images) : Promise.resolve({ status: 503, body: { ok: false, error: 'Dobius is still starting; try again in a moment' } })),
+    discard: (file) => { if (path.dirname(file) === UPLOAD_DIR) fs.rmSync(file, { force: true }); },
+    label: (id) => configTabLabels().get(id) || parseTermLabel(id, '').label || 'that tab',
   });
 
   expApp.use(express.json({ limit: '64kb' }));

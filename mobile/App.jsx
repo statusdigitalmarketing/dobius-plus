@@ -14,6 +14,7 @@ import { normaliseHost, mixedContent, reachabilityMessage } from './host';
 import { forgetPush } from './push-client';
 import { onNativeTap, unregisterNativePush, isNativeApp, enableNativePush, forwardTokenChanges } from './native-push';
 import { PAIRINGS_KEY, activePairing, loadPairings, readPairings, savePairings, upsertPairing, switchPairing, renamePairing, removePairing } from './pairings';
+import { mirrorPairings, withoutAdditions } from './share-mirror.js';
 
 // A keyed tree owns all state for one connection lifetime, including terminal,
 // selector, transcript, History and skills state. Rename does not remount it.
@@ -381,6 +382,9 @@ export default function App() {
           // A superseded tap returns the document unchanged, and an older
           // operation predates the warning: neither may clear it (Codex).
           if (next !== base && mySeq > errorSeqRef.current) setError('');
+          // A Mac removed (or its token replaced) leaves the share sheet's copy FIRST: if the app dies between the two
+          // writes, the extension must not still hold a token this phone no longer keeps (Codex design audit).
+          if (next !== base) await mirrorPairings(withoutAdditions(base, next));
           await savePairings(storage, next);
           adopt(next);
         });
@@ -404,6 +408,9 @@ export default function App() {
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
   }, []);
+
+  // The share sheet's copy follows every change to the document, and is refreshed once at launch.
+  useEffect(() => { if (state) mirrorPairings(state); }, [state]);
 
   useEffect(() => {
     if (!state) return undefined;

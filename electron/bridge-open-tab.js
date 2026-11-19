@@ -290,8 +290,22 @@ const squash = (x) => String(x).replace(/\s+/g, '');
 // long-running orchestrator, past its first paste: `anyPaste` accepts any
 // number, still with the message's own line count.
 const PASTE_MARKER_RE = /^\[Pasted text #(\d+)(?: \+(\d+) lines?)?\]$/;
-function boxIsMessage(boxText, message, anyPaste = false) {
+// A pasted image path on its own line becomes Claude's "[Image #N]" attachment, which Claude moves to the front of the
+// box (2.1.x: "[Image #1][shared from the phone] look"). `images` names the paths a send pasted on purpose (the phone
+// share sheet): then the box may hold exactly one marker per path plus the message without those paths. Nothing else
+// changes: a send that names no images is matched exactly as before.
+const IMAGE_MARKER_RE = /\[Image#\d+\]/g;
+function boxIsMessage(boxText, message, anyPaste = false, images = null) {
   if (typeof boxText !== 'string') return false;
+  if (Array.isArray(images) && images.length) {
+    const box = squash(boxText);
+    const markers = box.match(IMAGE_MARKER_RE) || [];
+    if (markers.length === images.length) {
+      let rest = message;
+      for (const p of images) rest = rest.split(p).join('');
+      if (box.replace(IMAGE_MARKER_RE, '') === squash(rest)) return true;
+    }
+  }
   const marker = PASTE_MARKER_RE.exec(boxText.trim());
   if (marker) {
     const lines = message.split('\n').length;

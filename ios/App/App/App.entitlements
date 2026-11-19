@@ -6,5 +6,10 @@
 	     "production" automatically; a build run from Xcode stays on the development (sandbox) host. -->
 	<key>aps-environment</key>
 	<string>development</string>
+	<!-- The Share Extension's copy of the paired Macs (docs/phone-share.md, ios/App/Shared/SharedPairings.swift). -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.statusdigital.dobiusplus.shared</string>
+	</array>
 </dict>
 </plist>

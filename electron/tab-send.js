@@ -162,7 +162,7 @@ function sweepTyped(deps) {
  *       nothing may be typed into it)
  * Resolves { status, body } for the HTTP reply.
  */
-export async function sendToTab(deps, tabId, message, { claudeOnly = false } = {}) {
+export async function sendToTab(deps, tabId, message, { claudeOnly = false, images = null } = {}) {
   sweepTyped(deps);
   if (!deps.tabAlive(tabId) || !deps.ptyOf(tabId)) return fail(404, 'no such tab (see dobius-tabs)');
   // Every caller (dobius-send, phone voice, dobius-project tell): no escape sequence or control key ever reaches the
@@ -175,7 +175,7 @@ export async function sendToTab(deps, tabId, message, { claudeOnly = false } = {
   if (sending.has(tabId) || openTabBusy.has(tabId) || openTabsStarting() > 0) return fail(409, 'another message is being sent to that tab right now; nothing was typed, try again');
   sending.add(tabId);
   try {
-    return await send(deps, tabId, message, claudeOnly);
+    return await send(deps, tabId, message, claudeOnly, images);
   } finally {
     sending.delete(tabId);
   }
@@ -197,7 +197,8 @@ async function stillScreen(deps, watch, until) {
 
 // claudeOnly (dobius-project tell): only ever a paste into Claude's prompt. A tab whose Claude has exited is back at a
 // shell, and typing the message there would run it as a command.
-async function send(deps, tabId, message, claudeOnly = false) {
+// images: file paths pasted on their own lines that Claude turns into [Image #N] (see boxHoldsMessage).
+async function send(deps, tabId, message, claudeOnly = false, images = null) {
   if (deps.inputBusy(tabId)) return fail(409, 'something else is typing into the tab right now; nothing was typed, try again');
   const pty = deps.ptyOf(tabId);
   const watch = deps.watch(tabId);
@@ -258,7 +259,7 @@ async function send(deps, tabId, message, claudeOnly = false) {
       // Claude has read input since our paste (the box shows text): ours is no longer on its way.
       if (live) t.seen = true;
       // Our own earlier message, typed but not sent: Enter on it, nothing typed again.
-      resend = ours && t.message === message && boxHoldsMessage(box, message, true);
+      resend = ours && t.message === message && boxHoldsMessage(box, message, true, images);
       if (!resend && live && !ours) typedNotSent.delete(tabId);
       if (!resend) return fail(409, 'Claude\'s prompt in that tab already holds typed text; nothing was typed', { reason: 'draft' });
     }
@@ -274,7 +275,7 @@ async function send(deps, tabId, message, claudeOnly = false) {
       typedNotSent.set(tabId, { pty, message, at: deps.now(), seq: deps.inputSeq(tabId), retryable: false, seen: false });
     }
     const rec = typedNotSent.get(tabId);
-    const r = await submitPasted(deps, tabId, pty, watch, message, watch.input(), needsAtStart, () => { if (rec) rec.seen = true; }, rec?.seq);
+    const r = await submitPasted(deps, tabId, pty, watch, message, watch.input(), needsAtStart, () => { if (rec) rec.seen = true; }, rec?.seq, images);
     if (r.body?.ok || r.body?.submitted || r.body?.enterPressed) typedNotSent.delete(tabId);
     else if (rec && typedNotSent.get(tabId) === rec) rec.retryable = rec.retryable || !!r.retryable;
     delete r.retryable;
@@ -284,7 +285,7 @@ async function send(deps, tabId, message, claudeOnly = false) {
   }
 }
 
-async function submitPasted(deps, tabId, pty, watch, message, inputAtPaste, needsAtStart, onSeen = () => {}, seqAtPaste = null) {
+async function submitPasted(deps, tabId, pty, watch, message, inputAtPaste, needsAtStart, onSeen = () => {}, seqAtPaste = null, images = null) {
   // Only a send that never saw its own paste may be finished by sending it again; one stopped by a person, a command or
   // a question may not (whatever they did is in the box now).
   const typedOnly = (why, retryable = false) => ({ status: 200, retryable, body: { ok: false, sent: message.length, typed: true, submitted: false, note: `the message is typed into Claude's prompt but was not sent: ${why}; ${retryable ? 'send the same message again to send it, or press Enter in the tab' : 'press Enter in the tab to send it'}` } });
@@ -298,7 +299,7 @@ async function submitPasted(deps, tabId, pty, watch, message, inputAtPaste, need
     const s = await stillScreen(deps, watch, 0);
     const box = s ? promptBoxText(s.lines, s.modes) : null;
     if (s && box !== null && !boxIsEmpty(s)) onSeen(); // the box shows typed text (not a dim suggestion): our paste was read
-    ready = !!s && boxHoldsMessage(box, message, true);
+    ready = !!s && boxHoldsMessage(box, message, true, images);
     // Same tick from the checks below to the Enter.
     if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return typedOnly('the tab closed or its shell changed');
     // Every source, Dobius's own writes too: another delivery pasting behind ours is not in watch.input() (Codex round 6).

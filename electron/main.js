@@ -110,7 +110,7 @@ import { provisionCert, certCapableName, certValidTo, getMagicDNSName, hasAnyCer
 import {
   stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
-  deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem, broadcastToPhones, tabLabelForNotify, setVoiceOrchestratorRoute, setVoiceOrchestratorLabel, routeVoice,
+  deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem, broadcastToPhones, tabLabelForNotify, setVoiceOrchestratorRoute, setVoiceOrchestratorLabel, setShareDelivery, routeVoice,
   setPhoneMode, pushPhoneState,
 } from './mobile-server.js';
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setTabSendService, setCodexStatusHandler, setTeamBridge, setProjectBridge } from './voice-bridge.js';
@@ -4745,6 +4745,8 @@ function setupWindowHandlers() {
     return { sent: false, error: r?.body?.error || r?.body?.note || 'not delivered' };
   });
   setVoiceOrchestratorLabel(() => { const tab = teamOrchestratorTab(); return tab && tabSendDeps.tabAlive(tab) ? { id: tab, label: orchestratorLabel(tab) } : null; });
+  // iPhone share sheet (docs/phone-share.md): into Claude's prompt only, with every dobius-send guard.
+  setShareDelivery((tabId, message, images) => sendToTab(tabSendDeps, tabId, message, { claudeOnly: true, images }));
   // `d:` texts take the same route as phone voice (Sam, 2026-11-11: "the orchestrator is the orchestrator").
   setImessageCommandRoute((text) => routeVoice(text, 'imessage'));
   // Team communicator (docs/team-communicator.md): delivery into the pinned

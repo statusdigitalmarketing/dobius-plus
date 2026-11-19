@@ -87,6 +87,8 @@
 	<string>Dobius+ uses the microphone when you speak to Claude with the voice button in a chat, and when you record a video attachment with the camera.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Dobius+ accesses your photo library only when you attach an image or video to a chat.</string>
+	<key>DobiusKeychainGroup</key>
+	<string>$(AppIdentifierPrefix)com.statusdigital.dobiusplus.shared</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>CFBundleURLTypes</key>

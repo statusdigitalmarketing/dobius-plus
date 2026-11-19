@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Dobius+</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!-- The Keychain group the app mirrors the paired Macs into (ios/App/Shared/SharedPairings.swift). -->
+	<key>DobiusKeychainGroup</key>
+	<string>$(AppIdentifierPrefix)com.statusdigital.dobiusplus.shared</string>
+	<!-- Native requests to the user's own paired Mac over Tailscale, at whatever address it was paired with: a MagicDNS
+	     name, a short name or a tailnet IP such as http://100.x.y.z:8420 (WireGuard-encrypted underneath). ATS has no
+	     exception for IP literals, and NSAllowsLocalNetworking does not cover tailnet addresses (verified in the
+	     simulator: -1022 "does not conform to ATS policy"), so arbitrary loads are allowed. The extension only ever
+	     connects to origins from the app's own pairing list (SharedPairings.valid). Do NOT add NSAllowsLocalNetworking
+	     here: its presence makes iOS ignore NSAllowsArbitraryLoads. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>ts.net</key>
+			<dict>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+				<key>NSExceptionRequiresForwardSecrecy</key>
+				<false/>
+			</dict>
+		</dict>
+	</dict>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<key>NSExtensionActivationRule</key>
+			<dict>
+				<key>NSExtensionActivationSupportsImageWithMaxCount</key>
+				<integer>1</integer>
+				<key>NSExtensionActivationSupportsText</key>
+				<true/>
+				<key>NSExtensionActivationSupportsWebURLWithMaxCount</key>
+				<integer>1</integer>
+			</dict>
+		</dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.share-services</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>$(PRODUCT_MODULE_NAME).ShareViewController</string>
+	</dict>
+</dict>
+</plist>
