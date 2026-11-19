@@ -21,11 +21,11 @@ async function server(over = {}) {
     ...over,
   };
   const app = express();
-  mountShareRoutes(app, deps);
+  const routes = mountShareRoutes(app, deps);
   const srv = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
   const base = `http://127.0.0.1:${srv.address().port}`;
   const post = (qs, body, headers = {}) => fetch(`${base}/share?${qs}`, { method: 'POST', body, headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/octet-stream', ...headers } });
-  return { base, post, calls, close: () => new Promise((r) => srv.close(r)) };
+  return { base, post, calls, routes, close: () => new Promise((r) => srv.close(r)) };
 }
 
 test('imageKind reads magic bytes only', () => {
@@ -166,7 +166,7 @@ test('typed but not confirmed is reported as typed', async () => {
   const s = await server({ deliver: async () => ({ status: 202, body: { ok: false, typed: true, note: 'in the box' } }) });
   try {
     const r = await s.post('kind=text&tab=t1', 'hi');
-    assert.deepEqual(await r.json(), { ok: true, sent: false, typed: true, label: 'Orch', note: 'in the box' });
+    assert.deepEqual(await r.json(), { ok: true, sent: false, typed: true, enterPressed: false, label: 'Orch', note: 'in the box' });
   } finally { await s.close(); }
 });
 
@@ -212,6 +212,78 @@ test('boxHoldsMessage accepts Claude\'s image marker only for a declared image p
   assert.equal(boxHoldsMessage('[Image #1][shared from the phone] look at this please', msg, true, [p]), false);
   assert.equal(boxHoldsMessage('[Image #1][Image #2][shared from the phone] look at this', msg, true, [p]), false);
   assert.equal(boxHoldsMessage('[Image #1]', msg, true, [p]), false);
+  // A literal marker in the note stays text: only the leading markers are Claude's (Codex round 1).
+  const lit = `${SHARE_PREFIX} compare with [Image #1]\n\n${p}`;
+  assert.equal(boxHoldsMessage('[Image #2][shared from the phone] compare with [Image #1]', lit, true, [p]), true);
+  assert.equal(boxHoldsMessage('[shared from the phone] compare with [Image #1][Image #2]', lit, true, [p]), false);
+});
+
+test('a retry while the first delivery is still running is told so, never delivered again or queued as busy', async () => {
+  let release;
+  let n = 0;
+  const s = await server({ deadlineMs: 100, deliver: () => { n++; return new Promise((r) => { release = () => r({ status: 200, body: { ok: true } }); }); } });
+  try {
+    const first = s.post('kind=text&tab=t1&id=race-00001', 'one');
+    await new Promise((r) => setTimeout(r, 30));
+    const again = await s.post('kind=text&tab=t1&id=race-00001', 'one');
+    assert.equal(again.status, 409);
+    assert.deepEqual(await again.json(), { ok: false, uncertain: true, error: 'The Mac is still delivering this one. Check the tab in a moment.', reason: 'in-progress' });
+    assert.equal((await first).status, 504);
+    release();
+    await new Promise((r) => setTimeout(r, 10));
+    // Settled: a retry gets the first answer (the deadline's), still never a second paste.
+    const later = await s.post('kind=text&tab=t1&id=race-00001', 'one');
+    assert.equal(later.status, 504);
+    assert.equal((await later.json()).repeat, true);
+    assert.equal(n, 1);
+  } finally { await s.close(); }
+});
+
+test('a receipt answers only for the same share: a reused id with another tab or note is refused', async () => {
+  const s = await server();
+  try {
+    assert.equal((await s.post('kind=text&tab=t1&id=same-00001&note=a', 'x')).status, 200);
+    const other = await s.post('kind=text&tab=t2&id=same-00001&note=a', 'x');
+    assert.equal(other.status, 409);
+    assert.equal((await other.json()).reason, 'id-reused');
+    assert.equal((await s.post('kind=text&tab=t1&id=same-00001&note=b', 'x')).status, 409);
+    assert.equal(s.calls.delivered.length, 1);
+  } finally { await s.close(); }
+});
+
+test('a device removed while its body uploads is refused before anything is typed', async () => {
+  let checks = 0;
+  const s = await server({ auth: () => ++checks === 1 });
+  try {
+    const r = await s.post('kind=text&tab=t1', 'hello');
+    assert.equal(r.status, 401);
+    assert.deepEqual(s.calls.delivered, []);
+  } finally { await s.close(); }
+});
+
+test('compressed bodies are refused before they are read', async () => {
+  const s = await server();
+  try {
+    const r = await s.post('kind=text&tab=t1', 'hello', { 'Content-Encoding': 'gzip' });
+    assert.equal(r.status, 415);
+    assert.deepEqual(s.calls.delivered, []);
+    assert.equal((await s.post('kind=text&tab=t1', 'ok')).status, 200);
+  } finally { await s.close(); }
+});
+
+test('an image is protected from the upload prune until its delivery settles', async () => {
+  let release;
+  let seen = null;
+  const s = await server({ deliver: () => new Promise((r) => { seen = [...s.routes.protectedFiles()]; release = () => r({ status: 200, body: { ok: true } }); }) });
+  try {
+    const p = s.post('kind=image&tab=t1', PNG);
+    while (!release) await new Promise((r) => setTimeout(r, 5));
+    assert.deepEqual(seen, ['/tmp/up-1-share.png']);
+    release();
+    assert.equal((await p).status, 200);
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(s.routes.protectedFiles().size, 0);
+  } finally { await s.close(); }
 });
 
 test('share mirror: only what the extension needs, and removals before additions', async () => {

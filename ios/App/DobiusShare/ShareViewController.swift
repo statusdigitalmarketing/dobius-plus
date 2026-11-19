@@ -12,8 +12,10 @@ final class ShareModel: ObservableObject {
     @Published var pairings: [SharedPairing] = []
     @Published var pairingId: String?
     @Published var targets: [ShareTarget] = []
-    @Published var selected: String?
-    @Published var note = ""
+    // Changing the tab or the note after a failed Send makes the next Send a new share (a receipt answers only for the
+    // exact share it was made for).
+    @Published var selected: String? { didSet { if selected != oldValue { shareId = UUID().uuidString } } }
+    @Published var note = "" { didSet { if note != oldValue { shareId = UUID().uuidString } } }
     @Published var payload: SharePayload?
     @Published var payloadProblem: String?
     @Published var listProblem: String?
@@ -94,10 +96,30 @@ final class ShareModel: ObservableObject {
         }
         if let p = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) }),
            let text = await Self.load(p, UTType.plainText) as? String, !text.isEmpty {
-            payload = .text(String(text.prefix(30_000)))
+            payload = .text(Self.clip(text, bytes: 30_000))
             return
         }
         payloadProblem = "Dobius+ can send an image, text or a link."
+    }
+
+    /// At most `bytes` of UTF-8 (the Mac takes 32 KB), cut on a character boundary.
+    static func clip(_ text: String, bytes: Int) -> String {
+        if text.utf8.count <= bytes { return text }
+        var out = ""
+        var used = 0
+        for ch in text {
+            let n = String(ch).utf8.count
+            if used + n > bytes { break }
+            out.append(ch)
+            used += n
+        }
+        return out
+    }
+
+    private static func loadData(_ p: NSItemProvider, _ type: UTType) async -> Data? {
+        await withCheckedContinuation { cont in
+            _ = p.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in cont.resume(returning: data) }
+        }
     }
 
     private static func load(_ p: NSItemProvider, _ type: UTType) async -> NSSecureCoding? {
@@ -109,6 +131,7 @@ final class ShareModel: ObservableObject {
     // Encoded bytes first (a file or data: ImageIO thumbnails it without a full decode); a UIImage (the screenshot
     // editor hands one over) is drawn down instead.
     private static func image(from p: NSItemProvider) async -> (Data, UIImage)? {
+        if let data = await loadData(p, UTType.image), data.count <= 80 * 1024 * 1024, let out = ImagePrep.fromData(data) { return out }
         let item = await load(p, UTType.image)
         if let url = item as? URL, let data = try? Data(contentsOf: url, options: .mappedIfSafe) { return ImagePrep.fromData(data) }
         if let data = item as? Data { return ImagePrep.fromData(data) }
@@ -127,15 +150,19 @@ final class ShareModel: ObservableObject {
                 UserDefaults.standard.set(tab, forKey: Self.lastKey(p.id))
                 let label = reply.label ?? targets.first { $0.id == tab }?.label ?? "the tab"
                 if reply.typed == true {
-                    // Typed into the prompt but Enter was not seen taken: say so and leave the sheet up until Done.
-                    phase = .typed("It is in \(label)'s prompt but was not sent. Press Enter in that tab to send it.")
+                    // In the prompt but not seen taken: say exactly that and leave the sheet up until Done. Never tell
+                    // someone to press Enter when it was already pressed: the box may hold someone else's draft now.
+                    phase = .typed(reply.enterPressed == true
+                        ? "Enter was pressed in \(label), but Dobius could not confirm Claude took it. Check the tab before sending again."
+                        : "It is in \(label)'s prompt but was not sent. Check the tab, then press Enter there if it is still waiting.")
                     return
                 }
                 phase = .sent("Sent to \(label)")
                 try? await Task.sleep(nanoseconds: 900_000_000)
                 finish(true)
             } catch {
-                // A refusal typed nothing, so trying again (another tab, or later) is a fresh share.
+                // Only a refusal (nothing typed) makes the next Send a fresh share. A lost answer, a busy Mac or an
+                // uncertain outcome keeps the id, so the Mac answers a retry with the first result instead of pasting twice.
                 if case ShareError.refused = error { shareId = UUID().uuidString }
                 phase = .failed(error.localizedDescription)
             }

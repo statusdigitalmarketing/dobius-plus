@@ -384,7 +384,11 @@ export default function App() {
           if (next !== base && mySeq > errorSeqRef.current) setError('');
           // A Mac removed (or its token replaced) leaves the share sheet's copy FIRST: if the app dies between the two
           // writes, the extension must not still hold a token this phone no longer keeps (Codex design audit).
-          if (next !== base) await mirrorPairings(withoutAdditions(base, next));
+          if (next !== base) {
+            const pre = withoutAdditions(base, next);
+            // A removal (or replaced token) is saved only once the extension's copy has dropped it (Codex round 1).
+            if (!(await mirrorPairings(pre)) && pre.pairings.length < base.pairings.length) throw new Error('share sheet copy not updated');
+          }
           await savePairings(storage, next);
           adopt(next);
         });

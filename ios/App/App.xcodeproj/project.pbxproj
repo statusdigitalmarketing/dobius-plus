@@ -19,6 +19,7 @@
 		504EC30F1FED79650016851F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 504EC30E1FED79650016851F /* Assets.xcassets */; };
 		504EC3121FED79650016851F /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 504EC3101FED79650016851F /* LaunchScreen.storyboard */; };
 		50B271D11FEDC1A000F3C39B /* public in Resources */ = {isa = PBXBuildFile; fileRef = 50B271D01FEDC1A000F3C39B /* public */; };
+		53C5AD457BEC7E22AE4BE008 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 8CBC19A6475F6455A8950A19 /* PrivacyInfo.xcprivacy */; };
 		9582B6832FE993A70072D4E8 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9582B6822FE993A50072D4E8 /* SceneDelegate.swift */; };
 		9C82EB10D11D6F2B6A147113 /* DobiusShare.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = EEED8FF0D1C3D9244920C9C5 /* DobiusShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		B94FCC1944689A42FCB4692C /* SharedPairings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B721B13048257F2F7917E3E0 /* SharedPairings.swift */; };
@@ -63,6 +64,7 @@
 		50B271D01FEDC1A000F3C39B /* public */ = {isa = PBXFileReference; lastKnownFileType = folder; path = public; sourceTree = "<group>"; };
 		66F6CDD7889B99E8135C2B7D /* DobiusSharePlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DobiusSharePlugin.swift; sourceTree = "<group>"; };
 		781C3FBD15BBD9C96D2A544D /* ShareViewController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
+		8CBC19A6475F6455A8950A19 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		8FF719FCBA18BE0EB2E7671D /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		9582B6822FE993A50072D4E8 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		958DCC722DB07C7200EA8C5F /* debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = debug.xcconfig; path = ../debug.xcconfig; sourceTree = SOURCE_ROOT; };
@@ -147,6 +149,7 @@
 				C07EF54B3195C871F305F8AA /* ShareClient.swift */,
 				8FF719FCBA18BE0EB2E7671D /* Info.plist */,
 				334C4B3353B5221C63DA825E /* DobiusShare.entitlements */,
+				8CBC19A6475F6455A8950A19 /* PrivacyInfo.xcprivacy */,
 			);
 			name = DobiusShare;
 			path = DobiusShare;
@@ -269,6 +272,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				53C5AD457BEC7E22AE4BE008 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

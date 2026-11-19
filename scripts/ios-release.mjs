@@ -348,6 +348,8 @@ async function verifyIpa(ipa, marketing, buildNo, work) {
     if (xi.CFBundleIdentifier !== b.id) problems.push(`${b.appex} bundle id ${xi.CFBundleIdentifier}`);
     if (xi.CFBundleShortVersionString !== marketing || String(xi.CFBundleVersion) !== String(buildNo)) problems.push(`${b.appex} version ${xi.CFBundleShortVersionString} (${xi.CFBundleVersion})`);
     if (xi.DobiusKeychainGroup !== SHARED_KEYCHAIN_GROUP) problems.push(`${b.appex} DobiusKeychainGroup is ${xi.DobiusKeychainGroup}`);
+    // Its own executable, so App Store Connect wants its own privacy manifest (it reads UserDefaults).
+    if (!fs.existsSync(path.join(appex, 'PrivacyInfo.xcprivacy'))) problems.push(`${b.appex} has no PrivacyInfo.xcprivacy`);
     const xf = path.join(work, `entitlements-${b.id}.plist`);
     fs.writeFileSync(xf, read('codesign', ['-d', '--entitlements', '-', '--xml', appex]));
     const xe = plistJson(xf);

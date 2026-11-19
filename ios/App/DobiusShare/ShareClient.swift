@@ -28,6 +28,8 @@ struct ShareReply: Decodable {
     let ok: Bool
     let sent: Bool?
     let typed: Bool?
+    var enterPressed: Bool? = nil
+    var uncertain: Bool? = nil
     let label: String?
     let note: String?
     let error: String?
@@ -40,13 +42,27 @@ enum SharePayload {
 }
 
 enum ShareError: LocalizedError {
+    /// Nothing reached the Mac, or its answer was lost: it may still have gone through, so a retry keeps the same id.
     case unreachable(String)
+    /// The Mac answered that nothing was typed: trying again is a fresh share.
     case refused(String)
+    /// The Mac may have typed it (still delivering, or it ran out of time): a retry keeps the same id and is answered
+    /// with the first outcome, never pasted twice.
+    case uncertain(String)
     var errorDescription: String? {
         switch self {
-        case .unreachable(let s), .refused(let s): return s
+        case .unreachable(let s), .refused(let s), .uncertain(let s): return s
         }
     }
+}
+
+/// Query values encoded strictly: URLComponents leaves "+" alone and the Mac reads it as a space, which would name
+/// another tab ("A+B" vs "A B").
+private func strictQuery(_ items: [URLQueryItem]) -> String {
+    var allowed = CharacterSet.alphanumerics
+    allowed.insert(charactersIn: "-._~")
+    let enc = { (v: String) in v.addingPercentEncoding(withAllowedCharacters: allowed) ?? "" }
+    return items.map { "\(enc($0.name))=\(enc($0.value ?? ""))" }.joined(separator: "&")
 }
 
 /// The demo pairing App Review uses (mobile/demo.js): answered here, never sent anywhere.
@@ -85,7 +101,7 @@ final class ShareClient {
     private func request(_ pairing: SharedPairing, path: String, query: [URLQueryItem] = []) throws -> URLRequest {
         guard var comps = URLComponents(string: pairing.origin) else { throw ShareError.unreachable("That Mac's address is not valid.") }
         comps.path = path
-        comps.queryItems = query.isEmpty ? nil : query
+        comps.percentEncodedQuery = query.isEmpty ? nil : strictQuery(query)
         guard let url = comps.url, url.host == URL(string: pairing.origin)?.host else { throw ShareError.unreachable("That Mac's address is not valid.") }
         var req = URLRequest(url: url)
         req.setValue("Bearer \(pairing.token)", forHTTPHeaderField: "Authorization")
@@ -137,14 +153,15 @@ final class ShareClient {
         req.timeoutInterval = 45
         let (data, status) = try await send(req, body: body)
         if status == 401 { throw ShareError.refused("This Mac no longer knows this phone. Open Dobius+ and pair again.") }
-        if status == 404, (try? JSONDecoder().decode(ShareReply.self, from: data))?.reason == nil {
-            throw ShareError.refused("Update Dobius+ on the Mac to share from the phone.")
-        }
-        guard let reply = try? JSONDecoder().decode(ShareReply.self, from: data) else {
-            throw ShareError.unreachable("The Mac did not answer as expected (\(status)).")
-        }
-        if !reply.ok { throw ShareError.refused(reply.error ?? "The Mac did not take it.") }
-        return reply
+        let reply = try? JSONDecoder().decode(ShareReply.self, from: data)
+        if status == 404, reply?.reason == nil { throw ShareError.refused("Update Dobius+ on the Mac to share from the phone.") }
+        guard let reply else { throw ShareError.unreachable("The Mac did not answer as expected (\(status)).") }
+        if reply.ok { return reply }
+        let msg = reply.error ?? "The Mac did not take it."
+        if reply.uncertain == true || status == 504 { throw ShareError.uncertain(msg) }
+        // Busy with another share: nothing of this one was typed, but nothing is lost by keeping its id either.
+        if status == 429 { throw ShareError.unreachable(msg) }
+        throw ShareError.refused(msg)
     }
 }
 
@@ -166,9 +183,14 @@ enum ImagePrep {
         return encode(cg)
     }
 
+    /// A decoded image is drawn down only when small enough to draw: drawing decodes every source pixel, and the
+    /// extension's memory is about 120 MB. A screenshot is ~4 MP; larger ones arrive as data and take fromData.
+    static let maxDrawPixels: CGFloat = 16_000_000
+
     static func fromImage(_ image: UIImage) -> (Data, UIImage)? {
         let size = image.size
-        guard size.width > 0, size.height > 0 else { return nil }
+        guard size.width > 0, size.height > 0,
+              size.width * image.scale * size.height * image.scale <= maxDrawPixels else { return nil }
         let scale = min(1, CGFloat(maxPixels) / (max(size.width, size.height) * image.scale))
         let target = CGSize(width: floor(size.width * image.scale * scale), height: floor(size.height * image.scale * scale))
         let fmt = UIGraphicsImageRendererFormat()

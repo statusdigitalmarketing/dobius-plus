@@ -97,17 +97,32 @@ export function mountShareRoutes(app, deps) {
     }
   });
 
+  // Ids whose delivery has not settled (past the deadline too): a retry of one is told it is still going, never run
+  // again. Image files a delivery may still paste: the upload prune must not delete them (protectedFiles()).
+  const pendingIds = new Set();
+  const liveFiles = new Set();
+  // What a receipt answers for: a retry must be the same share, not the same id reused for another tab or note.
+  const fingerprint = (tab, kind, note) => `${kind}\n${tab}\n${note}`;
+
   // Everything that can refuse a share is decided before a byte of the body is read.
   const admit = (req, res, next) => {
     const kind = req.query.kind;
     const tab = typeof req.query.tab === 'string' ? req.query.tab : '';
     const shareId = typeof req.query.id === 'string' ? req.query.id : '';
+    const note = cleanNote(req.query.note);
     if (kind !== 'image' && kind !== 'text') return res.status(400).json({ ok: false, error: 'kind must be image or text' });
     if (shareId && !SHARE_ID_RE.test(shareId)) return res.status(400).json({ ok: false, error: 'bad share id' });
+    // A compressed body would be inflated by the parser after the claim could already be gone: refused outright.
+    const enc = String(req.headers['content-encoding'] || 'identity').toLowerCase();
+    if (enc !== 'identity') return res.status(415).json({ ok: false, error: 'compressed uploads are not accepted' });
     if (shareId) {
       prune();
       const r = receipts.get(shareId);
-      if (r) return res.status(r.status).json({ ...r.body, repeat: true });
+      if (r) {
+        if (r.fp !== fingerprint(tab, kind, note)) return res.status(409).json({ ok: false, error: 'that share id was already used for something else', reason: 'id-reused' });
+        return res.status(r.status).json({ ...r.body, repeat: true });
+      }
+      if (pendingIds.has(shareId)) return res.status(409).json({ ok: false, uncertain: true, error: 'The Mac is still delivering this one. Check the tab in a moment.', reason: 'in-progress' });
     }
     if (!tab || !deps.tabAlive(tab)) return res.status(404).json({ ok: false, error: 'that tab is not open on the Mac any more', reason: 'no-tab' });
     const declared = Number(req.headers['content-length']);
@@ -115,29 +130,45 @@ export function mountShareRoutes(app, deps) {
     if (Number.isFinite(declared) && declared > cap) return res.status(413).json({ ok: false, error: kind === 'image' ? 'the image is too big' : 'the text is too long' });
     if (busy) return res.status(429).json({ ok: false, error: 'another share is still being delivered; try again in a moment', reason: 'busy' });
     busy = true;
-    let released = false;
-    req.shareRelease = () => { if (!released) { released = true; busy = false; } };
+    if (shareId) pendingIds.add(shareId);
+    const claim = { released: false, delivering: false };
+    req.shareClaim = claim;
+    req.shareRelease = () => {
+      if (claim.released) return;
+      claim.released = true;
+      busy = false;
+      if (!claim.delivering && shareId) pendingIds.delete(shareId);
+    };
     // The body read can fail (aborted, too large) before the handler runs: the claim goes with the request.
     res.on('close', () => { if (!req.shareHandled) req.shareRelease(); });
     req.shareKind = kind;
     req.shareTab = tab;
     req.shareId = shareId;
+    req.shareNote = note;
     return next();
   };
 
-  const body = (req, res, next) => express.raw({ type: () => true, limit: req.shareKind === 'image' ? MAX_IMAGE_BYTES : MAX_TEXT_BYTES })(req, res, next);
+  const body = (req, res, next) => express.raw({ type: () => true, inflate: false, limit: req.shareKind === 'image' ? MAX_IMAGE_BYTES : MAX_TEXT_BYTES })(req, res, next);
 
   app.post('/share', authOnly, admit, body, async (req, res) => {
     req.shareHandled = true;
+    const claim = req.shareClaim;
     const finish = (status, payload) => {
       // Remembered when something may have been typed (sent, typed, or unknown): a retry must not paste it twice.
-      if (req.shareId && (payload.ok || payload.typed || payload.uncertain)) { receipts.set(req.shareId, { at: now(), status, body: payload }); prune(); }
-      res.status(status).json(payload);
+      if (req.shareId && (payload.ok || payload.typed || payload.uncertain)) {
+        receipts.set(req.shareId, { at: now(), status, body: payload, fp: fingerprint(req.shareTab, req.shareKind, req.shareNote) });
+        prune();
+      }
+      if (!res.headersSent && !res.destroyed) res.status(status).json(payload);
     };
     try {
+      // The connection closed while the body was still arriving: the claim is gone and another share may hold it now.
+      if (claim.released) return undefined;
+      // The device may have been removed while its body was uploading.
+      if (!deps.auth(req)) return finish(401, { ok: false, error: 'auth' });
       const buf = Buffer.isBuffer(req.body) ? req.body : null;
       if (!buf || buf.length === 0) return finish(400, { ok: false, error: 'nothing was shared' });
-      const note = cleanNote(req.query.note);
+      const note = req.shareNote;
       let message;
       if (req.shareKind === 'image') {
         const ext = imageKind(buf);
@@ -154,19 +185,29 @@ export function mountShareRoutes(app, deps) {
       let r;
       let timer;
       const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(null), deps.deadlineMs ?? DELIVER_DEADLINE_MS); });
+      claim.delivering = true;
+      if (req.shareFile) liveFiles.add(req.shareFile);
+      const delivery = Promise.resolve().then(() => deps.deliver(req.shareTab, message, req.shareFile ? [req.shareFile] : null));
+      // Settled for real (possibly long after the deadline): only then may a retry run and the image be pruned.
+      delivery.catch(() => {}).finally(() => {
+        if (req.shareId) pendingIds.delete(req.shareId);
+        if (req.shareFile) liveFiles.delete(req.shareFile);
+      });
       try {
-        r = await Promise.race([deps.deliver(req.shareTab, message, req.shareFile ? [req.shareFile] : null), deadline]);
+        r = await Promise.race([delivery, deadline]);
       } catch { r = { status: 500, body: { ok: false, error: 'not delivered' } }; } finally { clearTimeout(timer); }
       if (r === null) return finish(504, { ok: false, uncertain: true, error: 'The Mac did not finish delivering it in time. Check the tab before sending it again.' });
       const b = r?.body || {};
       const label = (() => { try { return deps.label(req.shareTab); } catch { return ''; } })();
       if (b.ok) return finish(200, { ok: true, sent: true, label });
-      if (b.typed) return finish(200, { ok: true, sent: false, typed: true, label, note: b.note || b.error || '' });
+      if (b.typed) return finish(200, { ok: true, sent: false, typed: true, enterPressed: b.enterPressed === true, label, note: b.note || b.error || '' });
       // Nothing was typed, so nothing will ever read the image: it goes now rather than in a day.
-      if (req.shareFile) { try { deps.discard?.(req.shareFile); } catch { /* best effort: the prune takes it */ } }
+      if (req.shareFile) { liveFiles.delete(req.shareFile); try { deps.discard?.(req.shareFile); } catch { /* best effort: the prune takes it */ } }
       return finish(r?.status && r.status >= 400 ? r.status : 409, { ok: false, error: b.error || 'not delivered', reason: b.reason || undefined });
     } finally {
       req.shareRelease();
     }
   });
+
+  return { protectedFiles: () => liveFiles };
 }

@@ -1542,6 +1542,8 @@ async function doStartMobileServer(stillCurrent) {
       const kept = [];
       for (const f of fs.readdirSync(UPLOAD_DIR)) {
         const fp = path.join(UPLOAD_DIR, f);
+        // An image a share is still delivering is never pruned (its path is about to be pasted).
+        if (shareRoutes?.protectedFiles().has(fp)) continue;
         try {
           const st = fs.statSync(fp);
           if (now - st.mtimeMs > MAX_UPLOAD_AGE_MS) fs.rmSync(fp, { force: true });
@@ -1573,7 +1575,7 @@ async function doStartMobileServer(stillCurrent) {
   });
 
   // Share sheet (docs/phone-share.md): before the json parser too, with its own auth-first raw parser.
-  mountShareRoutes(expApp, {
+  const shareRoutes = mountShareRoutes(expApp, {
     auth: bearerOk,
     targets: shareTargets,
     tabAlive: (id) => listTerminals().some((t) => t.id === id),
