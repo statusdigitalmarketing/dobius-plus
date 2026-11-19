@@ -473,7 +473,12 @@ const SEND_REFUSED = {
   cancelled: 'Not sent: a cancel key dropped it.',
   on_phone: 'Not sent: this conversation is on your phone now. Send it again.',
   stale_view: 'Not sent: the tab changed since you looked. Check it and send again.',
+  prompt_open: 'Not sent: Claude is showing a question or permission prompt. Answer it first.',
+  screen_busy: 'Not sent: Claude\'s screen was changing too fast to check. Send it again in a moment.',
 };
+// After a card goes away, a send asks the Mac to check the screen for a prompt first (guard), for this long: another
+// prompt may already be up that the phone has not heard of yet.
+const CARD_GONE_GUARD_MS = 10000;
 // How long a phone mode request waits for the Mac's answer. A move stops the tab's Claude (up to 10 s) and waits for
 // the runner to start (up to 30 s), so it gets longer (electron/phone-mode.js STOP_MS, HELLO_MS).
 const PHONE_REPLY_MS = 15_000;
@@ -665,6 +670,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // selectorTexts the phone stopped waiting for (reqId -> request, the newest LATE_TEXT_MAX): a late refusal that
   // wrote nothing gives its words back.
   const lateReqRef = useRef(new Map());
+  const cardGoneAtRef = useRef(0);
+  const hadCardRef = useRef(false);
   const askViewKey = selector ? askCardKey(selector) : null;
   const freeDraft = (askViewKey && freeDrafts[askViewKey]) || '';
   const freeDraftsRef = useRef(freeDrafts);
@@ -1036,6 +1043,9 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           const sel = msg.selector && Array.isArray(msg.selector.options) ? msg.selector : null;
           // canText: this Mac answers the "Type something" row with the card's own field (selectorText).
           const next = sel ? { ...sel, token: 'token' in msg ? (msg.token || '') : null, fp: tokenFingerprint(msg.token), canText: msg.text === true } : null;
+          // Only a card going away starts the guarded window (an empty probe while none was up does not).
+          if (!next && hadCardRef.current) cardGoneAtRef.current = Date.now();
+          hadCardRef.current = !!next;
           setSelector(next);
           setSelBusy(false);
           setPendingPick(null);
@@ -1488,7 +1498,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     if (!w.ok) { showSendNote(NOT_READY); return; }
     const reqId = `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     lastSendRef.current = reqId;
-    connection.send({ type: 'submitPrompt', id: tabId, text, reqId, gen: w.gen });
+    const guard = Date.now() - cardGoneAtRef.current < CARD_GONE_GUARD_MS;
+    connection.send({ type: 'submitPrompt', id: tabId, text, reqId, gen: w.gen, ...(guard ? { guard: true } : {}) });
     setSendNote(''); // a refusal note is about the PREVIOUS send
     sentAtRef.current = Date.now();
     setEchoes((cur) => [...cur, { content: text, at: Date.now() }]);
@@ -1686,7 +1697,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     };
     // A row: its number. In a multi-select question that ticks or unticks it and the card stays; otherwise it answers.
     const tap = (opt, e, toggles = multi) => {
-      if (inField && canText) { leaveField(e); return; }
+      if (inField) { leaveField(e); return; }
       const sent = sendSelector(selector, String(opt.num), e);
       if (!sent) return;
       if (selector.token == null) { setSelector(null); return; }
@@ -1696,7 +1707,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     };
     // A multi-select question's own Submit / Next: Claude's next question tab (the right arrow), or its review step.
     const advance = (e) => {
-      if (inField && canText) { leaveField(e); return; }
+      if (inField) { leaveField(e); return; }
       if (sendSelector(selector, '\x1b[C', e)) setPendingPick({ key: askViewKey, num: 'advance', checked: null });
     };
     const sendFree = (e) => {
@@ -1758,7 +1769,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
             onChange={(e) => { freeFpRef.current = cardStamp(selector); setFreeDraft(e.target.value); }}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); if (!e.repeat) sendFree(null); } }}
           />
-          <button type="button" className="ask-free-send" disabled={cannotAnswer || !freeDraft.trim()}
+          <button type="button" className="ask-free-send" onKeyDown={(e) => { if (e.key === 'Enter' && e.repeat) e.preventDefault(); }} disabled={cannotAnswer || !freeDraft.trim()}
             aria-label={multi ? 'Add your answer' : 'Send your answer'} onClick={(e) => sendFree(e)}>
             {freeBusy ? <span className="ask-spin" aria-hidden="true" /> : multi ? 'Add' : '↑'}
           </button>
@@ -1789,10 +1800,10 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
             <div className="ask-stepper">
               {/* Claude's own question tabs: left/right arrows move between them. */}
               <button className="ask-nav" aria-label="Previous question" disabled={cannotAnswer || steps.current === 0}
-                onClick={(e) => { if (inField && canText) leaveField(e); else sendSelectorKey(selector, '\x1b[D', false, e); }}>‹</button>
+                onClick={(e) => { if (inField) leaveField(e); else sendSelectorKey(selector, '\x1b[D', false, e); }}>‹</button>
               <span className="ask-count">{onReview ? 'Review' : `${steps.current + 1} of ${steps.total}`}</span>
               <button className="ask-nav" aria-label="Next question" disabled={cannotAnswer || onReview}
-                onClick={(e) => { if (inField && canText) leaveField(e); else sendSelectorKey(selector, '\x1b[C', false, e); }}>›</button>
+                onClick={(e) => { if (inField) leaveField(e); else sendSelectorKey(selector, '\x1b[C', false, e); }}>›</button>
             </div>
           ) : (
             <span className="ask-eyebrow">{steps?.labels[0] || promptParts(selector.prompt).tool || 'Claude needs your answer'}</span>
@@ -2016,7 +2027,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
               title="Interrupt Claude / cancel queued messages. Tap again to clear its input."
             ><span /></button>
           ) : (
-            <button key="send" className="chat-send" onClick={send} aria-label="Send" disabled={!input.trim()}>↑</button>
+            <button key="send" className="chat-send" onClick={send} onKeyDown={(e) => { if (e.key === 'Enter' && e.repeat) e.preventDefault(); }} aria-label="Send" disabled={!input.trim()}>↑</button>
           )}
         </div>
       </div>

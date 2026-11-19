@@ -62,6 +62,14 @@ const answeringTabs = new Set();
 // outside the pane, so a pane remounted while an answer was out reads the same binding the refusal clears (Codex High,
 // round 7). One entry per tab id ever opened in a chat pane, removed when the words are handed back or sent.
 const ownWordsStamps = new Map();
+// The question card's text row is the one before "Chat about this", filled or not (a single-select row holding typed
+// words is no longer askLayout's `free`): true when Claude's cursor sits in it.
+function cursorInFreeRow(sel, lay) {
+  const opts = Array.isArray(sel?.options) ? sel.options : [];
+  const chatAt = lay.chat ? opts.findIndex((o) => o?.num === lay.chat.num) : -1;
+  const freeNum = lay.free?.num ?? (sel?.steps && chatAt > 0 ? opts[chatAt - 1]?.num : null);
+  return freeNum != null && opts[sel.selectedIndex]?.num === freeNum;
+}
 const cardStamp = (sel) => (sel ? `${sel.fp}|${sel.steps?.current ?? ''}` : null);
 const NOT_SENT = 'Not sent. The tab was interrupted, closed or moved to another window.';
 const STRANDED = 'Other input reached the terminal while this was being sent, so Chat cannot tell whether it went through. Check the terminal.';
@@ -1024,8 +1032,9 @@ export default function ChatPane({ tabId, visible }) {
     const lay = askLayout(selector);
     // The empty "Type something" row: its words come from the message box (answerInOwnWords), never its number.
     if (lay.free?.empty && lay.free.num === num) { inputRef.current?.focus(); return; }
-    // The cursor sits in a multi-select's text row (moved there with Down): a number now would be typed into its words.
-    if (lay.multi && lay.free && selector.options[selector.selectedIndex]?.num === lay.free.num) {
+    // The cursor sits in the text row, filled or not, multi or single (Codex Medium, round 8): a number now would be
+    // typed into its words.
+    if (cursorInFreeRow(selector, lay)) {
       selectorKey('\x1b[A', false, e);
       flash('Stepped out of the text row first. Click your choice again.');
       return;
@@ -1311,8 +1320,7 @@ export default function ChatPane({ tabId, visible }) {
               <button type="button" className="chatp-option chatp-option-primary" disabled={!selector.token} onClick={(e) => {
                 // With the cursor in the "Type something" row, the right arrow would be typed into its words (Codex
                 // Medium): step out with Up first, and the next press goes through.
-                const free = askLayout(selector).free;
-                if (free && selector.options[selector.selectedIndex]?.num === free.num) {
+                if (cursorInFreeRow(selector, askLayout(selector))) {
                   selectorKey('\x1b[A', false, e);
                   flash('Stepped out of the text row first. Press ' + selector.action + ' again.');
                   return;
@@ -1395,7 +1403,8 @@ export default function ChatPane({ tabId, visible }) {
             {working && (
               <button type="button" className="chatp-btn stop" onClick={interrupt} title="Interrupt Claude (Esc)">Stop</button>
             )}
-            <button type="button" className="chatp-btn primary" onClick={send} disabled={!draft.trim() && !atts.length} title="Send (Enter). Shift+Enter for a new line">
+            {/* A held Enter on the focused button clicks once, never again onto whatever card comes next. */}
+            <button type="button" className="chatp-btn primary" onClick={send} onKeyDown={(e) => { if (e.key === 'Enter' && e.repeat) e.preventDefault(); }} disabled={!draft.trim() && !atts.length} title="Send (Enter). Shift+Enter for a new line">
               Send
             </button>
           </div>

@@ -140,6 +140,19 @@ function harness({ live = [A, C], authed = [], allowed = () => true, maxBytes = 
   ok('ack only after the write, reqId echoed');
 }
 
+// 5b. The phone's guard flag (sent right after a card went away) reaches the send as { guardPrompt: true }; a send
+// without it passes no options.
+{
+  const h = harness({ live: [A], authed: [A] });
+  const seen = [];
+  h.deps.submitPrompt = (id, text, ok, onStranded, opts) => { seen.push([text, onStranded, opts]); return Promise.resolve({ ok: true }); };
+  await h.run({ type: 'submitPrompt', id: A, text: 'plain', reqId: 'g0' });
+  await h.run({ type: 'submitPrompt', id: A, text: 'guarded', reqId: 'g1', guard: true });
+  await h.run({ type: 'submitPrompt', id: A, text: 'not a flag', reqId: 'g2', guard: 'yes' });
+  assert.deepEqual(seen, [['plain', undefined, undefined], ['guarded', undefined, { guardPrompt: true }], ['not a flag', undefined, undefined]]);
+  ok('the guard flag reaches the send, and only a real true');
+}
+
 // 6. Several in flight: replies match their own reqId, in order, and a key
 // queued behind a submit is acked only once it is written.
 {

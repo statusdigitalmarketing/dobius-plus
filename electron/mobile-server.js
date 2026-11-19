@@ -972,6 +972,8 @@ function handleTabWrite(socket, msg) {
     maxBytes: MAX_INPUT_BYTES, // real BYTE cap (Codex: .length undercounts multibyte)
     stillOk: () => knownToken(socket._authToken),
     writeRawInput,
+    // The phone's `guard: true` (right after a card went away, when a permission prompt may have taken its place before
+    // the phone heard of it: Codex Critical, round 8) arrives as { guardPrompt: true }.
     submitPrompt: submitPromptDetailed,
     // Phone mode: a key typed against an older tab generation, or one that would land on the gate while the tab is on
     // the phone, is refused on arrival and again at the write (mobile-tab-ops.js phoneViewGate).
