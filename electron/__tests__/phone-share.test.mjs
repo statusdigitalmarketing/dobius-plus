@@ -231,9 +231,9 @@ test('a retry while the first delivery is still running is told so, never delive
     assert.equal((await first).status, 504);
     release();
     await new Promise((r) => setTimeout(r, 10));
-    // Settled: a retry gets the first answer (the deadline's), still never a second paste.
+    // Settled: a retry gets what really happened, still never a second paste.
     const later = await s.post('kind=text&tab=t1&id=race-00001', 'one');
-    assert.equal(later.status, 504);
+    assert.equal(later.status, 200);
     assert.equal((await later.json()).repeat, true);
     assert.equal(n, 1);
   } finally { await s.close(); }
@@ -302,4 +302,48 @@ test('share mirror: only what the extension needs, and removals before additions
   assert.deepEqual(withoutAdditions({ pairings: [a] }, { pairings: [{ ...a, token: 'new' }] }).pairings, []);
   // Outside the native app it does nothing.
   assert.equal(await mirrorPairings({ pairings: [a], activeId: 'a' }), true);
+});
+
+test('delivery gets a live auth check, so a device removed mid-delivery types nothing more', async () => {
+  let ok = true;
+  let seen = null;
+  const s = await server({ auth: () => ok, deliver: async (tab, message, images, allowed) => { ok = false; seen = allowed(); return { status: 403, body: { ok: false, error: 'revoked', reason: 'revoked' } }; } });
+  try {
+    const r = await s.post('kind=text&tab=t1', 'hello');
+    assert.equal(seen, false);
+    assert.equal(r.status, 403);
+  } finally { await s.close(); }
+});
+
+test('hung deliveries are capped: past the cap new shares are told the Mac is busy', async () => {
+  const s = await server({ deadlineMs: 20, deliver: () => new Promise(() => {}) });
+  try {
+    for (let i = 0; i < 4; i++) assert.equal((await s.post(`kind=text&tab=t1&id=hung-0000${i}`, 'x')).status, 504);
+    const next = await s.post('kind=text&tab=t2', 'y');
+    assert.equal(next.status, 429);
+    assert.equal((await next.json()).reason, 'busy');
+  } finally { await s.close(); }
+});
+
+test('a delivery that finishes after its deadline replaces the unknown receipt with what happened', async () => {
+  let release;
+  const s = await server({ deadlineMs: 20, deliver: () => new Promise((r) => { release = () => r({ status: 200, body: { ok: true } }); }) });
+  try {
+    assert.equal((await s.post('kind=text&tab=t1&id=late-00001', 'x')).status, 504);
+    release();
+    await new Promise((r) => setTimeout(r, 10));
+    const again = await s.post('kind=text&tab=t1&id=late-00001', 'x');
+    assert.equal(again.status, 200);
+    assert.deepEqual(await again.json(), { ok: true, sent: true, label: 'Orch', repeat: true });
+  } finally { await s.close(); }
+});
+
+test('a typed-but-unconfirmed image stays protected from the prune after the delivery settles', async () => {
+  const s = await server({ deliver: async () => ({ status: 200, body: { ok: false, typed: true, note: 'in the box' } }) });
+  try {
+    assert.equal((await s.post('kind=image&tab=t1', PNG)).status, 200);
+    await new Promise((r) => setTimeout(r, 5));
+    assert.deepEqual([...s.routes.protectedFiles()], ['/tmp/up-1-share.png']);
+    assert.deepEqual(s.calls.discarded, []);
+  } finally { await s.close(); }
 });

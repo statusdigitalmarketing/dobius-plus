@@ -23,6 +23,9 @@ const SHARE_ID_RE = /^[A-Za-z0-9-]{8,64}$/;
 // The whole delivery's deadline. sendToTab bounds its own waits, but not a process probe that never settles; past this
 // the share lock is let go (sendToTab's own per-tab lock still keeps a second paste out of that tab) and the phone is
 // told the outcome is unknown, never that it was sent.
+const MAX_UNSETTLED = 4; // deliveries still running (past the deadline too) before new shares get 429
+const KEPT_FILES_MAX = 16; // settled images kept protected from the upload prune
+const TYPED_KEEP_MS = 10 * 60 * 1000; // how long a typed-but-unconfirmed paste's image is protected
 export const DELIVER_DEADLINE_MS = 45_000;
 export const SHARE_PREFIX = '[shared from the phone]';
 
@@ -73,7 +76,8 @@ export function cleanNote(raw) {
  *   targets() -> { mac, orchestrator, tabs }   (tabs from orderTargets)
  *   tabAlive(id) -> boolean
  *   saveImage(buf, ext) -> absolute path       (throws on a write failure)
- *   deliver(tabId, message, images) -> Promise<{ status, body }>   (sendToTab, claudeOnly; images = pasted paths)
+ *   deliver(tabId, message, images, allowed) -> Promise<{ status, body }>   (sendToTab, claudeOnly; images = pasted
+ *                                              paths; allowed() re-checks the sender before the paste and the Enter)
  *   discard(path)                              (a saved image nothing was typed for; best effort)
  *   label(tabId) -> string
  *   now() -> ms (optional), deadlineMs (optional, tests)
@@ -82,10 +86,15 @@ export function mountShareRoutes(app, deps) {
   const now = deps.now || Date.now;
   let busy = false;
   const receipts = new Map(); // shareId -> { at, status, body }
+  // The receipt of a delivery that has not settled is never evicted: it is the only thing stopping a second paste.
+  // pendingIds is bounded by MAX_UNSETTLED, so this cannot grow past RECEIPTS_MAX + MAX_UNSETTLED.
   const prune = () => {
     const t = now();
-    for (const [id, r] of receipts) if (t - r.at > RECEIPT_TTL_MS) receipts.delete(id);
-    while (receipts.size > RECEIPTS_MAX) receipts.delete(receipts.keys().next().value);
+    for (const [id, r] of receipts) if (t - r.at > RECEIPT_TTL_MS && !pendingIds.has(id)) receipts.delete(id);
+    for (const id of receipts.keys()) {
+      if (receipts.size <= RECEIPTS_MAX) break;
+      if (!pendingIds.has(id)) receipts.delete(id);
+    }
   };
   const authOnly = (req, res, next) => (deps.auth(req) ? next() : res.status(401).json({ ok: false, error: 'auth' }));
 
@@ -100,7 +109,23 @@ export function mountShareRoutes(app, deps) {
   // Ids whose delivery has not settled (past the deadline too): a retry of one is told it is still going, never run
   // again. Image files a delivery may still paste: the upload prune must not delete them (protectedFiles()).
   const pendingIds = new Set();
-  const liveFiles = new Set();
+  // file -> protected until (ms; Infinity while its delivery runs). A typed-but-unconfirmed paste may still be read by
+  // Claude later, so its image stays a while after the delivery settles. ponytail: at most MAX_UNSETTLED running plus
+  // KEPT_FILES_MAX settled entries (oldest dropped), so the protection itself can hold at most ~20 x 12 MB.
+  const liveFiles = new Map();
+  let unsettled = 0;
+  const protectedFiles = () => {
+    const t = now();
+    const out = new Set();
+    for (const [f, until] of liveFiles) { if (until > t) out.add(f); else liveFiles.delete(f); }
+    return out;
+  };
+  const keepFile = (file, ms) => {
+    liveFiles.delete(file);
+    if (ms > 0) liveFiles.set(file, now() + ms);
+    let settled = [...liveFiles].filter(([, u]) => u !== Infinity);
+    while (settled.length > KEPT_FILES_MAX) { liveFiles.delete(settled[0][0]); settled = settled.slice(1); }
+  };
   // What a receipt answers for: a retry must be the same share, not the same id reused for another tab or note.
   const fingerprint = (tab, kind, note) => `${kind}\n${tab}\n${note}`;
 
@@ -128,7 +153,9 @@ export function mountShareRoutes(app, deps) {
     const declared = Number(req.headers['content-length']);
     const cap = kind === 'image' ? MAX_IMAGE_BYTES : MAX_TEXT_BYTES;
     if (Number.isFinite(declared) && declared > cap) return res.status(413).json({ ok: false, error: kind === 'image' ? 'the image is too big' : 'the text is too long' });
-    if (busy) return res.status(429).json({ ok: false, error: 'another share is still being delivered; try again in a moment', reason: 'busy' });
+    // busy: one share reads and starts at a time. unsettled: deliveries still running, past their deadline too (each one
+    // holds an image and a receipt), so a run of hung deliveries cannot pile up.
+    if (busy || unsettled >= MAX_UNSETTLED) return res.status(429).json({ ok: false, error: 'another share is still being delivered; try again in a moment', reason: 'busy' });
     busy = true;
     if (shareId) pendingIds.add(shareId);
     const claim = { released: false, delivering: false };
@@ -184,21 +211,36 @@ export function mountShareRoutes(app, deps) {
       }
       let r;
       let timer;
+      let settledLate = false;
+      const labelOf = () => { try { return deps.label(req.shareTab); } catch { return ''; } };
       const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(null), deps.deadlineMs ?? DELIVER_DEADLINE_MS); });
       claim.delivering = true;
-      if (req.shareFile) liveFiles.add(req.shareFile);
-      const delivery = Promise.resolve().then(() => deps.deliver(req.shareTab, message, req.shareFile ? [req.shareFile] : null));
-      // Settled for real (possibly long after the deadline): only then may a retry run and the image be pruned.
-      delivery.catch(() => {}).finally(() => {
+      unsettled++;
+      if (req.shareFile) liveFiles.set(req.shareFile, Infinity);
+      const allowed = () => { try { return !!deps.auth(req); } catch { return false; } };
+      const delivery = Promise.resolve().then(() => deps.deliver(req.shareTab, message, req.shareFile ? [req.shareFile] : null, allowed));
+      // Settled for real (possibly long after the deadline): the receipt then says what really happened, and only then
+      // may a retry run. An image is kept a while when its paste may still be read (typed, or not known).
+      delivery.then((r) => r, () => null).then((r) => {
+        unsettled--;
+        const b = r?.body || {};
+        const typedMaybe = !b.ok && (b.typed || !r);
+        if (req.shareFile) keepFile(req.shareFile, typedMaybe ? TYPED_KEEP_MS : 0);
+        if (req.shareId && settledLate) {
+          const fp = fingerprint(req.shareTab, req.shareKind, req.shareNote);
+          if (b.ok) receipts.set(req.shareId, { at: now(), status: 200, fp, body: { ok: true, sent: true, label: labelOf() } });
+          else if (b.typed) receipts.set(req.shareId, { at: now(), status: 200, fp, body: { ok: true, sent: false, typed: true, enterPressed: b.enterPressed === true, label: labelOf(), note: b.note || '' } });
+          // Refused late: nothing was typed, so the uncertain receipt stays (the phone was told to check the tab).
+        }
         if (req.shareId) pendingIds.delete(req.shareId);
-        if (req.shareFile) liveFiles.delete(req.shareFile);
       });
       try {
         r = await Promise.race([delivery, deadline]);
       } catch { r = { status: 500, body: { ok: false, error: 'not delivered' } }; } finally { clearTimeout(timer); }
+      if (r === null) settledLate = true;
       if (r === null) return finish(504, { ok: false, uncertain: true, error: 'The Mac did not finish delivering it in time. Check the tab before sending it again.' });
       const b = r?.body || {};
-      const label = (() => { try { return deps.label(req.shareTab); } catch { return ''; } })();
+      const label = labelOf();
       if (b.ok) return finish(200, { ok: true, sent: true, label });
       if (b.typed) return finish(200, { ok: true, sent: false, typed: true, enterPressed: b.enterPressed === true, label, note: b.note || b.error || '' });
       // Nothing was typed, so nothing will ever read the image: it goes now rather than in a day.
@@ -209,5 +251,5 @@ export function mountShareRoutes(app, deps) {
     }
   });
 
-  return { protectedFiles: () => liveFiles };
+  return { protectedFiles };
 }

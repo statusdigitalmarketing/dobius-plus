@@ -4746,7 +4746,7 @@ function setupWindowHandlers() {
   });
   setVoiceOrchestratorLabel(() => { const tab = teamOrchestratorTab(); return tab && tabSendDeps.tabAlive(tab) ? { id: tab, label: orchestratorLabel(tab) } : null; });
   // iPhone share sheet (docs/phone-share.md): into Claude's prompt only, with every dobius-send guard.
-  setShareDelivery((tabId, message, images) => sendToTab(tabSendDeps, tabId, message, { claudeOnly: true, images }));
+  setShareDelivery((tabId, message, images, allowed) => sendToTab(tabSendDeps, tabId, message, { claudeOnly: true, images, allowed }));
   // `d:` texts take the same route as phone voice (Sam, 2026-11-11: "the orchestrator is the orchestrator").
   setImessageCommandRoute((text) => routeVoice(text, 'imessage'));
   // Team communicator (docs/team-communicator.md): delivery into the pinned

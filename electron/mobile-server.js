@@ -1580,7 +1580,7 @@ async function doStartMobileServer(stillCurrent) {
     targets: shareTargets,
     tabAlive: (id) => listTerminals().some((t) => t.id === id),
     saveImage: (buf, ext) => saveUpload(buf, `share.${ext}`),
-    deliver: (tabId, message, images) => (shareDelivery ? shareDelivery(tabId, message, images) : Promise.resolve({ status: 503, body: { ok: false, error: 'Dobius is still starting; try again in a moment' } })),
+    deliver: (tabId, message, images, allowed) => (shareDelivery ? shareDelivery(tabId, message, images, allowed) : Promise.resolve({ status: 503, body: { ok: false, error: 'Dobius is still starting; try again in a moment' } })),
     discard: (file) => { if (path.dirname(file) === UPLOAD_DIR) fs.rmSync(file, { force: true }); },
     label: (id) => configTabLabels().get(id) || parseTermLabel(id, '').label || 'that tab',
   });

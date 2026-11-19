@@ -65,6 +65,20 @@ private func strictQuery(_ items: [URLQueryItem]) -> String {
     return items.map { "\(enc($0.name))=\(enc($0.value ?? ""))" }.joined(separator: "&")
 }
 
+/// At most `bytes` of UTF-8, cut on a character boundary.
+func clipUTF8(_ text: String, bytes: Int) -> String {
+    if text.utf8.count <= bytes { return text }
+    var out = ""
+    var used = 0
+    for ch in text {
+        let n = String(ch).utf8.count
+        if used + n > bytes { break }
+        out.append(ch)
+        used += n
+    }
+    return out
+}
+
 /// The demo pairing App Review uses (mobile/demo.js): answered here, never sent anywhere.
 enum Demo {
     static let origin = "http://demo.dobius:8420"
@@ -84,6 +98,9 @@ final class NoRedirect: NSObject, URLSessionTaskDelegate {
 }
 
 final class ShareClient {
+    /// The note rides in the query: 2000 bytes of UTF-8 percent-encode to at most 6 KB, well under Node's 16 KB header
+    /// limit (2000 CJK characters would not be).
+    static let maxNoteBytes = 2000
     private let session: URLSession
 
     init() {
@@ -145,8 +162,8 @@ final class ShareClient {
         case .text(let t): body = Data(t.utf8); kind = "text"
         }
         var query = [URLQueryItem(name: "kind", value: kind), URLQueryItem(name: "tab", value: tab), URLQueryItem(name: "id", value: shareId)]
-        let n = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !n.isEmpty { query.append(URLQueryItem(name: "note", value: String(n.prefix(2000)))) }
+        let n = clipUTF8(note.trimmingCharacters(in: .whitespacesAndNewlines), bytes: Self.maxNoteBytes)
+        if !n.isEmpty { query.append(URLQueryItem(name: "note", value: n)) }
         var req = try request(pairing, path: "/share", query: query)
         req.httpMethod = "POST"
         req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
@@ -170,9 +187,22 @@ final class ShareClient {
 enum ImagePrep {
     static let maxPixels = 2048
     static let maxBytes = 12 * 1024 * 1024
+    /// Encoded images larger than this are refused before any decode.
+    static let maxSourceBytes = 80 * 1024 * 1024
+
+    static func fromURL(_ url: URL) -> (Data, UIImage)? {
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? Int.max
+        guard size <= maxSourceBytes,
+              let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        return thumbnail(src)
+    }
 
     static func fromData(_ data: Data) -> (Data, UIImage)? {
         guard let src = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        return thumbnail(src)
+    }
+
+    private static func thumbnail(_ src: CGImageSource) -> (Data, UIImage)? {
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,

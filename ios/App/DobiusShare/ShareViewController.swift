@@ -15,7 +15,9 @@ final class ShareModel: ObservableObject {
     // Changing the tab or the note after a failed Send makes the next Send a new share (a receipt answers only for the
     // exact share it was made for).
     @Published var selected: String? { didSet { if selected != oldValue { shareId = UUID().uuidString } } }
-    @Published var note = "" { didSet { if note != oldValue { shareId = UUID().uuidString } } }
+    // Compared as sent (trimmed): a stray space must not turn a retry of the same share into a second paste.
+    @Published var note = "" { didSet { if Self.sentNote(note) != Self.sentNote(oldValue) { shareId = UUID().uuidString } } }
+    nonisolated static func sentNote(_ s: String) -> String { clipUTF8(s.trimmingCharacters(in: .whitespacesAndNewlines), bytes: ShareClient.maxNoteBytes) }
     @Published var payload: SharePayload?
     @Published var payloadProblem: String?
     @Published var listProblem: String?
@@ -96,29 +98,20 @@ final class ShareModel: ObservableObject {
         }
         if let p = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) }),
            let text = await Self.load(p, UTType.plainText) as? String, !text.isEmpty {
-            payload = .text(Self.clip(text, bytes: 30_000))
+            payload = .text(clipUTF8(text, bytes: 30_000))
             return
         }
         payloadProblem = "Dobius+ can send an image, text or a link."
     }
 
-    /// At most `bytes` of UTF-8 (the Mac takes 32 KB), cut on a character boundary.
-    static func clip(_ text: String, bytes: Int) -> String {
-        if text.utf8.count <= bytes { return text }
-        var out = ""
-        var used = 0
-        for ch in text {
-            let n = String(ch).utf8.count
-            if used + n > bytes { break }
-            out.append(ch)
-            used += n
-        }
-        return out
-    }
-
-    private static func loadData(_ p: NSItemProvider, _ type: UTType) async -> Data? {
+    /// The image as a FILE: ImageIO reads the size and a thumbnail straight from disk, so a huge image is never loaded
+    /// whole into the extension's memory (loadDataRepresentation would copy all of it first). The file lives only for
+    /// the duration of the callback, so the work happens there.
+    private static func thumbnailFromFile(_ p: NSItemProvider) async -> (Data, UIImage)? {
         await withCheckedContinuation { cont in
-            _ = p.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in cont.resume(returning: data) }
+            _ = p.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) { url, _ in
+                cont.resume(returning: url.flatMap { ImagePrep.fromURL($0) })
+            }
         }
     }
 
@@ -131,16 +124,23 @@ final class ShareModel: ObservableObject {
     // Encoded bytes first (a file or data: ImageIO thumbnails it without a full decode); a UIImage (the screenshot
     // editor hands one over) is drawn down instead.
     private static func image(from p: NSItemProvider) async -> (Data, UIImage)? {
-        if let data = await loadData(p, UTType.image), data.count <= 80 * 1024 * 1024, let out = ImagePrep.fromData(data) { return out }
+        if let out = await thumbnailFromFile(p) { return out }
         let item = await load(p, UTType.image)
-        if let url = item as? URL, let data = try? Data(contentsOf: url, options: .mappedIfSafe) { return ImagePrep.fromData(data) }
-        if let data = item as? Data { return ImagePrep.fromData(data) }
+        if let url = item as? URL { return ImagePrep.fromURL(url) }
+        // Data the host app already holds in memory: bounded so a huge one is not decoded on top of it.
+        if let data = item as? Data, data.count <= ImagePrep.maxSourceBytes { return ImagePrep.fromData(data) }
         if let img = item as? UIImage { return ImagePrep.fromImage(img) }
         return nil
     }
 
     func send() {
-        guard canSend, let p = pairing, let tab = selected, let payload else { return }
+        guard canSend, let cached = pairing, let tab = selected, let payload else { return }
+        // Read again: the Mac may have been removed (or re-paired) in Dobius+ while this sheet stayed open.
+        guard let p = SharedPairings.load()?.pairings.first(where: { $0.id == cached.id }),
+              p.origin == cached.origin, p.token == cached.token else {
+            phase = .failed("That Mac is no longer paired in Dobius+. Open Dobius+ to pair it again.")
+            return
+        }
         phase = .sending
         let id = shareId
         let note = self.note
