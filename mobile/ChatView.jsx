@@ -676,7 +676,9 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   const freeDraftsRef = useRef(freeDrafts);
   freeDraftsRef.current = freeDrafts;
   // Words go only into the field of the card they belong to; a card that comes back (Back to an earlier question)
-  // finds its own. Never moved into the message box: words there could be sent again after they already went in.
+  // finds its own. They leave for the message box only when that same card is still up but no longer shows its empty
+  // field (the effect below): a sent answer's words are cleared from the field when it goes out, so what is left then
+  // was never sent.
   const setFreeDraftFor = (key, next) => {
     if (!key) return;
     setFreeDrafts((all) => {
@@ -689,6 +691,18 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     });
   };
   const setFreeDraft = (next) => setFreeDraftFor(askViewKey, next);
+  // The card is still up but its empty field is gone (its row now shows an answer, or the Mac stopped offering typed
+  // answers): words still in that field were never sent and would be hidden, so they go back to the message box
+  // (Codex Medium, round 12: every timing window between a sent answer and the redraw had words left there).
+  useEffect(() => {
+    if (!askViewKey || freeBusy) return;
+    const words = freeDraftsRef.current[askViewKey];
+    if (!words || !words.trim()) return;
+    if (selector?.canText === true && askLayout(selector).free?.empty) return;
+    setFreeDraftFor(askViewKey, '');
+    setDraft((cur) => (cur.trim() ? `${cur.trimEnd()} ${words}` : words));
+    showSelNote('The card\'s field closed before your words went in. They are back in the message box.');
+  }, [selector, askViewKey, freeBusy]); // eslint-disable-line react-hooks/exhaustive-deps -- helpers are stable in effect
   // Question card: the fine-control key row is folded away unless asked for
   // (or the prompt is a multi-select), and the close button needs a second
   // tap, because Esc cancels Claude's whole question.
@@ -1483,6 +1497,11 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     // round 2: every way of binding a message-box send to the right card had a race).
     if (selector && Array.isArray(selector.options) && selector.options.length > 0 && !(e && e.repeat)) {
       const lay = askLayout(selector);
+      if (selector.canText === true && lay.free?.empty && selector.token !== '' && freeBusy) {
+        // The field's last answer is still out; its row may turn into a box any moment (Codex Medium, round 12).
+        showSelNote('Your last answer is still on its way. Send these words again once it shows in the card.');
+        return;
+      }
       if (selector.canText === true && lay.free?.empty && selector.token !== '') {
         setFreeDraft((cur) => (cur.trim() ? `${cur.trimEnd()} ${text}` : text));
         freeFpRef.current = null; // a keyboard send from the field asks for one look first
