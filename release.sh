@@ -2,6 +2,8 @@
 # release.sh -- one-command signed/notarized Dobius+ release to GitHub.
 #
 # Usage:  ./release.sh [patch|minor|major]     (default: patch)
+#         ./release.sh resume                  finish the version package.json already holds: bumped and pushed by a
+#                                              run that died before publishing (no tag, no release). No new bump.
 #
 # Automates the full RELEASING.md flow, including the manual DMG steps that
 # have to happen in the right order or the release ships subtly broken:
@@ -14,13 +16,14 @@
 #   7. re-upload manifest + signed DMG
 #   8. verify: published, 6 assets, served manifest, tag == main HEAD
 #
-# Credentials: notary password from Keychain (service dobius-notary-password),
-# GH token from `gh auth token`. Nothing is echoed.
+# Credentials: notarization uses the App Store Connect API key (scripts/lib/asc-client.mjs ascConfig, the same key the
+# iOS release uses; ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH override it). GH token from `gh auth token`. Nothing
+# secret is echoed. The app-specific password path is gone: Apple stopped accepting it on 2026-11-19, mid-release.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 BUMP="${1:-patch}"
-case "$BUMP" in patch|minor|major) ;; *) echo "usage: ./release.sh [patch|minor|major]" >&2; exit 1 ;; esac
+case "$BUMP" in patch|minor|major|resume) ;; *) echo "usage: ./release.sh [patch|minor|major|resume]" >&2; exit 1 ;; esac
 
 REPO="statusdigitalmarketing/dobius-plus"
 IDENTITY="E95B5A61D673D466CCDA22615C9BF0F061BB9F2B"
@@ -57,29 +60,56 @@ for (const n of Object.keys({ ...p.dependencies, ...p.devDependencies })) {
 }
 if (bad.length) { console.error("ERROR: node_modules does not match the lockfile; run npm install:\n  " + bad.join("\n  ")); process.exit(1); }
 ' || exit 1
-export APPLE_ID="sahil.nihal09@gmail.com"
+# electron-builder takes the Apple ID path whenever APPLE_ID or APPLE_APP_SPECIFIC_PASSWORD is set, even with the key
+# set too, and a keychain profile next: none of them may come in from the shell.
+unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_KEYCHAIN APPLE_KEYCHAIN_PROFILE
 export APPLE_TEAM_ID="Z349CC556Z"
-APPLE_APP_SPECIFIC_PASSWORD="$(security find-generic-password -s dobius-notary-password -w)" || { echo "ERROR: notary password not in Keychain (service dobius-notary-password)" >&2; exit 1; }
-export APPLE_APP_SPECIFIC_PASSWORD
+IFS=$'\t' read -r APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_API_KEY < <(node --input-type=module -e '
+import { ascConfig } from "./scripts/lib/asc-client.mjs";
+const c = ascConfig();
+process.stdout.write([c.keyId, c.issuerId, c.keyPath].join("\t") + "\n");
+') || { echo "ERROR: could not read the App Store Connect key settings" >&2; exit 1; }
+# Checked before anything prints them (a key's contents put in a variable by mistake would land in the log).
+[[ "$APPLE_API_KEY_ID" =~ ^[A-Z0-9]{8,12}$ ]] || { echo "ERROR: ASC_KEY_ID is not an App Store Connect key id" >&2; exit 1; }
+[[ "$APPLE_API_ISSUER" =~ ^[0-9a-f-]{36}$ ]] || { echo "ERROR: ASC_ISSUER_ID is not an App Store Connect issuer id" >&2; exit 1; }
+[ -r "$APPLE_API_KEY" ] || { echo "ERROR: the App Store Connect key file (ASC_KEY_PATH) is missing or unreadable" >&2; exit 1; }
+export APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER
+# Ask Apple before anything is bumped or pushed: a credential Apple refuses used to fail only at the notarize step,
+# after the version was already public (2.2.42).
+xcrun notarytool history --key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" >/dev/null 2>&1 \
+  || { echo "ERROR: Apple refused the App Store Connect key for notarization (notarytool history failed); nothing was bumped" >&2; exit 1; }
 GH_TOKEN="$(gh auth token)"
 export GH_TOKEN
 # The commit is pinned BEFORE the tests and checked after: a commit landing while they run was never tested.
 TESTED_SHA="$(git rev-parse HEAD)"
 # The What's new popup needs this release's notes (electron/whats-new/<version>.md). Checked against the pinned commit's
 # version: HEAD is confirmed unmoved after the tests, so the bump below is from this same version.
-node scripts/whats-new-check.mjs "$BUMP" >/dev/null || exit 1
+node scripts/whats-new-check.mjs "$([ "$BUMP" = resume ] && echo current || echo "$BUMP")" >/dev/null || exit 1
+if [ "$BUMP" = resume ]; then
+  # Only a version a release run bumped and pushed, that never got a tag or a release (draft included).
+  V="$(node -p "require('./package.json').version")"
+  [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "ERROR: resume releases what origin/main holds; push or drop local commits first" >&2; exit 1; }
+  # No -q: grep leaving early would SIGPIPE git log, and pipefail would read a match as a failure.
+  git log --format=%s HEAD | grep -xF "$V" >/dev/null || { echo "ERROR: no version commit \"$V\" on main; resume only finishes a bumped version" >&2; exit 1; }
+  [ -z "$(git ls-remote --tags origin "refs/tags/v$V")" ] || { echo "ERROR: tag v$V already exists on GitHub; nothing to resume" >&2; exit 1; }
+  if gh release view "v$V" >/dev/null 2>&1; then echo "ERROR: a release v$V (or its draft) already exists; finish or delete it by hand" >&2; exit 1; fi
+fi
 npm test >/dev/null 2>&1 || { echo "ERROR: npm test failed; not releasing a red build" >&2; exit 1; }
 [ "$(git rev-parse HEAD)" = "$TESTED_SHA" ] || { echo "ERROR: HEAD moved while the tests ran; run the release again" >&2; exit 1; }
 [ -z "$(git status --porcelain)" ] || { echo "ERROR: the tree changed while the tests ran; run the release again" >&2; exit 1; }
 echo "preflight OK (tests green)"
 
-step "Version bump ($BUMP)"
-npm version "$BUMP"
-V="$(node -p "require('./package.json').version")"
-echo "version: $V"
+if [ "$BUMP" = resume ]; then
+  step "Resume v$V (already bumped and pushed, no new bump)"
+else
+  step "Version bump ($BUMP)"
+  npm version "$BUMP"
+  V="$(node -p "require('./package.json').version")"
+  echo "version: $V"
 
-step "Push main first (tag lands on the right commit)"
-git push origin main
+  step "Push main first (tag lands on the right commit)"
+  git push origin main
+fi
 
 step "Build + sign + notarize + publish (electron-builder)"
 npm run electron:build -- --publish always
@@ -153,7 +183,7 @@ echo "Users auto-update within 30s of next launch (or 4h if running)."
 # The phone app: a new App Store build when the phone code changed since the last one, submitted for review and
 # released by Apple on approval (docs/ios-release.md). The desktop release above is already live, so this never fails
 # it: a problem is printed with the command to finish by hand.
-# DOBIUS_SKIP_IOS=1 skips it. The notary password and GitHub token are not passed down.
+# DOBIUS_SKIP_IOS=1 skips it. The GitHub token is not passed down.
 if [ "${DOBIUS_SKIP_IOS:-}" != "1" ]; then
   step "iOS (App Store)"
   # The tests ran on TESTED_SHA; the release commit is that plus the version bump only. Anything else landing in
@@ -173,7 +203,7 @@ if [ "${DOBIUS_SKIP_IOS:-}" != "1" ]; then
     IOS_ARGS+=(--skip-tests)
   fi
   # The run watches this shell too: cancelling release.sh stops the iOS release (Codex round 9).
-  if env -u GH_TOKEN -u APPLE_APP_SPECIFIC_PASSWORD DOBIUS_IOS_RELEASE_STARTER=$$ node scripts/ios-release.mjs "${IOS_ARGS[@]}"; then
+  if env -u GH_TOKEN DOBIUS_IOS_RELEASE_STARTER=$$ node scripts/ios-release.mjs "${IOS_ARGS[@]}"; then
     echo "iOS step finished"
   else
     echo "WARNING: the iOS step did not finish (desktop v$V is live regardless). Finish it with: node scripts/ios-release.mjs release --if-changed" >&2
