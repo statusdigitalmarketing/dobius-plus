@@ -1106,7 +1106,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         const back = sentTextsRef.current.get(msg.reqId);
         sentTextsRef.current.delete(msg.reqId);
         setDraft((cur) => (cur.trim() ? `${cur.trimEnd()} ${back}` : back));
-        setEchoes((cur) => { const i = cur.map((x) => x.content).lastIndexOf(back); return i < 0 ? cur : [...cur.slice(0, i), ...cur.slice(i + 1)]; });
+        // By request, never by text: another bubble with the same words (a phone-mode retry) stays (Codex Medium, round 11).
+        setEchoes((cur) => cur.filter((x) => x.reqId !== msg.reqId));
         setSendNote(SEND_REFUSED[msg.code]);
         clearTimeout(sendNoteTimer.current);
         sendNoteTimer.current = setTimeout(() => setSendNote(''), 6000);
@@ -1514,7 +1515,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     connection.send({ type: 'submitPrompt', id: tabId, text, reqId, gen: w.gen, guard: true });
     setSendNote(''); // a refusal note is about the PREVIOUS send
     sentAtRef.current = Date.now();
-    setEchoes((cur) => [...cur, { content: text, at: Date.now() }]);
+    setEchoes((cur) => [...cur, { content: text, at: Date.now(), reqId }]);
     setDraft('');
     atBottomRef.current = true;
   };
@@ -1777,7 +1778,9 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           <input
             className="ask-free-input" value={freeDraft} maxLength={2000} enterKeyHint={multi ? 'done' : 'send'}
             placeholder={multi ? 'Add your own' : 'Type your own answer'} aria-label="Your own answer"
-            disabled={selector.token === ''}
+            // Read-only while its answer is out: words typed now would be stranded when the row turns into a box
+            // (Codex Medium, round 11).
+            disabled={selector.token === ''} readOnly={freeBusy}
             ref={freeInputRef}
             onChange={(e) => { freeFpRef.current = cardStamp(selector); setFreeDraft(e.target.value); }}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); if (!e.repeat) sendFree(null); } }}
