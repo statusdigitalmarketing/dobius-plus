@@ -101,9 +101,9 @@ if [ "$BUMP" = resume ]; then
   git log --format=%s HEAD | grep -xF "$V" >/dev/null || { echo "ERROR: no version commit \"$V\" on main; resume only finishes a bumped version" >&2; exit 1; }
   # A lookup that fails stops the run: read as "absent", it would let a live release be overwritten (Codex).
   REMOTE_TAG="$(git ls-remote origin "refs/tags/v$V")" || { echo "ERROR: could not ask GitHub for tag v$V" >&2; exit 1; }
-  # A tag is allowed only on this exact commit (a resume that died after pushing it, below); anywhere else it is a
-  # release that already happened.
-  [ -z "$REMOTE_TAG" ] || [ "${REMOTE_TAG%%[[:space:]]*}" = "$(git rev-parse HEAD)" ] || { echo "ERROR: tag v$V already exists on GitHub on another commit; nothing to resume" >&2; exit 1; }
+  # Any tag means this version may have been released already (a release can be deleted with its tag left behind),
+  # so it is never resumed over (Codex round 2). One left by a resume that died is removed by hand.
+  [ -z "$REMOTE_TAG" ] || { echo "ERROR: tag v$V already exists on GitHub. If a resume died after creating it and no release v$V exists, delete it (git push origin :refs/tags/v$V) and run again" >&2; exit 1; }
   # Every release, drafts included (a draft has no tag yet, so a tag lookup cannot see it).
   RELEASE_TAGS="$(gh api --paginate "repos/${REPO}/releases?per_page=100" --jq '.[].tag_name')" || { echo "ERROR: could not list the GitHub releases" >&2; exit 1; }
   if printf '%s\n' "$RELEASE_TAGS" | grep -xF "v$V" >/dev/null; then echo "ERROR: a release v$V (or its draft) already exists; finish or delete it by hand" >&2; exit 1; fi
@@ -120,7 +120,11 @@ if [ "$BUMP" = resume ]; then
   # created, which a push during the build could move (Codex). An existing tag wins over the default branch.
   git fetch -q origin main
   [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "ERROR: origin/main moved while the tests ran; run the resume again" >&2; exit 1; }
-  if [ -z "$REMOTE_TAG" ]; then git push origin "$(git rev-parse HEAD):refs/tags/v$V"; fi
+  # Created through the API, which refuses a tag that already exists: of two resumes started together, only one gets
+  # past here (Codex round 2). The local tag moves too: release-notes.mjs reads the range from it.
+  gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/tags/v$V" -f sha="$(git rev-parse HEAD)" >/dev/null \
+    || { echo "ERROR: could not create tag v$V on GitHub (another run may have created it); nothing was built" >&2; exit 1; }
+  git tag -f "v$V" HEAD >/dev/null
 else
   step "Version bump ($BUMP)"
   npm version "$BUMP"
@@ -136,6 +140,11 @@ npm run electron:build -- --publish always
 # The release is still a draft here. Refuse an app that lacks a production dependency (2.2.34 shipped without every
 # scoped package and died at launch): nobody can update to a draft, and an app that cannot start cannot update itself.
 node scripts/verify-packaged-deps.mjs "dist-electron/mac-universal/Dobius+.app/Contents/Resources/app.asar" || { echo "ERROR: the packaged app is incomplete; v$V stays a draft" >&2; exit 1; }
+# Everything below replaces files on the release, so it must still be this run's draft. electron-builder succeeds
+# without uploading when it finds the release already published (another run got there first), and re-uploading the
+# manifest and DMG onto that live release would pair them with the other run's zip (Codex round 2).
+IS_DRAFT="$(gh release view "v$V" --json isDraft --jq .isDraft)" || { echo "ERROR: could not read release v$V after the build" >&2; exit 1; }
+[ "$IS_DRAFT" = "true" ] || { echo "ERROR: release v$V is already published (another run?); not touching its files" >&2; exit 1; }
 
 step "Sign + notarize + staple the DMG container"
 DMG="dist-electron/dobius-plus-${V}.dmg"

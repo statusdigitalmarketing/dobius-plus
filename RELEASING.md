@@ -27,6 +27,8 @@ does and remain the reference for debugging a failed step.
 **A run that died after the bump** (main already holds the new version, but there is no tag and no release, draft
 included): run `./release.sh resume`. It finishes the version package.json holds, with no second bump, and refuses
 anything else (a tagged version, an existing release or draft, a version with no bump commit, unpushed commits).
+Resume creates the tag on the commit it builds before the build starts, so a resume that itself dies leaves that tag
+behind: when no release v<version> exists, delete it (`git push origin :refs/tags/v<version>`) and resume again.
 
 ## Architecture (one-time read)
 
