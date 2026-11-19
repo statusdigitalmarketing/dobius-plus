@@ -806,6 +806,13 @@ ok('own words answer only the Type something row, and Enter only once the card s
   reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(3)); emitOutput('a');
   const r5 = await readSelectorForAnswer('a');
   assert.deepEqual(await answerSelectorWithText('a', 3, 'basil', r5.token), { ok: false, reason: 'stranded', uncertain: true });
+  // Words that may be in the row but are not drawn yet: the tab is held, so a second answer read off the still-empty
+  // row cannot paste them again after the first one's wait gave up.
+  emitOutput('a');
+  const held = await readSelectorForAnswer('a');
+  const before = writes.length;
+  assert.deepEqual(await answerSelectorWithText('a', 3, 'basil', held?.token || 'x|y'), { ok: false, stale: true, reason: 'busy' });
+  assert.equal(writes.length, before, 'nothing written while held');
   // While one answer is in progress, a second one (another phone, the desktop) is refused, with a fresh token too:
   // between the paste and the redraw, a read still shows the empty row, and its words would go in as well.
   reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(3)); emitOutput('a');

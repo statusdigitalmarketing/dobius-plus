@@ -1098,9 +1098,11 @@ function handleAuthedMessage(socket, msg, subs) {
       if (typeof msg.id !== 'string') break;
       const id = msg.id;
       // String or number, the same as the other routes accept (Codex Medium: a number came back as null).
-      const reqId = typeof msg.reqId === 'string' ? msg.reqId.slice(0, 64) : (Number.isFinite(msg.reqId) ? msg.reqId : null);
+      const reqId = typeof msg.reqId === 'string' || Number.isFinite(msg.reqId) ? msg.reqId : null;
       const reply = (r) => wsSend(socket, { type: 'selectorTextResult', id, reqId, ok: !!r.ok, ...(r.stale ? { stale: true } : {}), ...(r.uncertain ? { uncertain: true } : {}), ...(r.checked ? { checked: true } : {}), ...(r.reason ? { reason: String(r.reason) } : {}) });
       const text = typeof msg.text === 'string' ? msg.text : '';
+      // An oversized string reqId is refused, never truncated (two would share one id). Echoed whole otherwise.
+      if (typeof reqId === 'string' && reqId.length > 64) { wsSend(socket, { type: 'selectorTextResult', id, reqId: null, ok: false, reason: 'bad_request' }); break; }
       if (!Number.isInteger(msg.num) || typeof msg.token !== 'string' || !text.trim() || text.length > 2000) { reply({ ok: false, reason: 'bad_request' }); break; }
       const textGate = () => phoneGate(id, msg);
       const refusedText = textGate();

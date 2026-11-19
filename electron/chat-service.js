@@ -377,11 +377,25 @@ export function answerSelector(id, data, token, stillOk0 = () => true, beforeWri
 // ends: between its paste and the redraw that shows the words, a fresh read still shows the empty row, and a second
 // answer read then would paste its words in as well (Codex High). Entries live only while their answer runs.
 const freeTextPending = new Set();
+// Tabs whose last free-text answer ended with its words possibly in the field but not yet drawn (uncertain): every
+// other answer waits FREE_TEXT_HOLD_MS, or a second answer read off the still-empty row would paste again after the
+// first one's own wait gave up (Codex High, round 2). tab id -> { until (ms), pty }: a new terminal under the same id
+// ends it. At most one entry per tab id, removed when found expired.
+const freeTextHold = new Map();
+const FREE_TEXT_HOLD_MS = 10000;
+const freeTextBusy = (id) => {
+  if (freeTextPending.has(id)) return true;
+  const hold = freeTextHold.get(id);
+  if (!hold) return false;
+  if (hold.until > Date.now() && hold.pty === terminalInstance(id)) return true;
+  freeTextHold.delete(id);
+  return false;
+};
 
 // answerSelector with a longer `data` allowed (the free-text answer's own paste) and `own`: the caller IS the
 // free-text answer holding the tab.
 async function answerChecked(id, data, token, stillOk0, beforeWrite, maxLen, own) {
-  if (!own && freeTextPending.has(id)) return { ok: false, stale: true };
+  if (!own && freeTextBusy(id)) return { ok: false, stale: true };
   if (typeof data !== 'string' || !data || data.length > maxLen || typeof token !== 'string') return { ok: false };
   if (onPhone(id)) return { ok: false, onPhone: true };
   const stillOk = () => !onPhone(id) && stillOk0();
@@ -458,19 +472,22 @@ const FREE_TEXT_SHOW_MS = 1500;
 const FREE_TEXT_PASTE_MAX = 8192;
 const collapse = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
 export async function answerSelectorWithText(id, num, text, token, stillOk = () => true, beforeWrite = () => {}) {
-  if (freeTextPending.has(id)) return { ok: false, stale: true, reason: 'busy' };
+  if (freeTextBusy(id)) return { ok: false, stale: true, reason: 'busy' };
   freeTextPending.add(id);
+  let result = null;
   // Once words may have been written, a failure says so: they may be in Claude's field, and "not sent" invites a
   // second copy (Codex High: a throw from the last key reported a pasted answer as unsent).
   const state = { pasted: false };
   try {
-    return await answerFreeText(id, num, text, token, stillOk, beforeWrite, state);
+    result = await answerFreeText(id, num, text, token, stillOk, beforeWrite, state);
   } catch (err) {
     console.warn('[chat] free-text answer failed:', err?.message || err);
-    return { ok: false, reason: 'error', ...(state.pasted ? { uncertain: true } : {}) };
+    result = { ok: false, reason: 'error', ...(state.pasted ? { uncertain: true } : {}) };
   } finally {
     freeTextPending.delete(id);
+    if (result?.uncertain) freeTextHold.set(id, { until: Date.now() + FREE_TEXT_HOLD_MS, pty: terminalInstance(id) });
   }
+  return result;
 }
 
 async function answerFreeText(id, num, text, token, stillOk, beforeWrite, state) {
@@ -551,9 +568,11 @@ async function answerFreeText(id, num, text, token, stillOk, beforeWrite, state)
         if (!pasted) {
           if (selectorFingerprint(read.sel) !== fp) return { ok: false, stale: true };
           if (read.sel.selectedIndex === pos) {
+            // A submit that started during the read would queue this key behind it (Codex High, round 2).
+            if (submitPending(id)) return gone('interrupted');
             if (pos === at) state.pasted = true;
             const w = await writeRawInput(id, pos === at ? paste : arrow, guard);
-            if (!w?.ok) return { ok: false, reason: w?.reason || 'not_allowed' };
+            if (!w?.ok) return { ok: false, reason: w?.reason || 'not_allowed', ...(w?.uncertain ? { uncertain: true } : {}) };
             key = inputKey();
             since = Date.now();
             if (pos === at) pasted = true; else pos += step;
@@ -608,8 +627,10 @@ async function answerFreeText(id, num, text, token, stillOk, beforeWrite, state)
         const beforeEnter = async () => {
           const until = Date.now() + FREE_TEXT_SHOW_MS;
           for (;;) {
+            // A phone revoked after the paste never gets its Enter (Codex High, round 2): the words stay unsubmitted.
+            if (!stillOk()) return null;
             const shown = await readQuiet();
-            if (shown && typedCard(shown.sel)) return { outSeq: shown.out };
+            if (shown && typedCard(shown.sel) && stillOk()) return { outSeq: shown.out };
             if (Date.now() > until) return null;
             await sleep(80);
           }

@@ -184,6 +184,13 @@ Claude's next question tab or, after the last one, its review step.
   arrows walk the cursor to the row (a number there would tick the empty row without moving the cursor), one per
   settled read; the words are pasted (which ticks the row); no Enter (it would untick it); one up arrow leaves the row.
 
+- A Mac that has this refuses every other answer to the tab while one runs, and for 10 s after one that may have left
+  words in the field without Claude drawing them yet (`reason: "busy"`, `stale: true`).
+- `reqId` is a string of at most 64 characters or a number, echoed as sent; a longer string is refused (`bad_request`,
+  `reqId: null`).
+- The phone's message box never answers a card. With a question's empty "Type something" row on screen, Send moves the
+  words into the card's field; with any other card up, it says Claude is waiting on the card.
+
 Reply, always, with the request's `reqId`:
 
 ```json

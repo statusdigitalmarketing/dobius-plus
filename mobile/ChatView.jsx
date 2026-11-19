@@ -650,13 +650,23 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   const [freeBusy, setFreeBusy] = useState(false);
   const freeReqRef = useRef(null); // { reqId, key, multi } the selectorText in flight
   const answeredRef = useRef(null);
-  const composerKeyRef = useRef(null); // the question card on screen when the composer's words were last edited
+  const freeInputRef = useRef(null);
+  // The card's fingerprint when its field was last edited: Enter in the field (no tap to bind) sends only to that card.
+  const freeFpRef = useRef(null);
+  // A selectorText that timed out: if its answer turns up late and says the words went in, they are taken back out.
+  const lateReqRef = useRef(null);
   const [askToast, setAskToast] = useState('');
   const askViewKey = selector ? askCardKey(selector) : null;
   // Another question: its field starts empty.
-  useEffect(() => { setFreeDraft(''); }, [askViewKey]);
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- runs on edits only, recording the card seen at that moment
-  useEffect(() => { composerKeyRef.current = askViewKey; }, [input]);
+  const freeDraftRef = useRef('');
+  freeDraftRef.current = freeDraft;
+  // Another card: words still in the old card's field go back to the message box (which never answers a card), so
+  // they are neither lost nor sitting in the new card's field as if typed for it.
+  useEffect(() => {
+    const left = freeDraftRef.current.trim();
+    if (left) setDraft((cur) => (cur.trim() ? cur : left));
+    setFreeDraft('');
+  }, [askViewKey]); // eslint-disable-line react-hooks/exhaustive-deps -- setDraft is stable per tab
   // Question card: the fine-control key row is folded away unless asked for
   // (or the prompt is a multi-select), and the close button needs a second
   // tap, because Esc cancels Claude's whole question.
@@ -1041,6 +1051,18 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         // Either way the server's follow-up read (or the next probe) re-arms it.
         setTimeout(() => connection.send({ type: 'selectorSnapshot', id: tabId }), msg.ok ? 450 : 0);
       } else if (msg.type === 'selectorTextResult' && msg.id === tabId) {
+        const late = lateReqRef.current;
+        if (late && msg.reqId === late.reqId) {
+          // Answered after the phone gave up and put the words back: if they went in, take the copy back out of
+          // wherever it sits now, or a second Send would put them in twice (Codex High, round 2).
+          lateReqRef.current = null;
+          if (msg.ok || msg.uncertain) {
+            const drop = (cur) => (cur.trim() === late.text ? '' : cur);
+            setFreeDraft(drop);
+            setDraft(drop);
+            showSelNote(msg.ok ? 'Your answer did go in.' : 'Your words went in, but Claude did not show them yet. Check the card before sending them again.');
+          }
+        }
         const req = freeReqRef.current;
         if (req && msg.reqId === req.reqId) {
           freeReqRef.current = null;
@@ -1379,7 +1401,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     return true;
   };
 
-  const send = () => {
+  const send = (e = null) => {
     const text = input.trim();
     if (!text || !tabId) return;
     if (phoneOn) {
@@ -1429,24 +1451,28 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       atBottomRef.current = true;
       return;
     }
-    // A question card is up (a Mac that answers its field): the words answer its "Type something" row, exactly as the
-    // card's own field does, and are never typed in as a message (Enter there picks whatever row is highlighted).
-    if (selector && selector.canText === true && askSteps(selector.steps)) {
-      if (askLayout(selector).free?.empty) {
-        // The composer has no press to bind to a card: its words answer only the question that was up when they were
-        // last edited. A different question since then (it changed under a held Send) gets a look first (Codex High).
-        const key = askCardKey(selector);
-        if (composerKeyRef.current !== key) {
-          composerKeyRef.current = key;
-          showSendNote('The question changed. Check it, then press Send again.');
-          return;
-        }
-        if (answerFree(selector, text, null, 'composer')) setDraft('');
+    // A card is up (a question or a permission prompt): the message box never answers it and is never typed into it,
+    // where its Enter would pick the highlighted row ("Yes" on a permission prompt). A question's "Type something" row
+    // gets the words in its own field instead, sent from there with a tap on that card (Codex Critical and High,
+    // round 2: every way of binding a message-box send to the right card had a race).
+    if (selector && Array.isArray(selector.options) && selector.options.length > 0 && !(e && e.repeat)) {
+      const lay = askLayout(selector);
+      if (selector.canText === true && lay.free?.empty && selector.token !== '') {
+        setFreeDraft((cur) => (cur.trim() ? `${cur.trimEnd()} ${text}` : text));
+        freeFpRef.current = null; // a keyboard send from the field asks for one look first
+        setDraft('');
+        showSelNote('Your words are in the card. Check them, then tap Send there.');
+        requestAnimationFrame(() => { freeInputRef.current?.focus(); freeInputRef.current?.scrollIntoView?.({ block: 'nearest' }); });
         return;
       }
-      showSendNote('Claude is waiting on the question above. Answer it there, or tap ✕ to dismiss it first.');
-      return;
+      // An older Mac with the row's field open (its number was tapped): the words go in as typed, as they always did.
+      const oldMacField = selector.canText !== true && lay.free && selector.options[selector.selectedIndex]?.num === lay.free.num;
+      if (!oldMacField) {
+        showSendNote('Claude is waiting on the card above. Answer it there, or tap ✕ to dismiss it first.');
+        return;
+      }
     }
+    if (e && e.repeat) return;
     // submitPrompt: the server bracketed-pastes the text, then presses Enter as
     // a DISCRETE keypress after the paste settles. Sending `text\r` in one
     // chunk made Claude's Ink TUI treat the \r as pasted newline, so messages
@@ -1570,14 +1596,12 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   };
   // Words the Mac refused (or never answered about) go back where they were typed, unless something new is there.
   const restoreFree = (req) => {
-    if (!req?.text) return;
-    if (req.from === 'composer') setDraft((cur) => (cur.trim() ? cur : req.text));
-    else setFreeDraft((cur) => (cur.trim() ? cur : req.text));
+    if (req?.text) setFreeDraft((cur) => (cur.trim() ? cur : req.text));
   };
 
   // Your own words into a question card's "Type something" row, through the Mac's checks (selectorText): a
   // single-select card is answered with them, a multi-select one gets them as a ticked box. True when they went out.
-  const answerFree = (card, text, e = null, from = 'field') => {
+  const answerFree = (card, text, e = null) => {
     const lay = askLayout(card);
     if (!tabId || !card || !lay.free || selBusy || freeBusy || card.canText !== true || !card.token) return false;
     // selectorText is never queued across a reconnect (a stale answer must not land later): refuse it here instead of
@@ -1590,7 +1614,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     const w = writeGen();
     if (!w.ok) { showSelNote('Still connecting to the Mac. Nothing was sent, try again in a moment.'); return false; }
     const reqId = freshId('t');
-    freeReqRef.current = { reqId, key: askCardKey(card), multi: lay.multi, text, from };
+    freeReqRef.current = { reqId, key: askCardKey(card), multi: lay.multi, text };
+    lateReqRef.current = null;
     setFreeBusy(true);
     connection.send({ type: 'selectorText', id: tabId, num: lay.free.num, text, token, reqId, gen: w.gen });
     // No answer at all (the connection dropped): the card comes back to life rather than spinning forever.
@@ -1598,6 +1623,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       const req = freeReqRef.current;
       if (req?.reqId !== reqId) return;
       freeReqRef.current = null;
+      lateReqRef.current = req;
       setFreeBusy(false);
       restoreFree(req);
       showSelNote('No answer from the Mac yet. Check the card before sending again.');
@@ -1642,7 +1668,15 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     };
     const sendFree = (e) => {
       const text = freeDraft.trim();
-      if (text && !cannotAnswer) answerFree(selector, text, e);
+      if (!text || cannotAnswer) return;
+      // Enter has no tap to bind it to a card: it answers only the card this field was last edited on (the same
+      // fingerprint). Anything since (another question that reads the same, a tick) gets one look first.
+      if (!e && freeFpRef.current !== selector.fp) {
+        freeFpRef.current = selector.fp;
+        showSelNote('The card changed since you typed. Check it, then press Enter again.');
+        return;
+      }
+      answerFree(selector, text, e);
     };
     const cancel = (e) => {
       if (!cancelArmed) {
@@ -1687,8 +1721,9 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
             className="ask-free-input" value={freeDraft} maxLength={2000} enterKeyHint={multi ? 'done' : 'send'}
             placeholder={multi ? 'Add your own' : 'Type your own answer'} aria-label="Your own answer"
             disabled={selector.token === ''}
-            onChange={(e) => setFreeDraft(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); sendFree(null); } }}
+            ref={freeInputRef}
+            onChange={(e) => { freeFpRef.current = selector.fp; setFreeDraft(e.target.value); }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); if (!e.repeat) sendFree(null); } }}
           />
           <button type="button" className="ask-free-send" disabled={cannotAnswer || !freeDraft.trim()}
             aria-label={multi ? 'Add your answer' : 'Send your answer'} onClick={(e) => sendFree(e)}>
@@ -1736,12 +1771,14 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         {onReview ? <AskReview text={selector.prompt || ''} /> : steps ? (
           <div className="ask-question">{selector.prompt || 'Claude is waiting for you to choose:'}</div>
         ) : <AskPrompt text={selector.prompt} />}
-        {multi && !onReview && <div className="ask-hint">Choose any that apply, then {lay.action === 'Next' ? 'Next' : 'Submit'}.</div>}
+        {multi && !onReview && <div className="ask-hint">{lay.action ? `Choose any that apply, then ${lay.action}.` : 'Choose any that apply.'}</div>}
         <div className="ask-options" role={multi ? 'group' : undefined}>
           {lay.main.map((opt) => row(opt, opt.label, opt.detail))}
           {freeEl}
         </div>
-        {multi && !onReview && (
+        {/* Only from a Mac that reports the button (lay.action): an older one cannot say where the cursor is, and a
+            right arrow sent while it sits in a filled text row is typed into the words (Codex Medium, round 2). */}
+        {multi && !onReview && lay.action && (
           <button type="button" className={`ask-primary${pending?.num === 'advance' ? ' pending' : ''}`} disabled={cannotAnswer} onClick={advance}>
             {pending?.num === 'advance' ? <span className="ask-spin" aria-hidden="true" /> : (lay.action || 'Submit')}
           </button>
@@ -1890,7 +1927,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           className="chat-input"
           value={input}
           onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(e); } }}
           onPaste={(e) => {
             // Pasting an image (iOS long-press paste of a screenshot) uploads
             // it like the attach button; text pastes fall through untouched.
