@@ -2,7 +2,8 @@
 # Notarizes a file, surviving what stopped the 2.2.2 release: a dropped connection after
 # the upload, and a submission that sat "In Progress" for hours at Apple while a fresh
 # copy of the same file cleared in 2 minutes. Exits 0 only once Apple says Accepted.
-# Needs APPLE_ID, APPLE_TEAM_ID and APPLE_APP_SPECIFIC_PASSWORD in the environment.
+# Needs the App Store Connect API key in the environment: APPLE_API_KEY (the .p8 path), APPLE_API_KEY_ID and
+# APPLE_API_ISSUER (release.sh sets them from scripts/lib/asc-client.mjs).
 # Timings can be overridden for the test.
 set -uo pipefail
 FILE="$1"
@@ -10,7 +11,9 @@ POLL_SECONDS="${NOTARIZE_POLL_SECONDS:-60}"
 RESUBMIT_AFTER_POLLS="${NOTARIZE_RESUBMIT_AFTER_POLLS:-20}"
 MAX_POLLS="${NOTARIZE_MAX_POLLS:-120}"
 RETRY_SECONDS="${NOTARIZE_RETRY_SECONDS:-30}"
-auth=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD")
+[ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_KEY_ID:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ] \
+  || { echo "ERROR: APPLE_API_KEY, APPLE_API_KEY_ID and APPLE_API_ISSUER must be set." >&2; exit 1; }
+auth=(--key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER")
 
 submit() {
   local id

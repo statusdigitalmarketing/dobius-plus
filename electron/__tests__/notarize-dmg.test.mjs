@@ -10,14 +10,20 @@ import { fileURLToPath } from 'node:url';
 
 const SCRIPT = fileURLToPath(new URL('../../scripts/notarize-dmg.sh', import.meta.url));
 
+// The App Store Connect key, as release.sh exports it (the path need not exist: xcrun is a fake).
+const KEY_ENV = { APPLE_API_KEY: '/keys/AuthKey_ABCD123456.p8', APPLE_API_KEY_ID: 'ABCD123456', APPLE_API_ISSUER: '00000000-0000-0000-0000-000000000000' };
+// The password variables the old path read are never inherited into a run.
+const clean = (env) => { const e = { ...env }; for (const k of ['APPLE_ID', 'APPLE_APP_SPECIFIC_PASSWORD', 'APPLE_API_KEY', 'APPLE_API_KEY_ID', 'APPLE_API_ISSUER']) delete e[k]; return e; };
+
 // The fake reads a plan: how each numbered submission behaves, as a list of statuses, the last repeating.
-function run(plan, { failUploads = 0 } = {}) {
+function run(plan, { failUploads = 0, env = KEY_ENV } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'notarize-'));
   fs.writeFileSync(path.join(dir, 'plan.json'), JSON.stringify(plan));
   fs.writeFileSync(path.join(dir, 'uploads'), '0');
   fs.writeFileSync(path.join(dir, 'xcrun'), `#!/usr/bin/env node
 const fs = require('fs'); const d = ${JSON.stringify(dir)};
 const a = process.argv.slice(2);
+fs.appendFileSync(d + '/args', JSON.stringify(a) + '\\n');
 const plan = JSON.parse(fs.readFileSync(d + '/plan.json'));
 if (a[1] === 'submit') {
   const n = Number(fs.readFileSync(d + '/uploads')) + 1; fs.writeFileSync(d + '/uploads', String(n));
@@ -34,11 +40,12 @@ if (a[1] === 'info') {
 if (a[1] === 'log') { console.log('the log'); process.exit(0); }
 process.exit(2);
 `, { mode: 0o755 });
-  const r = spawnSync('bash', [SCRIPT, 'x.dmg'], { encoding: 'utf8', env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, APPLE_ID: 'a', APPLE_TEAM_ID: 'b', APPLE_APP_SPECIFIC_PASSWORD: 'SECRET-NOT-PRINTED', NOTARIZE_POLL_SECONDS: '0', NOTARIZE_RETRY_SECONDS: '0', NOTARIZE_RESUBMIT_AFTER_POLLS: '3', NOTARIZE_MAX_POLLS: '9' } });
+  const r = spawnSync('bash', [SCRIPT, 'x.dmg'], { encoding: 'utf8', env: { ...clean(process.env), PATH: `${dir}:${process.env.PATH}`, ...env, NOTARIZE_POLL_SECONDS: '0', NOTARIZE_RETRY_SECONDS: '0', NOTARIZE_RESUBMIT_AFTER_POLLS: '3', NOTARIZE_MAX_POLLS: '9' } });
   const uploads = Number(fs.readFileSync(path.join(dir, 'uploads')));
+  const argsFile = path.join(dir, 'args');
+  const calls = fs.existsSync(argsFile) ? fs.readFileSync(argsFile, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
   fs.rmSync(dir, { recursive: true, force: true });
-  assert.equal(`${r.stdout}${r.stderr}`.includes('SECRET-NOT-PRINTED'), false, 'the password is never printed');
-  return { code: r.status, out: r.stdout, err: r.stderr, uploads };
+  return { code: r.status, out: r.stdout, err: r.stderr, uploads, calls };
 }
 
 test('accepted straight away', () => {
@@ -85,4 +92,26 @@ test('still processing at the limit stops with that exact reason', () => {
   assert.equal(r.code, 1);
   assert.match(r.err, /still processing/);
   assert.equal(r.uploads, 4, 'one to start, one every third check');
+});
+
+test('every notarytool call authenticates with the App Store Connect key, never an Apple ID password', () => {
+  const r = run({ 'sub-1': ['In Progress', 'Accepted'] });
+  assert.equal(r.code, 0);
+  assert.ok(r.calls.length >= 2);
+  for (const a of r.calls) {
+    const at = (flag) => a[a.indexOf(flag) + 1];
+    assert.equal(a[0], 'notarytool');
+    assert.equal(at('--key'), KEY_ENV.APPLE_API_KEY);
+    assert.equal(at('--key-id'), KEY_ENV.APPLE_API_KEY_ID);
+    assert.equal(at('--issuer'), KEY_ENV.APPLE_API_ISSUER);
+    assert.equal(a.includes('--password') || a.includes('--apple-id'), false);
+  }
+});
+
+test('a missing key setting stops it before anything is uploaded', () => {
+  const { APPLE_API_ISSUER: _drop, ...partial } = KEY_ENV;
+  const r = run({ 'sub-1': ['Accepted'] }, { env: partial });
+  assert.equal(r.code, 1);
+  assert.equal(r.uploads, 0);
+  assert.match(r.err, /APPLE_API_KEY, APPLE_API_KEY_ID and APPLE_API_ISSUER must be set/);
 });

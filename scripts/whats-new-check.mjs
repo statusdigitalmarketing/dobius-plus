@@ -3,7 +3,7 @@
 // by the SAME rules the app reads them with (electron/whats-new-notes.js). Runs before the version bump, so a missing
 // or bad file stops the release while nothing is public yet.
 //
-// Usage: node scripts/whats-new-check.mjs <patch|minor|major>   prints the version it checked, exits 1 when not ready
+// Usage: node scripts/whats-new-check.mjs <patch|minor|major|current>   prints the version it checked, exits 1 when not ready
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,7 +49,8 @@ export function checkNotes(version, dir = NOTES_DIR) {
 function main() {
   const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
   const current = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
-  const v = nextVersion(current, process.argv[2] || 'patch');
+  // `current`: the version package.json already holds (release.sh resume finishes a bumped, unpublished version).
+  const v = process.argv[2] === 'current' ? current : nextVersion(current, process.argv[2] || 'patch');
   const r = checkNotes(v);
   if (!r.ok) { console.error(`ERROR: ${r.error}`); process.exit(1); }
   console.log(v);

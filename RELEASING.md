@@ -18,16 +18,22 @@ invisible draft release, the DMG is stapled and the stable-named
 release, and the auto-updater can never fetch an unstapled DMG mid-publish.
 
 `release.sh` runs the ENTIRE flow below in the right order: preflight
-(clean main, creds in Keychain, tests green), version bump, push-main-first,
+(clean main, notary key accepted by Apple, tests green), version bump, push-main-first,
 electron-builder publish, DMG codesign/notarize/staple, latest-mac.yml DMG
 hash regen, re-uploads, and end-to-end verification (published + 5 assets +
 served manifest + tag == main HEAD). The sections below document what it
 does and remain the reference for debugging a failed step.
 
+**A run that died after the bump** (main already holds the new version, but there is no tag and no release, draft
+included): run `./release.sh resume`. It finishes the version package.json holds, with no second bump, and refuses
+anything else (a tagged version, an existing release or draft, a version with no bump commit, unpushed commits).
+Resume creates the tag on the commit it builds before the build starts, so a resume that itself dies leaves that tag
+behind: when no release v<version> exists, delete it (`git push origin :refs/tags/v<version>`) and resume again.
+
 ## Architecture (one-time read)
 
 - **Code signing** uses the `Developer ID Application: Status Consulting Firm LLC` certificate (already in this Mac's Keychain). Identity hash: `E95B5A61D673D466CCDA22615C9BF0F061BB9F2B`. Team ID: `Z349CC556Z`.
-- **Notarization** uses Apple's `notarytool` against `sahil.nihal09@gmail.com` (the Apple Developer account holder for Status Consulting Firm LLC).
+- **Notarization** uses Apple's `notarytool` with the App Store Connect API key "Dobius iOS upload" (key id `RVU59FRA7H`, App Manager, team `Z349CC556Z`), the same key the iOS release uses. Its settings come from `scripts/lib/asc-client.mjs` `ascConfig()` (`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_PATH` override them); the `.p8` lives at `~/.appstoreconnect/private_keys/AuthKey_RVU59FRA7H.p8`. The Apple ID app-specific password path was dropped on 2026-11-19, when Apple stopped accepting the stored password in the middle of the 2.2.42 release.
 - **Auto-update** uses [`electron-updater`](https://www.electron.build/auto-update) pointed at GitHub Releases for `statusdigitalmarketing/dobius-plus`. The app checks 30s after launch and every 4 hours after that.
 - **Hardened runtime + entitlements** are in `build/entitlements.mac.plist`. Required for notarization. The entitlements allow JIT (V8), unsigned executable memory, and library validation skip (for the `node-pty` native module).
 - **DMG container signing is currently manual** — `electron-builder` v26 signs the .app inside but not the DMG wrapping it. See "Step 4" below.
@@ -35,19 +41,26 @@ does and remain the reference for debugging a failed step.
 
 ## One-time setup
 
-Add to `~/.zshrc` and `source` it:
+`release.sh` needs nothing in the shell: it reads the notary key settings from `ascConfig()`, asks Apple whether the
+key still works (`notarytool history`) before it bumps anything, and takes the GitHub token from `gh auth token`. It
+unsets `APPLE_ID` and `APPLE_APP_SPECIFIC_PASSWORD`, because electron-builder prefers that path over the key whenever
+either is set.
+
+For the manual steps below, set up the shell the way `release.sh` does. The `unset` matters: a shell still holding the
+old `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` exports makes electron-builder use the refused password instead of the
+key.
 
 ```bash
-# Apple notarization
-export APPLE_ID="sahil.nihal09@gmail.com"
-export APPLE_APP_SPECIFIC_PASSWORD="xxxx-xxxx-xxxx-xxxx"   # generate at https://account.apple.com (Sign-In and Security -> App-Specific Passwords)
+unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_KEYCHAIN APPLE_KEYCHAIN_PROFILE
+export GH_TOKEN="$(gh auth token)"   # electron-builder publishes with it
 export APPLE_TEAM_ID="Z349CC556Z"
-
-# GitHub release publishing (token needs repo scope)
-export GH_TOKEN="ghp_..."   # generate at https://github.com/settings/tokens
+export APPLE_API_KEY="$HOME/.appstoreconnect/private_keys/AuthKey_RVU59FRA7H.p8"
+export APPLE_API_KEY_ID="RVU59FRA7H"
+export APPLE_API_ISSUER="c7167f5f-1a8d-4d63-8af9-1f032a24e66c"
 ```
 
-The Apple ID and team ID are not secret — only the app-specific password is. If it ever leaks (ends up in chat / a commit / a screenshot), revoke it at https://account.apple.com and generate a new one.
+The key id and issuer id are not secret; the `.p8` file is. If it ever leaks (ends up in chat, a commit or a
+screenshot), revoke it in App Store Connect (Users and Access > Integrations) and make a new one.
 
 ## Releasing a new version
 
@@ -133,9 +146,9 @@ codesign --sign E95B5A61D673D466CCDA22615C9BF0F061BB9F2B \
 
 # Notarize and staple
 xcrun notarytool submit "dobius-plus-$(node -p "require('../package.json').version").dmg" \
-  --apple-id "$APPLE_ID" \
-  --team-id "$APPLE_TEAM_ID" \
-  --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+  --key "$APPLE_API_KEY" \
+  --key-id "$APPLE_API_KEY_ID" \
+  --issuer "$APPLE_API_ISSUER" \
   --wait
 
 xcrun stapler staple "dobius-plus-$(node -p "require('../package.json').version").dmg"
@@ -248,7 +261,7 @@ All of `*.dmg`, `*.zip`, and `latest-mac.yml` must be uploaded to the GitHub rel
 If you just want to build a local .app for testing without burning a notarization round-trip:
 
 ```bash
-unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
+unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_KEYCHAIN_PROFILE
 npm run electron:build
 ```
 
