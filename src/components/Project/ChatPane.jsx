@@ -1007,6 +1007,12 @@ export default function ChatPane({ tabId, visible }) {
     const lay = askLayout(selector);
     // The empty "Type something" row: its words come from the message box (answerInOwnWords), never its number.
     if (lay.free?.empty && lay.free.num === num) { inputRef.current?.focus(); return; }
+    // The cursor sits in a multi-select's text row (moved there with Down): a number now would be typed into its words.
+    if (lay.multi && lay.free && selector.options[selector.selectedIndex]?.num === lay.free.num) {
+      selectorKey('\x1b[A', false, e);
+      flash('Stepped out of the text row first. Click your choice again.');
+      return;
+    }
     // A multi-select box ticks in place: the card stays, and so does the scroll.
     if (lay.multi && num !== lay.chat?.num) { selectorKey(String(num), false, e); return; }
     // The absolute option digit, never relative arrows: a misparsed cursor
@@ -1283,7 +1289,17 @@ export default function ChatPane({ tabId, visible }) {
             })}
             {/* A multi-select question's own Submit / Next (the right arrow: its next tab, or the review step). */}
             {selector.action && (
-              <button type="button" className="chatp-option chatp-option-primary" disabled={!selector.token} onClick={(e) => selectorKey('\x1b[C', false, e)}>
+              <button type="button" className="chatp-option chatp-option-primary" disabled={!selector.token} onClick={(e) => {
+                // With the cursor in the "Type something" row, the right arrow would be typed into its words (Codex
+                // Medium): step out with Up first, and the next press goes through.
+                const free = askLayout(selector).free;
+                if (free && selector.options[selector.selectedIndex]?.num === free.num) {
+                  selectorKey('\x1b[A', false, e);
+                  flash('Stepped out of the text row first. Press ' + selector.action + ' again.');
+                  return;
+                }
+                selectorKey('\x1b[C', false, e);
+              }}>
                 {selector.action}
               </button>
             )}

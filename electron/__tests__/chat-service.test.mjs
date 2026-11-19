@@ -806,6 +806,28 @@ ok('own words answer only the Type something row, and Enter only once the card s
   reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(3)); emitOutput('a');
   const r5 = await readSelectorForAnswer('a');
   assert.deepEqual(await answerSelectorWithText('a', 3, 'basil', r5.token), { ok: false, reason: 'stranded', uncertain: true });
+  // While one answer is in progress, a second one (another phone, the desktop) is refused, with a fresh token too:
+  // between the paste and the redraw, a read still shows the empty row, and its words would go in as well.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(3)); emitOutput('a');
+  const r6 = await readSelectorForAnswer('a');
+  const firstOne = answerSelectorWithText('a', 3, 'basil', r6.token);
+  await writesReach(1);
+  emitOutput('a'); // Claude repaints something, the row still empty
+  const r7 = await readSelectorForAnswer('a');
+  assert.ok(r7?.token);
+  assert.deepEqual(await answerSelectorWithText('a', 3, 'basil', r7.token), { ok: false, stale: true, reason: 'busy' });
+  assert.deepEqual(await answerSelector('a', '1', r7.token), { ok: false, stale: true });
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('basil')], 'one paste only');
+  buffers.set('a', card(3, 'basil')); emitOutput('a');
+  assert.deepEqual(await firstOne, { ok: true, checked: true });
+  // A plain numbered menu (no question tab bar) whose option reads "Type something": a real answer, never a field.
+  const rule2 = '─'.repeat(80);
+  reset(); ptys.set('a', {}); cols.set('a', 80);
+  buffers.set('a', ['', rule2, ' Pick one', '❯ 1. Continue', '  2. Type something', '', 'Enter to select · Esc to cancel', ''].join('\r\n')); emitOutput('a');
+  const r8 = await readSelectorForAnswer('a');
+  assert.ok(r8?.token);
+  assert.deepEqual(await answerSelectorWithText('a', 2, 'hello', r8.token), { ok: false, reason: 'not-free-text' });
+  assert.deepEqual([...writes], []);
   cols.delete('a');
 }
 ok('own words in a multi-select question: arrows to the row, paste, no Enter, up off the row');

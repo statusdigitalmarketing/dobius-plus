@@ -1097,7 +1097,8 @@ function handleAuthedMessage(socket, msg, subs) {
       // open for its Submit or Next. Answered with selectorTextResult, carrying the phone's reqId.
       if (typeof msg.id !== 'string') break;
       const id = msg.id;
-      const reqId = typeof msg.reqId === 'string' ? msg.reqId.slice(0, 64) : null;
+      // String or number, the same as the other routes accept (Codex Medium: a number came back as null).
+      const reqId = typeof msg.reqId === 'string' ? msg.reqId.slice(0, 64) : (Number.isFinite(msg.reqId) ? msg.reqId : null);
       const reply = (r) => wsSend(socket, { type: 'selectorTextResult', id, reqId, ok: !!r.ok, ...(r.stale ? { stale: true } : {}), ...(r.uncertain ? { uncertain: true } : {}), ...(r.checked ? { checked: true } : {}), ...(r.reason ? { reason: String(r.reason) } : {}) });
       const text = typeof msg.text === 'string' ? msg.text : '';
       if (!Number.isInteger(msg.num) || typeof msg.token !== 'string' || !text.trim() || text.length > 2000) { reply({ ok: false, reason: 'bad_request' }); break; }

@@ -650,10 +650,13 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   const [freeBusy, setFreeBusy] = useState(false);
   const freeReqRef = useRef(null); // { reqId, key, multi } the selectorText in flight
   const answeredRef = useRef(null);
+  const composerKeyRef = useRef(null); // the question card on screen when the composer's words were last edited
   const [askToast, setAskToast] = useState('');
   const askViewKey = selector ? askCardKey(selector) : null;
   // Another question: its field starts empty.
   useEffect(() => { setFreeDraft(''); }, [askViewKey]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- runs on edits only, recording the card seen at that moment
+  useEffect(() => { composerKeyRef.current = askViewKey; }, [input]);
   // Question card: the fine-control key row is folded away unless asked for
   // (or the prompt is a multi-select), and the close button needs a second
   // tap, because Esc cancels Claude's whole question.
@@ -1011,12 +1014,12 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           setSelBusy(false);
           setPendingPick(null);
           // The question was answered and its card is gone: say so, or nothing on screen tells the person it worked.
+          // Only once the Mac also accepted the key: a card that vanished for another reason (dismissed on the Mac)
+          // while a refused tap was in flight must not read as sent (Codex Medium).
           const done = answeredRef.current;
           if (done && Date.now() - done.at < 8000) {
             if (!next) {
-              answeredRef.current = null;
-              setAskToast('Answer sent to Claude');
-              setTimeout(() => setAskToast(''), 2600);
+              if (done.confirmed) { answeredRef.current = null; showAskToast(); } else done.gone = true;
             } else if (askCardKey(next) !== done.key) answeredRef.current = null; // the next question: it shows itself
           }
         }
@@ -1026,6 +1029,10 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           // token, but only if the card on screen is still the one tapped.
           const tapped = tappedRef.current;
           setSelector((cur) => (cur && cur === tapped ? { ...cur, token: msg.token || '' } : cur));
+          const done = answeredRef.current;
+          if (done && Date.now() - done.at < 8000) {
+            if (done.gone) { answeredRef.current = null; showAskToast(); } else done.confirmed = true;
+          }
         } else {
           setPendingPick(null);
           answeredRef.current = null;
@@ -1038,16 +1045,19 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         if (req && msg.reqId === req.reqId) {
           freeReqRef.current = null;
           setFreeBusy(false);
+          // Clear only the words that were sent: the field stays editable while the answer is in flight (Codex Medium).
+          const clearSent = () => setFreeDraft((cur) => (cur.trim() === req.text ? '' : cur));
           if (msg.ok) {
-            setFreeDraft('');
+            clearSent();
             // A single-select answer goes in with Enter; a multi-select one is now a ticked box on the open card.
-            if (!req.multi) answeredRef.current = { key: req.key, at: Date.now() };
+            if (!req.multi) answeredRef.current = { key: req.key, at: Date.now(), confirmed: true };
           } else if (msg.uncertain) {
             // The words may already sit in Claude's field: sending them again could put them in twice.
-            setFreeDraft('');
+            clearSent();
             showSelNote('Your words went in, but Claude did not show them yet. Check the card before sending them again.');
           } else {
             setSelBusy(false);
+            restoreFree(req);
             showSelNote(msg.stale ? 'The question changed before your words went in. Nothing was sent.' : 'Could not send your answer. Nothing was sent.');
           }
         }
@@ -1422,7 +1432,18 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     // A question card is up (a Mac that answers its field): the words answer its "Type something" row, exactly as the
     // card's own field does, and are never typed in as a message (Enter there picks whatever row is highlighted).
     if (selector && selector.canText === true && askSteps(selector.steps)) {
-      if (askLayout(selector).free?.empty) { if (answerFree(selector, text)) setDraft(''); return; }
+      if (askLayout(selector).free?.empty) {
+        // The composer has no press to bind to a card: its words answer only the question that was up when they were
+        // last edited. A different question since then (it changed under a held Send) gets a look first (Codex High).
+        const key = askCardKey(selector);
+        if (composerKeyRef.current !== key) {
+          composerKeyRef.current = key;
+          showSendNote('The question changed. Check it, then press Send again.');
+          return;
+        }
+        if (answerFree(selector, text, null, 'composer')) setDraft('');
+        return;
+      }
       showSendNote('Claude is waiting on the question above. Answer it there, or tap ✕ to dismiss it first.');
       return;
     }
@@ -1543,11 +1564,25 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     connection.send({ type: 'submitPrompt', id: tabId, text: 'claude --continue', gen: w.gen });
   };
 
+  const showAskToast = () => {
+    setAskToast('Answer sent to Claude');
+    setTimeout(() => setAskToast(''), 2600);
+  };
+  // Words the Mac refused (or never answered about) go back where they were typed, unless something new is there.
+  const restoreFree = (req) => {
+    if (!req?.text) return;
+    if (req.from === 'composer') setDraft((cur) => (cur.trim() ? cur : req.text));
+    else setFreeDraft((cur) => (cur.trim() ? cur : req.text));
+  };
+
   // Your own words into a question card's "Type something" row, through the Mac's checks (selectorText): a
   // single-select card is answered with them, a multi-select one gets them as a ticked box. True when they went out.
-  const answerFree = (card, text, e = null) => {
+  const answerFree = (card, text, e = null, from = 'field') => {
     const lay = askLayout(card);
     if (!tabId || !card || !lay.free || selBusy || freeBusy || card.canText !== true || !card.token) return false;
+    // selectorText is never queued across a reconnect (a stale answer must not land later): refuse it here instead of
+    // letting the connection drop it while the words vanish from the screen (Codex Medium).
+    if (connection.status !== 'authed') { showSelNote('Still connecting to the Mac. Nothing was sent, try again in a moment.'); return false; }
     if (text.length > 2000) { showSelNote('That answer is too long for the card. Keep it under 2000 characters.'); return false; }
     if (!pressGuard.current.take(e, card)) { showSelNote('The prompt changed while you were tapping. Nothing was sent, check the card again.'); return false; }
     const { token } = pressGuard.current.pressedCard(e, card);
@@ -1555,14 +1590,16 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     const w = writeGen();
     if (!w.ok) { showSelNote('Still connecting to the Mac. Nothing was sent, try again in a moment.'); return false; }
     const reqId = freshId('t');
-    freeReqRef.current = { reqId, key: askCardKey(card), multi: lay.multi };
+    freeReqRef.current = { reqId, key: askCardKey(card), multi: lay.multi, text, from };
     setFreeBusy(true);
     connection.send({ type: 'selectorText', id: tabId, num: lay.free.num, text, token, reqId, gen: w.gen });
     // No answer at all (the connection dropped): the card comes back to life rather than spinning forever.
     setTimeout(() => {
-      if (freeReqRef.current?.reqId !== reqId) return;
+      const req = freeReqRef.current;
+      if (req?.reqId !== reqId) return;
       freeReqRef.current = null;
       setFreeBusy(false);
+      restoreFree(req);
       showSelNote('No answer from the Mac yet. Check the card before sending again.');
     }, 15000);
     return true;

@@ -245,7 +245,9 @@ export function askLayout(sel) {
   }
   let free = null;
   const cand = opts[cut - 1];
-  if (cand) {
+  // Only an AskUserQuestion card (its question tab bar parsed as `steps`) has a free row: a plain menu can offer a
+  // real option that reads "Type something", and its number picks it (Codex Medium).
+  if (cand && sel?.steps) {
     const m = optionMark(cand.label);
     const empty = FREE_TEXT_LABEL.test(m.text) && !cand.detail;
     // A multi-select row keeps the words typed into it ("[✔] extra spicy"): it is the free row while the question

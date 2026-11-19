@@ -370,11 +370,18 @@ const onPhone = (id) => { try { return phoneTabFn(id) === true; } catch { return
 export function setPhoneTabCheck(fn) { phoneTabFn = typeof fn === 'function' ? fn : () => false; }
 
 export function answerSelector(id, data, token, stillOk0 = () => true, beforeWrite = () => {}) {
-  return answerChecked(id, data, token, stillOk0, beforeWrite, 16);
+  return answerChecked(id, data, token, stillOk0, beforeWrite, 16, false);
 }
 
-// answerSelector with a longer `data` allowed: the free-text answer's own paste, when the cursor already sits on its row.
-async function answerChecked(id, data, token, stillOk0, beforeWrite, maxLen) {
+// Tabs with a free-text answer in progress (answerSelectorWithText). Every other answer to that tab is refused until it
+// ends: between its paste and the redraw that shows the words, a fresh read still shows the empty row, and a second
+// answer read then would paste its words in as well (Codex High). Entries live only while their answer runs.
+const freeTextPending = new Set();
+
+// answerSelector with a longer `data` allowed (the free-text answer's own paste) and `own`: the caller IS the
+// free-text answer holding the tab.
+async function answerChecked(id, data, token, stillOk0, beforeWrite, maxLen, own) {
+  if (!own && freeTextPending.has(id)) return { ok: false, stale: true };
   if (typeof data !== 'string' || !data || data.length > maxLen || typeof token !== 'string') return { ok: false };
   if (onPhone(id)) return { ok: false, onPhone: true };
   const stillOk = () => !onPhone(id) && stillOk0();
@@ -451,6 +458,22 @@ const FREE_TEXT_SHOW_MS = 1500;
 const FREE_TEXT_PASTE_MAX = 8192;
 const collapse = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
 export async function answerSelectorWithText(id, num, text, token, stillOk = () => true, beforeWrite = () => {}) {
+  if (freeTextPending.has(id)) return { ok: false, stale: true, reason: 'busy' };
+  freeTextPending.add(id);
+  // Once words may have been written, a failure says so: they may be in Claude's field, and "not sent" invites a
+  // second copy (Codex High: a throw from the last key reported a pasted answer as unsent).
+  const state = { pasted: false };
+  try {
+    return await answerFreeText(id, num, text, token, stillOk, beforeWrite, state);
+  } catch (err) {
+    console.warn('[chat] free-text answer failed:', err?.message || err);
+    return { ok: false, reason: 'error', ...(state.pasted ? { uncertain: true } : {}) };
+  } finally {
+    freeTextPending.delete(id);
+  }
+}
+
+async function answerFreeText(id, num, text, token, stillOk, beforeWrite, state) {
   if (!Number.isInteger(num) || num < 1 || num > 9 || typeof text !== 'string' || typeof token !== 'string') return { ok: false };
   const line = collapse(text.replace(/[\x00-\x1F\x7F]/g, ' '));
   if (!line) return { ok: false };
@@ -462,7 +485,9 @@ export async function answerSelectorWithText(id, num, text, token, stillOk = () 
   if (!live || selectorFingerprint(live) !== fp) return { ok: false, stale: true };
   const freeLabel = String(optOf(live)?.label ?? '');
   const freeDetail = optOf(live)?.detail;
-  if (!FREE_TEXT_LABEL.test(optionMark(freeLabel).text)) return { ok: false, reason: 'not-free-text' };
+  // Only an AskUserQuestion card (its tab bar parsed as `steps`): a plain menu can have a real option that reads
+  // "Type something", and its number would pick it (Codex Medium).
+  if (!live.steps || !FREE_TEXT_LABEL.test(optionMark(freeLabel).text)) return { ok: false, reason: 'not-free-text' };
   // A multi-select question draws its rows with checkboxes ("[ ] Type something"): words typed there check the row
   // and Enter would uncheck it, so that card takes its own path below.
   const multi = optionMark(freeLabel).checked !== null;
@@ -508,8 +533,9 @@ export async function answerSelectorWithText(id, num, text, token, stillOk = () 
     const step = Math.sign(at - from);
     const arrow = step > 0 ? '\x1b[B' : '\x1b[A';
     const paste = `\x1b[200~${line}\x1b[201~`;
-    const first = await answerChecked(id, step === 0 ? paste : arrow, token, stillOk, beforeWrite, FREE_TEXT_PASTE_MAX);
-    if (!first?.ok) return first || { ok: false };
+    if (step === 0) state.pasted = true;
+    const first = await answerChecked(id, step === 0 ? paste : arrow, token, stillOk, beforeWrite, FREE_TEXT_PASTE_MAX, true);
+    if (!first?.ok) return first || { ok: false }; // refused before anything was written
     let key = inputKey();
     let pos = from + step; // where the cursor should be now
     let pasted = step === 0;
@@ -525,6 +551,7 @@ export async function answerSelectorWithText(id, num, text, token, stillOk = () 
         if (!pasted) {
           if (selectorFingerprint(read.sel) !== fp) return { ok: false, stale: true };
           if (read.sel.selectedIndex === pos) {
+            if (pos === at) state.pasted = true;
             const w = await writeRawInput(id, pos === at ? paste : arrow, guard);
             if (!w?.ok) return { ok: false, reason: w?.reason || 'not_allowed' };
             key = inputKey();
@@ -534,7 +561,9 @@ export async function answerSelectorWithText(id, num, text, token, stillOk = () 
           }
         } else if (typedCard(read.sel) && optionMark(optOf(read.sel)?.label).checked === true) {
           // The words are in and checked: the answer stands even if leaving the row is refused (a person typing).
-          if (at > 0) await writeRawInput(id, '\x1b[A', guard);
+          if (at > 0) {
+            try { await writeRawInput(id, '\x1b[A', guard); } catch (err) { console.warn('[chat] could not leave the free row:', err?.message || err); }
+          }
           return { ok: true, checked: true };
         }
       }
@@ -545,8 +574,9 @@ export async function answerSelectorWithText(id, num, text, token, stillOk = () 
   // The cursor already in the row (its input open): the number would be typed into it, so the words are the first
   // key, through every answerSelector check, and Enter follows once the row shows them, in the tick of that read.
   if (selected(live)) {
-    const first = await answerChecked(id, `\x1b[200~${line}\x1b[201~`, token, stillOk, beforeWrite, FREE_TEXT_PASTE_MAX);
-    if (!first?.ok) return first || { ok: false };
+    state.pasted = true;
+    const first = await answerChecked(id, `\x1b[200~${line}\x1b[201~`, token, stillOk, beforeWrite, FREE_TEXT_PASTE_MAX, true);
+    if (!first?.ok) return first || { ok: false }; // refused before anything was written
     const key1 = inputKey();
     const until = Date.now() + FREE_TEXT_SHOW_MS;
     for (;;) {
@@ -561,7 +591,7 @@ export async function answerSelectorWithText(id, num, text, token, stillOk = () 
       if (Date.now() > until) return { ok: false, reason: 'stranded', uncertain: true };
     }
   }
-  const r = await answerSelector(id, String(num), token, stillOk, beforeWrite);
+  const r = await answerChecked(id, String(num), token, stillOk, beforeWrite, 16, true);
   if (!r?.ok) return r || { ok: false };
   const key0 = inputKey();
   const started = Date.now();
@@ -584,6 +614,7 @@ export async function answerSelectorWithText(id, num, text, token, stillOk = () 
             await sleep(80);
           }
         };
+        state.pasted = true;
         const sent = await submitPromptDetailed(id, line, guard, () => {}, { beforeEnter });
         return sent.ok ? { ok: true } : { ok: false, reason: sent.reason, ...(sent.uncertain ? { uncertain: true } : {}) };
       }

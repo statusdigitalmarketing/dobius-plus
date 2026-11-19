@@ -398,5 +398,6 @@ console.log('PASS  row keys survive a sliding window');
   assert.equal(askLayout({ options: [{ num: 1, label: 'Yes' }, { num: 2, label: 'Type something.', detail: 'literally' }] }).free, null);
   assert.deepEqual(askLayout({ options: [{ num: 1, label: 'Yes' }, { num: 2, label: 'No' }] }), { multi: false, action: null, chat: null, free: null, main: [{ num: 1, label: 'Yes', detail: '', checked: null }, { num: 2, label: 'No', detail: '', checked: null }] });
   assert.deepEqual(askLayout(null), { multi: false, action: null, chat: null, free: null, main: [] });
+  assert.equal(askLayout({ options: [{ num: 1, label: 'Continue' }, { num: 2, label: 'Type something' }] }).free, null, 'a plain menu option is an answer');
   console.log('PASS  question card layout: checkboxes, the free row, a key that survives a tick');
 }

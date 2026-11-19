@@ -160,6 +160,41 @@ printf '%s\n' '{"type":"auth","token":"<token>"}' \
   `uncertain` refusal; its Terminal screen refreshes the tab list on
   `unknown_tab`.
 
+## Question cards: your own words (2.2.42)
+
+A `selector` message from a Mac that has this carries `text: true`. The phone shows the card's "Type something" row as a
+field only then; an older Mac never answers `selectorText`, so a phone must check the flag first.
+
+The parsed card may also carry `action: "Submit" | "Next"`: a multi-select question's own button (Claude draws it
+unnumbered under the free row). The phone presses it with a `selectorKey` right arrow (`\u001b[C`), which moves to
+Claude's next question tab or, after the last one, its review step.
+
+```json
+{ "type": "selectorText", "id": "<tab id>", "num": 5, "text": "extra spicy", "token": "<the card's token>",
+  "reqId": "t-abc123", "gen": 7 }
+```
+
+- `num` is the free row's option number, `token` the token the card was read with, `gen` the same tab generation a
+  `selectorKey` carries. `text` is 1 to 2000 characters; new lines become spaces (Claude's field is one line).
+- Same auth posture as `selectorKey`: the token is the authorization, phone mode (`phoneGate`) is checked on arrival
+  and again at every write, and the pairing is re-checked before every key.
+- The Mac (`chat-service.js answerSelectorWithText`) writes nothing unless the live card matches the token's
+  fingerprint and the row is the empty "Type something" row. Single-select: it presses the row's number (or skips it
+  when the cursor is already in the row), pastes the words and presses Enter once the row shows them. Multi-select:
+  arrows walk the cursor to the row (a number there would tick the empty row without moving the cursor), one per
+  settled read; the words are pasted (which ticks the row); no Enter (it would untick it); one up arrow leaves the row.
+
+Reply, always, with the request's `reqId`:
+
+```json
+{ "type": "selectorTextResult", "id": "<tab id>", "reqId": "t-abc123", "ok": true, "checked": true }
+```
+
+`ok: true` (a single-select answer went in with Enter; `checked: true` for a multi-select, whose card stays open),
+or `ok: false` with `stale: true` (the card changed, nothing written), `uncertain: true` (the words may already be in
+Claude's field: do not resend them) and `reason` (`not-free-text`, `not-open`, `interrupted`, `stranded`,
+`not_allowed`, `bad_request`, or a phone-mode code). The Mac pushes a fresh `selector` message right after.
+
 ## Today and Settings (2.2.4)
 
 Advertised as `today` and `settings` in `authed.features`. A phone must check
