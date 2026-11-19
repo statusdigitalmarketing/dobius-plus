@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/store';
 import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, freeTextOption, tokenFingerprint, createPressGuard, stepImages, createImageCache, foldTurns } from '../../../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, askLayout, askCardKey, optionMark, FREE_TEXT_MAX, tokenFingerprint, createPressGuard, stepImages, createImageCache, foldTurns } from '../../../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../../../shared/chat-activity.js';
 import ModelMenu from './ModelMenu';
 import './ChatPane.css';
@@ -58,6 +58,19 @@ function deliverDraft(tabId, update, notice) {
 const withUnsent = (text) => (cur) => (!cur ? text : cur.split('\n\n').includes(text) ? cur : `${cur}\n\n${text}`);
 // Tabs with an own-words card answer still going in (module level: it outlives a remounted pane).
 const answeringTabs = new Set();
+// tab id -> the card (fingerprint and question tab) the message box's words were last edited against. Per tab and
+// outside the pane, so a pane remounted while an answer was out reads the same binding the refusal clears (Codex High,
+// round 7). One entry per tab id ever opened in a chat pane, removed when the words are handed back or sent.
+const ownWordsStamps = new Map();
+// The question card's text row is the one before "Chat about this", filled or not (a single-select row holding typed
+// words is no longer askLayout's `free`): true when Claude's cursor sits in it.
+function cursorInFreeRow(sel, lay) {
+  const opts = Array.isArray(sel?.options) ? sel.options : [];
+  const chatAt = lay.chat ? opts.findIndex((o) => o?.num === lay.chat.num) : -1;
+  const freeNum = lay.free?.num ?? (sel?.steps && chatAt > 0 ? opts[chatAt - 1]?.num : null);
+  return freeNum != null && opts[sel.selectedIndex]?.num === freeNum;
+}
+const cardStamp = (sel) => (sel ? `${sel.fp}|${sel.steps?.current ?? ''}` : null);
 const NOT_SENT = 'Not sent. The tab was interrupted, closed or moved to another window.';
 const STRANDED = 'Other input reached the terminal while this was being sent, so Chat cannot tell whether it went through. Check the terminal.';
 const SELECTOR_POLL_MS = 2500;
@@ -928,9 +941,20 @@ export default function ChatPane({ tabId, visible }) {
     // One answer at a time: the card is cleared from the pane while it goes in, so a second Enter would otherwise take
     // the plain send path and could land as a new prompt once Claude moves on.
     if (answeringTabs.has(tabId)) { flash('One moment, your answer is still going in.'); return; }
-    const free = freeTextOption(selector);
+    // The card's own free row (the row before "Chat about this"), never a real option reading "Type something".
+    const lf = askLayout(selector).free;
+    const free = lf?.empty ? selector.options.find((o) => o.num === lf.num) : null;
     if (!free) { flash('Claude is waiting for you to pick one of the options above. Pick one, or press Stop to dismiss it and type.'); return; }
     if (!selector.token) { flash('One moment, the question is still updating. Try again.'); return; }
+    if (text.replace(/\s+/g, ' ').trim().length > FREE_TEXT_MAX) { flash(`That answer is too long for the question's field (${FREE_TEXT_MAX} characters at most). Shorten it, or press Stop to dismiss the question and send it as a message.`); return; }
+    // The words answer only the card they were typed against (its fingerprint at the last edit): one that replaced it
+    // since, even one reading the same, gets a look first (Codex High, round 3).
+    const stamp = cardStamp(selector); // two question tabs can read the same
+    if (ownWordsStamps.get(tabId) !== stamp) {
+      ownWordsStamps.set(tabId, stamp);
+      flash('The question changed since you typed. Check it, then press Enter again.');
+      return;
+    }
     const token = selector.token;
     setDraft('');
     setTabAttachments(tabId, []);
@@ -944,12 +968,14 @@ export default function ChatPane({ tabId, visible }) {
       try { r = await window.electronAPI?.chatAnswerText?.(tabId, free.num, text, token); } catch (err) { console.warn('[chat] answer failed:', err?.message || err); r = null; }
       // The draft goes back whether or not this pane is still mounted (deliverDraft finds the pane showing the tab
       // now, else the saved draft); only the refreshes need this pane.
-      if (r?.ok) { revokeAll(imgs); if (mountedRef.current) refreshSoon(); }
+      if (r?.ok) { ownWordsStamps.delete(tabId); revokeAll(imgs); if (mountedRef.current) refreshSoon(); }
       // Pasted but not confirmed (stranded, or a write that may have landed): the words may already sit in Claude's
       // input, so handing them back would send them twice.
       else if (r?.reason === 'stranded' || r?.uncertain) { revokeAll(imgs); deliverDraft(tabId, (cur) => cur, STRANDED); }
       else {
         for (const a of imgs) deliverAttachment(tabId, a);
+        // Words handed back are bound to no card: the next Enter on one asks for a look first (Codex High, round 6).
+        ownWordsStamps.delete(tabId);
         deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, r?.stale ? 'That question changed. Nothing was sent, check it again.' : 'Not sent. Your answer is back in the box.');
       }
       // Sends stay on the card path until a settled read says what is on screen now (another card, a permission
@@ -997,11 +1023,25 @@ export default function ChatPane({ tabId, visible }) {
     // An arrow or space leaves no usable token until Claude redraws the
     // prompt (main refuses reads of a screen not yet repainted): the buttons
     // wait, disabled, for a quick re-read instead of failing as stale.
-    if (!closes && !r.token) setTimeout(() => { if (mountedRef.current) pollSelector(20); }, 150);
+    // A ticked box changes the card itself (its fingerprint), so its fresh token is stale the moment Claude redraws:
+    // read the card again for every key that leaves it up.
+    if (!closes) setTimeout(() => { if (mountedRef.current) pollSelector(20); }, 150);
     refreshSoon();
   };
 
   const chooseOption = (num, e) => {
+    const lay = askLayout(selector);
+    // The empty "Type something" row: its words come from the message box (answerInOwnWords), never its number.
+    if (lay.free?.empty && lay.free.num === num) { inputRef.current?.focus(); return; }
+    // The cursor sits in the text row, filled or not, multi or single (Codex Medium, round 8): a number now would be
+    // typed into its words.
+    if (cursorInFreeRow(selector, lay)) {
+      selectorKey('\x1b[A', false, e);
+      flash('Stepped out of the text row first. Click your choice again.');
+      return;
+    }
+    // A multi-select box ticks in place: the card stays, and so does the scroll.
+    if (lay.multi && num !== lay.chat?.num) { selectorKey(String(num), false, e); return; }
     // The absolute option digit, never relative arrows: a misparsed cursor
     // position then cannot pick a different option than the label shown.
     selectorKey(String(num), true, e);
@@ -1085,7 +1125,9 @@ export default function ChatPane({ tabId, visible }) {
     };
   }, [visible, tabId, focusInput]);
 
-  const working = status === 'working';
+  // A question or permission card on screen means Claude waits on the person, whatever the tab's output did (a ticked
+  // box redraws the screen, which reads as work): no Working chip, no Stop beside Send.
+  const working = status === 'working' && !selector;
 
   // The model chip (Asana 1220098108555124): what this tab's Claude runs, read
   // from its session's statusLine record, and the catalog it can switch to.
@@ -1145,7 +1187,7 @@ export default function ChatPane({ tabId, visible }) {
   });
 
   const placeholder = selector
-    ? (freeTextOption(selector) ? 'Type your own answer and press Enter...' : 'Pick an option above first...')
+    ? (askLayout(selector).free?.empty ? 'Type your own answer and press Enter...' : 'Pick an option above first...')
     : sessionId
     ? (claudeLive ? 'Message Claude...' : 'Claude exited. Input goes to the terminal...')
     : (claudeLive ? 'Message Claude...' : 'Type a command for the terminal...');
@@ -1251,20 +1293,44 @@ export default function ChatPane({ tabId, visible }) {
         {selector && (
           <div
             className="chatp-selector"
-            key={selectorCardKey(selector)}
+            key={askCardKey(selector)}
             onPointerDownCapture={(e) => pressGuard.current.pointerDown(e, selector)}
             onKeyDownCapture={(e) => pressGuard.current.keyDown(e, selector)}
           >
             <div className="chatp-selector-title">{selector.prompt || 'Claude is waiting for you to choose:'}</div>
-            {selector.options.map((opt) => (
-              <button type="button" key={opt.num} className="chatp-option" disabled={!selector.token} onClick={(e) => chooseOption(opt.num, e)}>
-                <span className="chatp-option-num">{opt.num}</span>
-                <span className="chatp-option-text">
-                  {opt.label}
-                  {opt.detail && <span className="chatp-option-detail">{opt.detail}</span>}
-                </span>
+            {selector.options.map((opt) => {
+              // A multi-select row draws a box, ticked or not, in place of Claude's "[ ]" / "[✔]" text.
+              // Boxes only on a multi-select question; a single-select answer keeps its own text (Codex Low, round 7).
+              const lay = askLayout(selector);
+              const mark = lay.multi ? optionMark(opt.label) : { checked: null, text: opt.label };
+              return (
+                <button type="button" key={opt.num} className="chatp-option" disabled={!selector.token} onClick={(e) => chooseOption(opt.num, e)}
+                  role={mark.checked !== null ? 'checkbox' : undefined} aria-checked={mark.checked !== null ? mark.checked : undefined}>
+                  {mark.checked === null
+                    ? <span className="chatp-option-num">{opt.num}</span>
+                    : <span className={`chatp-option-num chatp-option-box${mark.checked ? ' on' : ''}`} aria-hidden="true">{mark.checked ? '\u2713' : ''}</span>}
+                  <span className="chatp-option-text">
+                    {lay.free?.empty && opt.num === lay.free.num ? 'Type your own answer in the box below' : mark.text}
+                    {opt.detail && <span className="chatp-option-detail">{opt.detail}</span>}
+                  </span>
+                </button>
+              );
+            })}
+            {/* A multi-select question's own Submit / Next (the right arrow: its next tab, or the review step). */}
+            {selector.action && (
+              <button type="button" className="chatp-option chatp-option-primary" disabled={!selector.token} onClick={(e) => {
+                // With the cursor in the "Type something" row, the right arrow would be typed into its words (Codex
+                // Medium): step out with Up first, and the next press goes through.
+                if (cursorInFreeRow(selector, askLayout(selector))) {
+                  selectorKey('\x1b[A', false, e);
+                  flash('Stepped out of the text row first. Press ' + selector.action + ' again.');
+                  return;
+                }
+                selectorKey('\x1b[C', false, e);
+              }}>
+                {selector.action}
               </button>
-            ))}
+            )}
             <div className="chatp-keys">
               {SELECTOR_KEYS.map(([label, seq, closes]) => (
                 <button type="button" key={label} className="chatp-key" disabled={!selector.token} onClick={(e) => selectorKey(seq, closes, e)}>{label}</button>
@@ -1297,12 +1363,12 @@ export default function ChatPane({ tabId, visible }) {
             value={draft}
             rows={1}
             placeholder={placeholder}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => { ownWordsStamps.set(tabId, cardStamp(selector)); setDraft(e.target.value); }}
             onPaste={onPaste}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
-                send();
+                if (!e.repeat) send(); // a held Enter sends once, never again onto whatever card comes next
               }
             }}
           />
@@ -1338,7 +1404,8 @@ export default function ChatPane({ tabId, visible }) {
             {working && (
               <button type="button" className="chatp-btn stop" onClick={interrupt} title="Interrupt Claude (Esc)">Stop</button>
             )}
-            <button type="button" className="chatp-btn primary" onClick={send} disabled={!draft.trim() && !atts.length} title="Send (Enter). Shift+Enter for a new line">
+            {/* A held Enter on the focused button clicks once, never again onto whatever card comes next. */}
+            <button type="button" className="chatp-btn primary" onClick={send} onKeyDown={(e) => { if (e.key === 'Enter' && e.repeat) e.preventDefault(); }} disabled={!draft.trim() && !atts.length} title="Send (Enter). Shift+Enter for a new line">
               Send
             </button>
           </div>

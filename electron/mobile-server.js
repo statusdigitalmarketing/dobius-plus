@@ -35,7 +35,7 @@ import {
   addTerminalObserver, terminalInstance,
 } from './terminal-manager.js';
 import { stripAnsi, spinnerStatus } from './selector-parser.js';
-import { terminalTextTail, terminalScreenText, submitPromptDetailed, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
+import { terminalTextTail, terminalScreenText, submitPromptDetailed, writeRawInput, readSelectorForAnswer, answerSelector, answerSelectorWithText, activityForTab } from './chat-service.js';
 import { TAB_OPS, ACK_FEATURES, handleTabOp, phoneViewGate, validReqId } from './mobile-tab-ops.js';
 import { PHONE_OPS, handlePhoneOp } from './phone-mode-ws.js';
 import { TODAY_FEATURES, handleTodayMessage } from './mobile-today.js';
@@ -126,7 +126,8 @@ async function selectorMessage(id, stillOk = () => true) {
   // along for an older phone, which ignores `unsettled` and would otherwise
   // drop the card (it answers with bare input, as it always has).
   if (r?.unsettled) return { type: 'selector', id, unsettled: true, selector: r.selector || null };
-  return { type: 'selector', id, selector: r?.selector || null, token: r?.token || '' };
+  // text: this Mac answers a card's "Type something" row with the phone's words (selectorText).
+  return { type: 'selector', id, selector: r?.selector || null, token: r?.token || '', text: true };
 }
 
 function scheduleSelectorPush(id) {
@@ -971,6 +972,8 @@ function handleTabWrite(socket, msg) {
     maxBytes: MAX_INPUT_BYTES, // real BYTE cap (Codex: .length undercounts multibyte)
     stillOk: () => knownToken(socket._authToken),
     writeRawInput,
+    // The phone's `guard: true` (right after a card went away, when a permission prompt may have taken its place before
+    // the phone heard of it: Codex Critical, round 8) arrives as { guardPrompt: true }.
     submitPrompt: submitPromptDetailed,
     // Phone mode: a key typed against an older tab generation, or one that would land on the gate while the tab is on
     // the phone, is refused on arrival and again at the write (mobile-tab-ops.js phoneViewGate).
@@ -1077,15 +1080,44 @@ function handleAuthedMessage(socket, msg, subs) {
       // Phone mode: the same generation check as a typed key, on arrival and at the write.
       const selGate = () => phoneGate(id, msg);
       const refusedSel = selGate();
-      if (refusedSel) { wsSend(socket, { type: 'selectorKeyResult', id, ok: false, stale: true, token: '', code: refusedSel }); break; }
+      // reqId (2.2.42): echoed so the phone can tell which tap a reply belongs to; a string of 64 or less, or a number.
+      const keyReq = (typeof msg.reqId === 'string' && msg.reqId.length <= 64) || Number.isFinite(msg.reqId) ? { reqId: msg.reqId } : {};
+      if (refusedSel) { wsSend(socket, { type: 'selectorKeyResult', id, ok: false, stale: true, token: '', code: refusedSel, ...keyReq }); break; }
       answerSelector(id, msg.data, msg.token, () => knownToken(socket._authToken) && !selGate())
         .then((r) => {
-          wsSend(socket, { type: 'selectorKeyResult', id, ok: !!r.ok, stale: !!r.stale, token: r.token || '' });
+          wsSend(socket, { type: 'selectorKeyResult', id, ok: !!r.ok, stale: !!r.stale, token: r.token || '', ...keyReq });
           if (!r.ok) return;
           invalidateSelectorPush(id);
-          setTimeout(async () => { wsSend(socket, await selectorMessage(id, () => knownToken(socket._authToken))); }, 700);
+          setTimeout(async () => { wsSend(socket, await selectorMessage(id, () => knownToken(socket._authToken))); }, 350); // a ticked box redraws in well under this; a screen still moving answers unsettled and is asked again
         })
-        .catch(() => wsSend(socket, { type: 'selectorKeyResult', id, ok: false, stale: false, token: '' }));
+        .catch(() => wsSend(socket, { type: 'selectorKeyResult', id, ok: false, stale: false, token: '', ...keyReq }));
+      break;
+    }
+
+    case 'selectorText': {
+      // Your own words as the answer to a question card's "Type something" row (chat-service answerSelectorWithText):
+      // the same token, generation and pairing checks as selectorKey, every key it writes checked against the card
+      // the phone showed. A single-select card is answered (Enter); a multi-select one gets the row checked and stays
+      // open for its Submit or Next. Answered with selectorTextResult, carrying the phone's reqId.
+      if (typeof msg.id !== 'string') break;
+      const id = msg.id;
+      // String or number, the same as the other routes accept (Codex Medium: a number came back as null).
+      const reqId = typeof msg.reqId === 'string' || Number.isFinite(msg.reqId) ? msg.reqId : null;
+      const reply = (r) => wsSend(socket, { type: 'selectorTextResult', id, reqId, ok: !!r.ok, ...(r.stale ? { stale: true } : {}), ...(r.uncertain ? { uncertain: true } : {}), ...(r.checked ? { checked: true } : {}), ...(r.reason ? { reason: String(r.reason) } : {}) });
+      const text = typeof msg.text === 'string' ? msg.text : '';
+      // An oversized string reqId is refused, never truncated (two would share one id). Echoed whole otherwise.
+      if (typeof reqId === 'string' && reqId.length > 64) { wsSend(socket, { type: 'selectorTextResult', id, reqId: null, ok: false, reason: 'bad_request' }); break; }
+      if (!Number.isInteger(msg.num) || typeof msg.token !== 'string' || !text.trim() || text.length > 2000) { reply({ ok: false, reason: 'bad_request' }); break; }
+      const textGate = () => phoneGate(id, msg);
+      const refusedText = textGate();
+      if (refusedText) { reply({ ok: false, stale: true, reason: refusedText }); break; }
+      answerSelectorWithText(id, msg.num, text, msg.token, () => knownToken(socket._authToken) && !textGate())
+        .then((r) => {
+          reply(r || { ok: false });
+          invalidateSelectorPush(id);
+          setTimeout(async () => { wsSend(socket, await selectorMessage(id, () => knownToken(socket._authToken))); }, r?.ok ? 500 : 0);
+        })
+        .catch(() => reply({ ok: false }));
       break;
     }
 

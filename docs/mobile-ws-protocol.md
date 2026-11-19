@@ -160,6 +160,54 @@ printf '%s\n' '{"type":"auth","token":"<token>"}' \
   `uncertain` refusal; its Terminal screen refreshes the tab list on
   `unknown_tab`.
 
+## Question cards: your own words (2.2.42)
+
+A `selector` message from a Mac that has this carries `text: true`. The phone shows the card's "Type something" row as a
+field only then; an older Mac never answers `selectorText`, so a phone must check the flag first.
+
+The parsed card may also carry `action: "Submit" | "Next"`: a multi-select question's own button (Claude draws it
+unnumbered under the free row). The phone presses it with a `selectorKey` right arrow (`\u001b[C`), which moves to
+Claude's next question tab or, after the last one, its review step.
+
+```json
+{ "type": "selectorText", "id": "<tab id>", "num": 5, "text": "extra spicy", "token": "<the card's token>",
+  "reqId": "t-abc123", "gen": 7 }
+```
+
+- `num` is the free row's option number, `token` the token the card was read with, `gen` the same tab generation a
+  `selectorKey` carries. `text` is 1 to 2000 characters; new lines become spaces (Claude's field is one line).
+- Same auth posture as `selectorKey`: the token is the authorization, phone mode (`phoneGate`) is checked on arrival
+  and again at every write, and the pairing is re-checked before every key.
+- The Mac (`chat-service.js answerSelectorWithText`) writes nothing unless the live card matches the token's
+  fingerprint and the row is the empty "Type something" row. Single-select: it presses the row's number (or skips it
+  when the cursor is already in the row), pastes the words and presses Enter once the row shows them. Multi-select:
+  arrows walk the cursor to the row (a number there would tick the empty row without moving the cursor), one per
+  settled read; the words are pasted (which ticks the row); no Enter (it would untick it); one up arrow leaves the row.
+
+- A Mac that has this refuses every other answer to the tab while one runs, and for 10 s after one that may have left
+  words in the field without Claude drawing them yet (`reason: "busy"`, `stale: true`).
+- `reqId` is a string of at most 64 characters or a number, echoed as sent; a longer string is refused (`bad_request`,
+  `reqId: null`).
+- `selectorKey` may carry a `reqId` (string of at most 64, or a number); a Mac that has this echoes it on
+  `selectorKeyResult`, so a reply is matched to its own tap.
+- `submitPrompt` may carry `guard: true` (the phone's Chat view sets it on every message, as the desktop chat always
+  checks): the Mac then checks the screen first and refuses with `prompt_open` (a question or permission prompt is up)
+  or `screen_busy` (the screen never held still long enough to check), typing nothing; the phone puts the words back
+  in the message box. An older Mac ignores the flag.
+- The phone's message box never answers a card. With a question's empty "Type something" row on screen, Send moves the
+  words into the card's field; with any other card up, it says Claude is waiting on the card.
+
+Reply, always, with the request's `reqId`:
+
+```json
+{ "type": "selectorTextResult", "id": "<tab id>", "reqId": "t-abc123", "ok": true, "checked": true }
+```
+
+`ok: true` (a single-select answer went in with Enter; `checked: true` for a multi-select, whose card stays open),
+or `ok: false` with `stale: true` (the card changed, nothing written), `uncertain: true` (the words may already be in
+Claude's field: do not resend them) and `reason` (`not-free-text`, `not-open`, `interrupted`, `stranded`,
+`not_allowed`, `bad_request`, or a phone-mode code). The Mac pushes a fresh `selector` message right after.
+
 ## Today and Settings (2.2.4)
 
 Advertised as `today` and `settings` in `authed.features`. A phone must check

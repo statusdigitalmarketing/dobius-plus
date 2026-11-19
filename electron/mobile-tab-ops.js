@@ -27,6 +27,8 @@ const REASON_CODES = {
   not_allowed: 'revoked',
   cancelled: 'cancelled',
   stranded: 'stranded',
+  prompt_open: 'prompt_open',
+  screen_busy: 'screen_busy',
   empty: 'empty_text',
   write_failed: 'write_failed',
   on_phone: 'on_phone',
@@ -45,6 +47,8 @@ const MESSAGES = {
   write_failed: 'The write failed',
   stale_view: 'The tab changed since this screen was drawn; reload it',
   on_phone: 'This conversation is on the phone; send from its phone card',
+  prompt_open: 'A question or permission prompt is on screen; nothing was typed',
+  screen_busy: 'The screen kept changing, so it could not be checked for a prompt; nothing was typed',
 };
 
 /**
@@ -99,7 +103,8 @@ export function tabCandidates(shortId, liveIds) {
  *   maxBytes                     byte cap for input data and prompt text
  *   stillOk()                    the socket's pairing is still valid
  *   writeRawInput(id, data, ok)  chat-service, resolves { ok, reason }
- *   submitPrompt(id, text, ok)   chat-service submitPromptDetailed
+ *   submitPrompt(id, text, ok, onStranded, opts)  chat-service submitPromptDetailed; the phone's
+ *                                `guard: true` passes { guardPrompt: true }: refused when a prompt is on screen
  *   onAccepted(op, id, msg)      side effects that ran before acks existed
  *                                (selector refresh), once a write is accepted
  *   viewGate(id, msg)            optional: a refusal code from phone mode
@@ -145,7 +150,7 @@ export async function handleTabOp(msg, deps) {
   try {
     r = op === 'input'
       ? await deps.writeRawInput(id, text, stillOk)
-      : await deps.submitPrompt(id, text, stillOk);
+      : await deps.submitPrompt(id, text, stillOk, undefined, msg.guard === true ? { guardPrompt: true } : undefined);
   } catch (err) {
     console.error('[mobile] tab write threw:', err?.message || err);
     r = { ok: false, reason: 'write_failed', uncertain: true };

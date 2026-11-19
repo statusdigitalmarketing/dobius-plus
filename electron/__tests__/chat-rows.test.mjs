@@ -2,7 +2,7 @@
 // A malformed row must degrade to its plain text, never throw.
 // Run: node ./electron/__tests__/chat-rows.test.mjs
 import assert from 'node:assert/strict';
-import { normalizeBlocks, rowText, rowKeys, createImageCache, foldTurns, freeTextOption } from '../../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, createImageCache, foldTurns, freeTextOption, optionMark, isMultiSelect, askLayout, askCardKey, selectorKey } from '../../shared/chat-rows.js';
 
 // 1. Junk blocks are dropped field by field; nothing usable means null.
 assert.equal(normalizeBlocks(undefined), null);
@@ -361,4 +361,53 @@ console.log('PASS  row keys survive a sliding window');
   assert.equal(freeTextOption(card(['Type something else entirely'])), null, 'only the exact row');
   assert.equal(freeTextOption(null), null);
   console.log('PASS  the free-text row of a question card');
+}
+
+{
+  // Checkbox marks as Claude Code draws them, and the card layout both chat views render.
+  assert.deepEqual(optionMark('[ ] Cheese'), { checked: false, text: 'Cheese' });
+  assert.deepEqual(optionMark('[✔] Olives'), { checked: true, text: 'Olives' });
+  assert.deepEqual(optionMark('☒ Basil'), { checked: true, text: 'Basil' });
+  assert.deepEqual(optionMark('Red'), { checked: null, text: 'Red' });
+  assert.deepEqual(optionMark('[x]y'), { checked: null, text: '[x]y' }, 'a mark needs its space');
+  const steps = { labels: ['Toppings'], answered: [false], current: 0, total: 1 };
+  const multi = (marks, free = '[ ] Type something') => ({
+    prompt: 'Pick toppings', steps, action: 'Submit', selectedIndex: 0,
+    options: [{ num: 1, label: `${marks[0]} Cheese`, detail: 'Add cheese' }, { num: 2, label: `${marks[1]} Olives`, detail: 'Add olives' },
+      { num: 3, label: free }, { num: 4, label: 'Chat about this' }],
+  });
+  const a = multi(['[ ]', '[ ]']);
+  assert.equal(isMultiSelect(a), true);
+  assert.deepEqual(askLayout(a), {
+    multi: true, action: 'Submit', chat: { num: 4 }, free: { num: 3, empty: true, text: '', checked: false },
+    main: [{ num: 1, label: 'Cheese', detail: 'Add cheese', checked: false }, { num: 2, label: 'Olives', detail: 'Add olives', checked: false }],
+  });
+  // Words typed into the free row keep it the free row, checked.
+  assert.deepEqual(askLayout(multi(['[✔]', '[ ]'], '[✔] extra spicy')).free, { num: 3, empty: false, text: 'extra spicy', checked: true });
+  // Ticking boxes and typing words never changes the key; another question does.
+  const k = askCardKey(a);
+  assert.equal(askCardKey(multi(['[✔]', '[ ]'])), k);
+  assert.equal(askCardKey({ ...multi(['[✔]', '[✔]'], '[✔] extra spicy'), fp: 'other' }), k);
+  assert.notEqual(askCardKey({ ...a, prompt: 'Pick sauces' }), k);
+  assert.notEqual(askCardKey({ ...a, steps: { ...steps, current: 1, labels: ['Toppings', 'Size'] } }), k);
+  // A single-select card keeps the exact selectorKey (fingerprint and labels), plus its question tab: two tabs that
+  // read the same are two cards (their field drafts must not mix).
+  const single = { prompt: 'Pick a color', steps, fp: 'f1', options: [{ num: 1, label: 'Red' }, { num: 2, label: 'Type something.' }, { num: 3, label: 'Chat about this' }] };
+  assert.equal(JSON.parse(askCardKey(single))[2], selectorKey(single));
+  assert.notEqual(askCardKey({ ...single, steps: { ...steps, current: (steps.current ?? 0) + 1 } }), askCardKey(single));
+  const noTabs = { ...single, steps: undefined };
+  assert.equal(askCardKey(noTabs), selectorKey(noTabs));
+  assert.deepEqual(askLayout(single), { multi: false, action: null, chat: { num: 3 }, free: { num: 2, empty: true, text: '', checked: false }, main: [{ num: 1, label: 'Red', detail: '', checked: null }] });
+  // A real answer that happens to read like a hatch, with a description, stays an answer; a permission prompt has none.
+  assert.equal(askLayout({ options: [{ num: 1, label: 'Yes' }, { num: 2, label: 'Type something.', detail: 'literally' }] }).free, null);
+  assert.deepEqual(askLayout({ options: [{ num: 1, label: 'Yes' }, { num: 2, label: 'No' }] }), { multi: false, action: null, chat: null, free: null, main: [{ num: 1, label: 'Yes', detail: '', checked: null }, { num: 2, label: 'No', detail: '', checked: null }] });
+  assert.deepEqual(askLayout(null), { multi: false, action: null, chat: null, free: null, main: [] });
+  assert.equal(askLayout({ options: [{ num: 1, label: 'Continue' }, { num: 2, label: 'Type something' }] }).free, null, 'a plain menu option is an answer');
+  const oneBoxed = { steps: { current: 1, total: 1, labels: ['Format'] }, options: [{ num: 1, label: '[ ] Markdown' }, { num: 2, label: 'Plain bullets' }, { num: 3, label: 'Type something.' }, { num: 4, label: 'Chat about this' }] };
+  assert.equal(isMultiSelect(oneBoxed), false, 'one answer starting with [ ] is not a multi-select question');
+  assert.equal(askLayout(oneBoxed).free?.num, 3);
+  assert.equal(askLayout(oneBoxed).main[0].label, '[ ] Markdown', 'a single-select answer keeps its own text');
+  const halfDrawn = { steps: { current: 1, total: 1, labels: ['T'] }, action: 'Submit', options: [{ num: 1, label: '[ ] Cheese' }, { num: 2, label: '[✔] Type something' }, { num: 3, label: 'Chat about this' }] };
+  assert.equal(askLayout(halfDrawn).free?.empty, false, 'a ticked row still reading Type something is not an empty field');
+  console.log('PASS  question card layout: checkboxes, the free row, a key that survives a tick');
 }
