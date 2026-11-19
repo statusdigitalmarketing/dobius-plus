@@ -1078,15 +1078,17 @@ function handleAuthedMessage(socket, msg, subs) {
       // Phone mode: the same generation check as a typed key, on arrival and at the write.
       const selGate = () => phoneGate(id, msg);
       const refusedSel = selGate();
-      if (refusedSel) { wsSend(socket, { type: 'selectorKeyResult', id, ok: false, stale: true, token: '', code: refusedSel }); break; }
+      // reqId (2.2.42): echoed so the phone can tell which tap a reply belongs to; a string of 64 or less, or a number.
+      const keyReq = (typeof msg.reqId === 'string' && msg.reqId.length <= 64) || Number.isFinite(msg.reqId) ? { reqId: msg.reqId } : {};
+      if (refusedSel) { wsSend(socket, { type: 'selectorKeyResult', id, ok: false, stale: true, token: '', code: refusedSel, ...keyReq }); break; }
       answerSelector(id, msg.data, msg.token, () => knownToken(socket._authToken) && !selGate())
         .then((r) => {
-          wsSend(socket, { type: 'selectorKeyResult', id, ok: !!r.ok, stale: !!r.stale, token: r.token || '' });
+          wsSend(socket, { type: 'selectorKeyResult', id, ok: !!r.ok, stale: !!r.stale, token: r.token || '', ...keyReq });
           if (!r.ok) return;
           invalidateSelectorPush(id);
           setTimeout(async () => { wsSend(socket, await selectorMessage(id, () => knownToken(socket._authToken))); }, 350); // a ticked box redraws in well under this; a screen still moving answers unsettled and is asked again
         })
-        .catch(() => wsSend(socket, { type: 'selectorKeyResult', id, ok: false, stale: false, token: '' }));
+        .catch(() => wsSend(socket, { type: 'selectorKeyResult', id, ok: false, stale: false, token: '', ...keyReq }));
       break;
     }
 

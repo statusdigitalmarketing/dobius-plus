@@ -277,7 +277,10 @@ export function askLayout(sel) {
  */
 export function askCardKey(sel) {
   const lay = askLayout(sel);
-  if (!lay.multi || !sel?.steps || !Array.isArray(sel.steps.labels)) return selectorKey(sel);
+  // Single-select: the fingerprinted key plus the question tab, which the fingerprint does not cover (two tabs can read
+  // the same, and their drafts must not mix: Codex Medium, round 5).
+  if (!lay.multi) return sel?.steps ? JSON.stringify(['one', sel.steps.current ?? null, selectorKey(sel)]) : selectorKey(sel);
+  if (!sel?.steps || !Array.isArray(sel.steps.labels)) return selectorKey(sel);
   return JSON.stringify(['multi', sel.steps.current, sel.steps.labels, String(sel.prompt ?? ''),
     lay.main.map((o) => [o.num, o.label, o.detail]), lay.free?.num ?? null, lay.chat?.num ?? null]);
 }

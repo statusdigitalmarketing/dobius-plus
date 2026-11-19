@@ -457,7 +457,10 @@ export function parseSelectorFromScreen(lines) {
   // typed into it.
   let action = null;
   const lastBox = [...options].reverse().find((o) => OPTION_BOX_RE.test(o.label));
-  if (lastBox?.detail) {
+  // Only a multi-select question: a box on every row but "Chat about this" (one answer that starts with "[ ]" in a
+  // single-select question keeps its own description: Codex Low, round 5).
+  const allBoxed = options.every((o) => OPTION_BOX_RE.test(o.label) || /^chat about this$/i.test(String(o.label).trim()));
+  if (allBoxed && lastBox?.detail) {
     const rows = lastBox.detail.split('\n');
     const tail = rows[rows.length - 1].trim();
     if (tail === 'Submit' || tail === 'Next') {

@@ -41,6 +41,7 @@ function loadPhoneOutbox(base, tabId) {
 const cardStamp = (sel) => `${sel?.fp ?? ''}|${sel?.steps?.current ?? ''}`;
 // Question cards whose "Type something" field keeps its own unsent words (ChatView freeDrafts).
 const FREE_DRAFT_CARDS = 8;
+const LATE_TEXT_MAX = 4; // timed-out own-words answers still listened for
 const HISTORY_PAGE = 200;
 const HISTORY_MAX = 2000;
 
@@ -661,8 +662,9 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // The card's fingerprint when its field was last edited: Enter in the field (no tap to bind) sends only to that card.
   const freeFpRef = useRef(null);
   const [askToast, setAskToast] = useState('');
-  // The last selectorText the phone stopped waiting for: a late refusal that wrote nothing gives its words back.
-  const lateReqRef = useRef(null);
+  // selectorTexts the phone stopped waiting for (reqId -> request, the newest LATE_TEXT_MAX): a late refusal that
+  // wrote nothing gives its words back.
+  const lateReqRef = useRef(new Map());
   const askViewKey = selector ? askCardKey(selector) : null;
   const freeDraft = (askViewKey && freeDrafts[askViewKey]) || '';
   const freeDraftsRef = useRef(freeDrafts);
@@ -1053,13 +1055,14 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           // token, but only if the card on screen is still the one tapped.
           const tapped = tappedRef.current;
           setSelector((cur) => (cur && cur === tapped ? { ...cur, token: msg.token || '' } : cur));
+          // Only the reply to the answering tap itself (an older Mac echoes no reqId: matched as before).
           const done = answeredRef.current;
-          if (done && Date.now() - done.at < 8000) {
+          if (done && Date.now() - done.at < 8000 && (msg.reqId === undefined || msg.reqId === done.reqId)) {
             if (done.gone) { answeredRef.current = null; showAskToast(); } else done.confirmed = true;
           }
         } else {
           setPendingPick(null);
-          answeredRef.current = null;
+          if (msg.reqId === undefined || msg.reqId === answeredRef.current?.reqId) answeredRef.current = null;
           showSelNote(msg.stale ? 'The prompt changed before your tap landed. Nothing was sent, check the card again.' : 'Could not send that. Nothing was sent.');
         }
         // Either way the server's follow-up read (or the next probe) re-arms it.
@@ -1081,10 +1084,10 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
             setSelBusy(false);
             returnWords(req, msg.stale ? 'The question changed before your words went in. Nothing was sent.' : 'Could not send your answer. Nothing was sent.');
           }
-        } else if (lateReqRef.current?.reqId === msg.reqId) {
+        } else if (lateReqRef.current.has(msg.reqId)) {
           // After the phone stopped waiting: only a refusal that wrote nothing changes anything (the words come back).
-          const late = lateReqRef.current;
-          lateReqRef.current = null;
+          const late = lateReqRef.current.get(msg.reqId);
+          lateReqRef.current.delete(msg.reqId);
           if (!msg.ok && !msg.uncertain) returnWords(late, 'The Mac answered late: nothing was sent.');
         }
       } else if (msg.type === 'terminalText' && msg.id === tabId) {
@@ -1523,8 +1526,10 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     if (!token) return false;
     tappedRef.current = card;
     setSelBusy(true);
-    connection.send({ type: 'selectorKey', id: tabId, data, token, gen: w.gen });
-    return true;
+    // reqId: the Mac echoes it (2.2.42), so a reply is matched to its own tap, never to a later one.
+    const reqId = freshId('k');
+    connection.send({ type: 'selectorKey', id: tabId, data, token, gen: w.gen, reqId });
+    return reqId;
   };
 
   const chooseOption = (card, num, e) => {
@@ -1597,11 +1602,13 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // Words the Mac guarantees it never wrote go back into the field of the card they were typed for; if that field holds
   // new words by now, the note quotes them instead, so they are never lost silently (Codex Medium, round 4).
   const returnWords = (req, note) => {
-    const quoted = req.text.length > 60 ? `${req.text.slice(0, 60)}...` : req.text;
     // Read from the ref: a state updater runs later, during the next render, too late to choose the note.
     const kept = !!String(freeDraftsRef.current[req.key] || '').trim();
-    if (!kept) setFreeDraftFor(req.key, (cur) => (cur.trim() ? cur : req.text));
-    showSelNote(kept ? `${note} Your words were: "${quoted}"` : note);
+    if (!kept) { setFreeDraftFor(req.key, (cur) => (cur.trim() ? cur : req.text)); showSelNote(note); return; }
+    // The field holds new words: these go to the message box whole (safe there: it never answers a card, and the Mac
+    // said they were never written), never cut short in a passing note (Codex Medium, round 5).
+    setDraft((cur) => (cur.trim() ? `${cur.trimEnd()} ${req.text}` : req.text));
+    showSelNote(`${note} Your words are back in the message box.`);
   };
   const showAskToast = () => {
     setAskToast('Answer sent to Claude');
@@ -1636,7 +1643,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       const req = freeReqRef.current;
       if (req?.reqId !== reqId) return;
       freeReqRef.current = null;
-      lateReqRef.current = req;
+      lateReqRef.current.set(req.reqId, req);
+      while (lateReqRef.current.size > LATE_TEXT_MAX) lateReqRef.current.delete(lateReqRef.current.keys().next().value);
       setFreeBusy(false);
       // Not put back: they may have gone in, and the answer to say so may never arrive.
       showSelNote(`No answer from the Mac yet. Your words may have gone in: check the card before typing "${req.text.length > 40 ? `${req.text.slice(0, 40)}...` : req.text}" again.`);
@@ -1669,10 +1677,11 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     // A row: its number. In a multi-select question that ticks or unticks it and the card stays; otherwise it answers.
     const tap = (opt, e, toggles = multi) => {
       if (inField && canText) { leaveField(e); return; }
-      if (!sendSelector(selector, String(opt.num), e)) return;
+      const sent = sendSelector(selector, String(opt.num), e);
+      if (!sent) return;
       if (selector.token == null) { setSelector(null); return; }
       setPendingPick({ key: askViewKey, num: opt.num, checked: toggles ? !opt.checked : null });
-      if (!toggles) { atBottomRef.current = true; answeredRef.current = { key: askViewKey, at: Date.now() }; }
+      if (!toggles) { atBottomRef.current = true; answeredRef.current = { key: askViewKey, at: Date.now(), reqId: sent }; }
     };
     // A multi-select question's own Submit / Next: Claude's next question tab (the right arrow), or its review step.
     const advance = (e) => {

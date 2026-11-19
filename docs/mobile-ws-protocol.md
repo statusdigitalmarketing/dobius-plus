@@ -188,6 +188,8 @@ Claude's next question tab or, after the last one, its review step.
   words in the field without Claude drawing them yet (`reason: "busy"`, `stale: true`).
 - `reqId` is a string of at most 64 characters or a number, echoed as sent; a longer string is refused (`bad_request`,
   `reqId: null`).
+- `selectorKey` may carry a `reqId` (string of at most 64, or a number); a Mac that has this echoes it on
+  `selectorKeyResult`, so a reply is matched to its own tap.
 - The phone's message box never answers a card. With a question's empty "Type something" row on screen, Send moves the
   words into the card's field; with any other card up, it says Claude is waiting on the card.
 

@@ -390,9 +390,13 @@ console.log('PASS  row keys survive a sliding window');
   assert.equal(askCardKey({ ...multi(['[✔]', '[✔]'], '[✔] extra spicy'), fp: 'other' }), k);
   assert.notEqual(askCardKey({ ...a, prompt: 'Pick sauces' }), k);
   assert.notEqual(askCardKey({ ...a, steps: { ...steps, current: 1, labels: ['Toppings', 'Size'] } }), k);
-  // A single-select card keeps the exact selectorKey (fingerprint and labels).
+  // A single-select card keeps the exact selectorKey (fingerprint and labels), plus its question tab: two tabs that
+  // read the same are two cards (their field drafts must not mix).
   const single = { prompt: 'Pick a color', steps, fp: 'f1', options: [{ num: 1, label: 'Red' }, { num: 2, label: 'Type something.' }, { num: 3, label: 'Chat about this' }] };
-  assert.equal(askCardKey(single), selectorKey(single));
+  assert.equal(JSON.parse(askCardKey(single))[2], selectorKey(single));
+  assert.notEqual(askCardKey({ ...single, steps: { ...steps, current: (steps.current ?? 0) + 1 } }), askCardKey(single));
+  const noTabs = { ...single, steps: undefined };
+  assert.equal(askCardKey(noTabs), selectorKey(noTabs));
   assert.deepEqual(askLayout(single), { multi: false, action: null, chat: { num: 3 }, free: { num: 2, empty: true, text: '', checked: false }, main: [{ num: 1, label: 'Red', detail: '', checked: null }] });
   // A real answer that happens to read like a hatch, with a description, stays an answer; a permission prompt has none.
   assert.equal(askLayout({ options: [{ num: 1, label: 'Yes' }, { num: 2, label: 'Type something.', detail: 'literally' }] }).free, null);

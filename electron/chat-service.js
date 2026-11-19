@@ -387,8 +387,15 @@ const freeTextBusy = (id, fp, data = '') => {
   if (freeTextPending.has(id)) return true;
   const hold = freeTextHold.get(id);
   if (!hold) return false;
-  if (hold.pty !== terminalInstance(id) || (fp && hold.fp !== fp)) { freeTextHold.delete(id); return false; }
-  return data !== '\x1b';
+  if (hold.pty !== terminalInstance(id)) { freeTextHold.delete(id); return false; }
+  // A token from another card is not held, but it does not end the hold either: only a request that then proves the
+  // LIVE card changed does (releaseHold), or a stale request would lift it (Codex High, round 5).
+  return hold.fp === fp && data !== '\x1b';
+};
+// Called once a request has matched the live card: a different card than the held one, or an Esc onto it, ends it.
+const releaseHold = (id, fp, data = '') => {
+  const hold = freeTextHold.get(id);
+  if (hold && (hold.fp !== fp || data === '\x1b')) freeTextHold.delete(id);
 };
 const tokenFp = (token) => (typeof token === 'string' ? token.split('|')[1] || '' : '');
 
@@ -445,6 +452,7 @@ async function answerChecked(id, data, token, stillOk0, beforeWrite, maxLen, own
     settled = true;
   }
   if (!settled || !live || selectorToken(id) !== now || submitPending(id) || !stillOk()) return { ok: false, stale: true };
+  releaseHold(id, fp, data);
   beforeWrite();
   writeRawInput(id, data, stillOk);
   const next = selectorToken(id);
@@ -504,6 +512,7 @@ async function answerFreeText(id, num, text, token, stillOk, beforeWrite, state)
   let live = null;
   try { live = await liveSelectorForTab(id); } catch { live = null; }
   if (!live || selectorFingerprint(live) !== fp) return { ok: false, stale: true };
+  releaseHold(id, fp);
   const freeLabel = String(optOf(live)?.label ?? '');
   const freeDetail = optOf(live)?.detail;
   // Only an AskUserQuestion card (its tab bar parsed as `steps`): a plain menu can have a real option that reads
