@@ -728,9 +728,87 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   buffers.set('a', '\r\n> \r\n'); emitOutput('a');
   assert.deepEqual(await lost, { ok: false, reason: 'not-open' });
   assert.deepEqual(writes.map((w) => w[1]), ['3']);
+  // The cursor already sits in the row (its input open): no number (it would be typed into the words), the words
+  // go first, and Enter once the row shows them.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(3)); emitOutput('a');
+  const r9 = await readSelectorForAnswer('a');
+  const inRow = answerSelectorWithText('a', 3, 'teal', r9.token);
+  await writesReach(1);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('teal')]);
+  await tick(250);
+  assert.equal(writes.length, 1, 'no Enter while the row still reads empty');
+  buffers.set('a', card(3, 'teal')); emitOutput('a');
+  assert.deepEqual(await inRow, { ok: true });
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('teal'), '\r']);
   cols.delete('a');
 }
 ok('own words answer only the Type something row, and Enter only once the card shows them');
+
+// 23b. Own words in a MULTI-select question, laid out as Claude Code draws one (captured live): a number toggles its
+// row without moving the cursor, so the cursor is walked to the free row with arrows, one per read; the words are
+// pasted there (which checks it); no Enter (it would uncheck it); one up arrow leaves the row, or the next number
+// tapped would be typed into the words.
+{
+  const rule = '─'.repeat(80);
+  const box = (on) => (on ? '[✔]' : '[ ]');
+  const card = (sel, typed = null, cheese = false) => ['', rule, '←  ☒ Toppings  ✔ Submit  →', 'Pick toppings',
+    `${sel === 1 ? '❯' : ' '} 1. ${box(cheese)} Cheese`, '         Add cheese',
+    `${sel === 2 ? '❯' : ' '} 2. [ ] Olives`, '         Add olives',
+    `${sel === 3 ? '❯' : ' '} 3. ${typed ? `[✔] ${typed}` : '[ ] Type something'}`, '     Submit', rule,
+    '  4. Chat about this', 'Enter to select · ↑/↓ to navigate · Esc to cancel', ''].join('\r\n');
+  const tick = (ms) => new Promise((res) => setTimeout(res, ms));
+  const writesReach = async (n) => { for (let i = 0; i < 60 && writes.length < n; i += 1) await tick(20); };
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1, null, true)); emitOutput('a');
+  const r = await readSelectorForAnswer('a');
+  assert.ok(r?.token);
+  assert.equal(r.selector.action, 'Submit', 'the unnumbered Submit row is the question\'s button');
+  assert.equal(r.selector.options[2].detail, undefined, 'not the free row\'s description');
+  const pending = answerSelectorWithText('a', 3, 'extra spicy', r.token);
+  await writesReach(1);
+  assert.deepEqual(writes.map((w) => w[1]), ['\x1b[B'], 'an arrow, never the number (it would toggle the empty row)');
+  await tick(200);
+  assert.equal(writes.length, 1, 'the next arrow waits for the cursor to move');
+  buffers.set('a', card(2, null, true)); emitOutput('a');
+  await writesReach(2);
+  assert.deepEqual(writes.map((w) => w[1]), ['\x1b[B', '\x1b[B']);
+  buffers.set('a', card(3, null, true)); emitOutput('a');
+  await writesReach(3);
+  assert.deepEqual(writes.map((w) => w[1]), ['\x1b[B', '\x1b[B', PASTE('extra spicy')], 'pasted once on the row');
+  buffers.set('a', card(3, 'extra spicy', true)); emitOutput('a');
+  assert.deepEqual(await pending, { ok: true, checked: true });
+  assert.deepEqual(writes.map((w) => w[1]), ['\x1b[B', '\x1b[B', PASTE('extra spicy'), '\x1b[A'], 'no Enter, and up off the row');
+  // The cursor already on the free row: the paste is the first key and goes through every token check.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(3)); emitOutput('a');
+  const r2 = await readSelectorForAnswer('a');
+  const here = answerSelectorWithText('a', 3, 'basil', r2.token);
+  await writesReach(1);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('basil')]);
+  buffers.set('a', card(3, 'basil')); emitOutput('a');
+  assert.deepEqual(await here, { ok: true, checked: true });
+  // Another option toggled on screen while the cursor walks: the card changed, nothing is pasted.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
+  const r3 = await readSelectorForAnswer('a');
+  const changed = answerSelectorWithText('a', 3, 'olives', r3.token);
+  await writesReach(1);
+  buffers.set('a', card(2, null, true)); emitOutput('a');
+  assert.deepEqual(await changed, { ok: false, stale: true });
+  assert.deepEqual(writes.map((w) => w[1]), ['\x1b[B']);
+  // Someone types between the arrows: nothing more is written.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(1)); emitOutput('a');
+  const r4 = await readSelectorForAnswer('a');
+  const typed = answerSelectorWithText('a', 3, 'olives', r4.token);
+  await writesReach(1);
+  writeTerminal('a', '2');
+  buffers.set('a', card(2)); emitOutput('a');
+  assert.deepEqual(await typed, { ok: false, reason: 'interrupted' });
+  assert.deepEqual(writes.map((w) => w[1]), ['\x1b[B', '2']);
+  // Pasted, but the row never shows the words: uncertain (they may be in it), never "not sent".
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(3)); emitOutput('a');
+  const r5 = await readSelectorForAnswer('a');
+  assert.deepEqual(await answerSelectorWithText('a', 3, 'basil', r5.token), { ok: false, reason: 'stranded', uncertain: true });
+  cols.delete('a');
+}
+ok('own words in a multi-select question: arrows to the row, paste, no Enter, up off the row');
 
 // 24. The strict read (the Chat pane's answer guard): a screen not settled since the last key is never "no prompt",
 // even when nothing on it parses, because a prompt may still be on its way. The plain read keeps hiding the card.

@@ -207,7 +207,73 @@ export function tokenFingerprint(token) {
 export const FREE_TEXT_LABEL = /^type something\.?$/i;
 export function freeTextOption(sel) {
   if (!sel || !Array.isArray(sel.options)) return null;
-  return sel.options.find((o) => FREE_TEXT_LABEL.test(String(o?.label ?? '').trim())) || null;
+  return sel.options.find((o) => FREE_TEXT_LABEL.test(optionMark(o?.label).text)) || null;
+}
+
+// A multi-select option's checkbox, as Claude Code draws it ("[ ] Cheese", "[✔] Cheese"; older builds "☐"/"☒"):
+// { checked: true | false, text } for a checkbox row, { checked: null, text } for any other.
+const OPTION_MARK = /^(\[[ x✓✔]\]|[☐☒])\s+/;
+export function optionMark(label) {
+  const s = String(label ?? '').trim();
+  const m = s.match(OPTION_MARK);
+  if (!m) return { checked: null, text: s };
+  return { checked: m[1] !== '[ ]' && m[1] !== '☐', text: s.slice(m[0].length).trim() };
+}
+/** True when the card is a multi-select question (its options carry checkboxes). */
+export function isMultiSelect(sel) {
+  return !!sel && Array.isArray(sel.options) && sel.options.some((o) => optionMark(o?.label).checked !== null);
+}
+
+/**
+ * How a question card lays out (both chat views): `main` the answers ({ num, label, detail, checked }, checkbox marks
+ * taken off the label), `free` Claude's "Type something" row ({ num, empty, text, checked }), `chat` its "Chat about
+ * this" row ({ num }), `multi`, and `action` (a multi-select question's own "Submit" or "Next"). Claude's escape
+ * hatches are its exact tail: "Type something." (in a multi-select question the last checkbox row, which keeps the
+ * words typed into it), then optionally "Chat about this", last, with no description. Anything else that shares a
+ * label is a real answer (Codex, twice).
+ */
+export function askLayout(sel) {
+  const opts = Array.isArray(sel?.options) ? sel.options : [];
+  const multi = isMultiSelect(sel);
+  const action = sel?.action === 'Submit' || sel?.action === 'Next' ? sel.action : null;
+  let cut = opts.length;
+  let chat = null;
+  const last = opts[cut - 1];
+  if (last && !last.detail && optionMark(last.label).checked === null && /^chat about this$/i.test(optionMark(last.label).text)) {
+    chat = { num: last.num };
+    cut -= 1;
+  }
+  let free = null;
+  const cand = opts[cut - 1];
+  if (cand) {
+    const m = optionMark(cand.label);
+    const empty = FREE_TEXT_LABEL.test(m.text) && !cand.detail;
+    // A multi-select row keeps the words typed into it ("[✔] extra spicy"): it is the free row while the question
+    // draws its own Submit / Next under it. A single-select row only while it still reads "Type something.".
+    if (multi ? m.checked !== null && (empty || (action && chat)) : m.checked === null && empty) {
+      free = { num: cand.num, empty, text: empty ? '' : [m.text, cand.detail].filter(Boolean).join(' '), checked: m.checked === true };
+      cut -= 1;
+    }
+  }
+  const main = opts.slice(0, cut).map((o) => {
+    const m = optionMark(o?.label);
+    return { num: o?.num, label: m.text, detail: o?.detail || '', checked: m.checked };
+  });
+  return { multi, main, free, chat, action };
+}
+
+/**
+ * The React key a phone or desktop question card mounts under. A multi-select question keeps one key while its
+ * boxes are ticked, so a tap never remounts the card (which dropped its scroll position: Sam, 2026-11-19); the key
+ * leaves out the checkbox marks, the free row's words and `fp` (the fingerprint covers the marks). The press guard,
+ * not the key, is what binds a tap to the card it began on (it compares tokens, which every tick changes). Every
+ * other card keys exactly as selectorKey does.
+ */
+export function askCardKey(sel) {
+  const lay = askLayout(sel);
+  if (!lay.multi || !sel?.steps || !Array.isArray(sel.steps.labels)) return selectorKey(sel);
+  return JSON.stringify(['multi', sel.steps.current, sel.steps.labels, String(sel.prompt ?? ''),
+    lay.main.map((o) => [o.num, o.label, o.detail]), lay.free?.num ?? null, lay.chat?.num ?? null]);
 }
 
 /**

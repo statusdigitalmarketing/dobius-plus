@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/store';
 import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, freeTextOption, tokenFingerprint, createPressGuard, stepImages, createImageCache, foldTurns } from '../../../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, askLayout, askCardKey, optionMark, freeTextOption, tokenFingerprint, createPressGuard, stepImages, createImageCache, foldTurns } from '../../../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../../../shared/chat-activity.js';
 import ModelMenu from './ModelMenu';
 import './ChatPane.css';
@@ -997,11 +997,18 @@ export default function ChatPane({ tabId, visible }) {
     // An arrow or space leaves no usable token until Claude redraws the
     // prompt (main refuses reads of a screen not yet repainted): the buttons
     // wait, disabled, for a quick re-read instead of failing as stale.
-    if (!closes && !r.token) setTimeout(() => { if (mountedRef.current) pollSelector(20); }, 150);
+    // A ticked box changes the card itself (its fingerprint), so its fresh token is stale the moment Claude redraws:
+    // read the card again for every key that leaves it up.
+    if (!closes) setTimeout(() => { if (mountedRef.current) pollSelector(20); }, 150);
     refreshSoon();
   };
 
   const chooseOption = (num, e) => {
+    const lay = askLayout(selector);
+    // The empty "Type something" row: its words come from the message box (answerInOwnWords), never its number.
+    if (lay.free?.empty && lay.free.num === num) { inputRef.current?.focus(); return; }
+    // A multi-select box ticks in place: the card stays, and so does the scroll.
+    if (lay.multi && num !== lay.chat?.num) { selectorKey(String(num), false, e); return; }
     // The absolute option digit, never relative arrows: a misparsed cursor
     // position then cannot pick a different option than the label shown.
     selectorKey(String(num), true, e);
@@ -1085,7 +1092,9 @@ export default function ChatPane({ tabId, visible }) {
     };
   }, [visible, tabId, focusInput]);
 
-  const working = status === 'working';
+  // A question or permission card on screen means Claude waits on the person, whatever the tab's output did (a ticked
+  // box redraws the screen, which reads as work): no Working chip, no Stop beside Send.
+  const working = status === 'working' && !selector;
 
   // The model chip (Asana 1220098108555124): what this tab's Claude runs, read
   // from its session's statusLine record, and the catalog it can switch to.
@@ -1251,20 +1260,33 @@ export default function ChatPane({ tabId, visible }) {
         {selector && (
           <div
             className="chatp-selector"
-            key={selectorCardKey(selector)}
+            key={askCardKey(selector)}
             onPointerDownCapture={(e) => pressGuard.current.pointerDown(e, selector)}
             onKeyDownCapture={(e) => pressGuard.current.keyDown(e, selector)}
           >
             <div className="chatp-selector-title">{selector.prompt || 'Claude is waiting for you to choose:'}</div>
-            {selector.options.map((opt) => (
-              <button type="button" key={opt.num} className="chatp-option" disabled={!selector.token} onClick={(e) => chooseOption(opt.num, e)}>
-                <span className="chatp-option-num">{opt.num}</span>
-                <span className="chatp-option-text">
-                  {opt.label}
-                  {opt.detail && <span className="chatp-option-detail">{opt.detail}</span>}
-                </span>
+            {selector.options.map((opt) => {
+              // A multi-select row draws a box, ticked or not, in place of Claude's "[ ]" / "[✔]" text.
+              const mark = optionMark(opt.label);
+              return (
+                <button type="button" key={opt.num} className="chatp-option" disabled={!selector.token} onClick={(e) => chooseOption(opt.num, e)}
+                  role={mark.checked !== null ? 'checkbox' : undefined} aria-checked={mark.checked !== null ? mark.checked : undefined}>
+                  {mark.checked === null
+                    ? <span className="chatp-option-num">{opt.num}</span>
+                    : <span className={`chatp-option-num chatp-option-box${mark.checked ? ' on' : ''}`} aria-hidden="true">{mark.checked ? '\u2713' : ''}</span>}
+                  <span className="chatp-option-text">
+                    {mark.checked !== null && /^type something\.?$/i.test(mark.text) ? 'Type your own answer in the box below' : mark.text}
+                    {opt.detail && <span className="chatp-option-detail">{opt.detail}</span>}
+                  </span>
+                </button>
+              );
+            })}
+            {/* A multi-select question's own Submit / Next (the right arrow: its next tab, or the review step). */}
+            {selector.action && (
+              <button type="button" className="chatp-option chatp-option-primary" disabled={!selector.token} onClick={(e) => selectorKey('\x1b[C', false, e)}>
+                {selector.action}
               </button>
-            ))}
+            )}
             <div className="chatp-keys">
               {SELECTOR_KEYS.map(([label, seq, closes]) => (
                 <button type="button" key={label} className="chatp-key" disabled={!selector.token} onClick={(e) => selectorKey(seq, closes, e)}>{label}</button>

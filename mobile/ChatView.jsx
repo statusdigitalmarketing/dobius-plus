@@ -4,7 +4,7 @@ import SpecialKeys from './SpecialKeys';
 import Lightbox from './Lightbox';
 import remarkGfm from 'remark-gfm';
 import { pairingKey } from './pairings';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache, stepSummary } from '../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, askLayout, askCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache, stepSummary } from '../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 import { remarkCommandBoxes, CMD_TAG } from './command-blocks.js';
 import PhoneCards from './PhoneCards';
@@ -39,8 +39,6 @@ function loadPhoneOutbox(base, tabId) {
 const HISTORY_PAGE = 200;
 const HISTORY_MAX = 2000;
 
-// A multi-select option row ("[ ] Foo", "☐ Foo"): its keys row stays open.
-const MULTI_OPTION = /^(\[[ x✓✔]\]|[☐☒])\s/;
 // A permission prompt reads "Bash command / <command> / <description> / Do you
 // want to proceed?": the tool goes in the eyebrow, the command in a code box,
 // the description under it, and only the question is the heading.
@@ -63,6 +61,15 @@ function AskPrompt({ text }) {
       )}
       <div className="ask-question">{question || 'Claude is waiting for you to choose:'}</div>
     </>
+  );
+}
+
+// The tick in a ticked question box.
+function CheckMark() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+      <path d="M3.5 8.4l2.9 2.9 6.1-6.6" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 
@@ -634,6 +641,19 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     };
   }, []);
   const [selNote, setSelNote] = useState('');
+  const showSelNote = (t) => { setSelNote(t); setTimeout(() => setSelNote((cur) => (cur === t ? '' : cur)), 4000); };
+  // The question card's own state. pendingPick: the tap in flight ({ key, num, checked }), drawn at once and dropped
+  // when the Mac's next reading of the screen arrives. freeDraft: the words in the card's "Type something" field.
+  // answeredRef: a tap that may have finished the question ({ key, at }); the card going away after it shows askToast.
+  const [pendingPick, setPendingPick] = useState(null);
+  const [freeDraft, setFreeDraft] = useState('');
+  const [freeBusy, setFreeBusy] = useState(false);
+  const freeReqRef = useRef(null); // { reqId, key, multi } the selectorText in flight
+  const answeredRef = useRef(null);
+  const [askToast, setAskToast] = useState('');
+  const askViewKey = selector ? askCardKey(selector) : null;
+  // Another question: its field starts empty.
+  useEffect(() => { setFreeDraft(''); }, [askViewKey]);
   // Question card: the fine-control key row is folded away unless asked for
   // (or the prompt is a multi-select), and the close button needs a second
   // tap, because Esc cancels Claude's whole question.
@@ -809,7 +829,9 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   messagesRef.current = messages;
   // On the phone, the run's own status says whether Claude is working (the tab's activity line reads the Mac's TUI,
   // which is not running then).
-  const working = phoneOn ? phone.status === 'working' : tab?.status === 'working';
+  // A question or permission card on screen means Claude is waiting on the person, whatever the tab's output did (a
+  // ticked box redraws the screen, which reads as work): no Stop in Send's place, no "working..." under the card.
+  const working = phoneOn ? phone.status === 'working' : tab?.status === 'working' && !selector;
   const activity = working && !phoneOn ? normalizeActivity(tab?.activity) : null;
   if (activity && typeof tab?.activity?.rxAt === 'number') activity.rxAt = tab.activity.rxAt;
   useEffect(() => {
@@ -983,8 +1005,20 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           }
         } else {
           const sel = msg.selector && Array.isArray(msg.selector.options) ? msg.selector : null;
-          setSelector(sel ? { ...sel, token: 'token' in msg ? (msg.token || '') : null, fp: tokenFingerprint(msg.token) } : null);
+          // canText: this Mac answers the "Type something" row with the card's own field (selectorText).
+          const next = sel ? { ...sel, token: 'token' in msg ? (msg.token || '') : null, fp: tokenFingerprint(msg.token), canText: msg.text === true } : null;
+          setSelector(next);
           setSelBusy(false);
+          setPendingPick(null);
+          // The question was answered and its card is gone: say so, or nothing on screen tells the person it worked.
+          const done = answeredRef.current;
+          if (done && Date.now() - done.at < 8000) {
+            if (!next) {
+              answeredRef.current = null;
+              setAskToast('Answer sent to Claude');
+              setTimeout(() => setAskToast(''), 2600);
+            } else if (askCardKey(next) !== done.key) answeredRef.current = null; // the next question: it shows itself
+          }
         }
       } else if (msg.type === 'selectorKeyResult' && msg.id === tabId) {
         if (msg.ok) {
@@ -993,11 +1027,30 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           const tapped = tappedRef.current;
           setSelector((cur) => (cur && cur === tapped ? { ...cur, token: msg.token || '' } : cur));
         } else {
-          setSelNote(msg.stale ? 'The prompt changed before your tap landed. Nothing was sent, check the card again.' : 'Could not send that. Nothing was sent.');
-          setTimeout(() => setSelNote(''), 4000);
+          setPendingPick(null);
+          answeredRef.current = null;
+          showSelNote(msg.stale ? 'The prompt changed before your tap landed. Nothing was sent, check the card again.' : 'Could not send that. Nothing was sent.');
         }
         // Either way the server's follow-up read (or the next probe) re-arms it.
-        setTimeout(() => connection.send({ type: 'selectorSnapshot', id: tabId }), msg.ok ? 700 : 0);
+        setTimeout(() => connection.send({ type: 'selectorSnapshot', id: tabId }), msg.ok ? 450 : 0);
+      } else if (msg.type === 'selectorTextResult' && msg.id === tabId) {
+        const req = freeReqRef.current;
+        if (req && msg.reqId === req.reqId) {
+          freeReqRef.current = null;
+          setFreeBusy(false);
+          if (msg.ok) {
+            setFreeDraft('');
+            // A single-select answer goes in with Enter; a multi-select one is now a ticked box on the open card.
+            if (!req.multi) answeredRef.current = { key: req.key, at: Date.now() };
+          } else if (msg.uncertain) {
+            // The words may already sit in Claude's field: sending them again could put them in twice.
+            setFreeDraft('');
+            showSelNote('Your words went in, but Claude did not show them yet. Check the card before sending them again.');
+          } else {
+            setSelBusy(false);
+            showSelNote(msg.stale ? 'The question changed before your words went in. Nothing was sent.' : 'Could not send your answer. Nothing was sent.');
+          }
+        }
       } else if (msg.type === 'terminalText' && msg.id === tabId) {
         setShellText(typeof msg.text === 'string' ? msg.text : '');
       } else if (msg.type === 'opError' && msg.op === 'submitPrompt' && msg.id === tabId
@@ -1366,6 +1419,13 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       atBottomRef.current = true;
       return;
     }
+    // A question card is up (a Mac that answers its field): the words answer its "Type something" row, exactly as the
+    // card's own field does, and are never typed in as a message (Enter there picks whatever row is highlighted).
+    if (selector && selector.canText === true && askSteps(selector.steps)) {
+      if (askLayout(selector).free?.empty) { if (answerFree(selector, text)) setDraft(''); return; }
+      showSendNote('Claude is waiting on the question above. Answer it there, or tap ✕ to dismiss it first.');
+      return;
+    }
     // submitPrompt: the server bracketed-pastes the text, then presses Enter as
     // a DISCRETE keypress after the paste settles. Sending `text\r` in one
     // chunk made Claude's Ink TUI treat the \r as pasted newline, so messages
@@ -1483,35 +1543,75 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     connection.send({ type: 'submitPrompt', id: tabId, text: 'claude --continue', gen: w.gen });
   };
 
+  // Your own words into a question card's "Type something" row, through the Mac's checks (selectorText): a
+  // single-select card is answered with them, a multi-select one gets them as a ticked box. True when they went out.
+  const answerFree = (card, text, e = null) => {
+    const lay = askLayout(card);
+    if (!tabId || !card || !lay.free || selBusy || freeBusy || card.canText !== true || !card.token) return false;
+    if (text.length > 2000) { showSelNote('That answer is too long for the card. Keep it under 2000 characters.'); return false; }
+    if (!pressGuard.current.take(e, card)) { showSelNote('The prompt changed while you were tapping. Nothing was sent, check the card again.'); return false; }
+    const { token } = pressGuard.current.pressedCard(e, card);
+    if (!token) return false;
+    const w = writeGen();
+    if (!w.ok) { showSelNote('Still connecting to the Mac. Nothing was sent, try again in a moment.'); return false; }
+    const reqId = freshId('t');
+    freeReqRef.current = { reqId, key: askCardKey(card), multi: lay.multi };
+    setFreeBusy(true);
+    connection.send({ type: 'selectorText', id: tabId, num: lay.free.num, text, token, reqId, gen: w.gen });
+    // No answer at all (the connection dropped): the card comes back to life rather than spinning forever.
+    setTimeout(() => {
+      if (freeReqRef.current?.reqId !== reqId) return;
+      freeReqRef.current = null;
+      setFreeBusy(false);
+      showSelNote('No answer from the Mac yet. Check the card before sending again.');
+    }, 15000);
+    return true;
+  };
+
   // Selector popup + input row are shared by BOTH states below: a sessionless
   // tab that just ran `claude` immediately shows the trust-folder prompt, so
   // the selector buttons must work there too.
   const selectorPopup = selector && selector.options && selector.options.length > 0 && (() => {
     const steps = askSteps(selector.steps);
-    const cannotAnswer = selBusy || selector.token === '';
-    // Claude's escape hatches are its exact tail: "Type something." then
-    // optionally "Chat about this", last, with no description. Anything else
-    // that shares a label is a real answer (Codex, twice).
-    const opts = selector.options;
-    const isHatch = (o, label) => o && !o.detail && o.label.toLowerCase() === label;
-    let cut = opts.length;
-    if (isHatch(opts[cut - 1], 'chat about this') && isHatch(opts[cut - 2], 'type something.')) cut -= 2;
-    else if (isHatch(opts[cut - 1], 'type something.')) cut -= 1;
-    const main = selector.options.slice(0, cut);
-    const extra = selector.options.slice(cut);
-    const multi = selector.options.some((o) => MULTI_OPTION.test(o.label));
+    const cannotAnswer = selBusy || freeBusy || selector.token === '';
+    const lay = askLayout(selector);
+    const { multi } = lay;
     const onReview = steps && steps.current >= steps.total;
     // Armed for THIS card at THIS token: the token changes whenever anything
     // reaches the screen (moving to another question that reads the same,
     // a repaint), so the arming never carries over (Codex P1).
     const cardKey = `${selectorCardKey(selector)}|${selector.token ?? ''}`;
     const cancelArmed = cancelArmedKey === cardKey;
+    // This Mac answers the free row from the card's own field; an older one only takes the row's number.
+    const canText = selector.canText === true;
+    // The cursor sits in the free row's field: a number or an arrow sent now would be typed into the words.
+    const inField = !!lay.free && selector.options[selector.selectedIndex]?.num === lay.free.num;
+    const pending = pendingPick && pendingPick.key === askViewKey ? pendingPick : null;
+    const leaveField = (e) => {
+      if (sendSelector(selector, '\x1b[A', e)) showSelNote('Stepped out of the text field first. Tap your choice again.');
+    };
+    // A row: its number. In a multi-select question that ticks or unticks it and the card stays; otherwise it answers.
+    const tap = (opt, e, toggles = multi) => {
+      if (inField && canText) { leaveField(e); return; }
+      if (!sendSelector(selector, String(opt.num), e)) return;
+      if (selector.token == null) { setSelector(null); return; }
+      setPendingPick({ key: askViewKey, num: opt.num, checked: toggles ? !opt.checked : null });
+      if (!toggles) { atBottomRef.current = true; answeredRef.current = { key: askViewKey, at: Date.now() }; }
+    };
+    // A multi-select question's own Submit / Next: Claude's next question tab (the right arrow), or its review step.
+    const advance = (e) => {
+      if (inField && canText) { leaveField(e); return; }
+      if (sendSelector(selector, '\x1b[C', e)) setPendingPick({ key: askViewKey, num: 'advance', checked: null });
+    };
+    const sendFree = (e) => {
+      const text = freeDraft.trim();
+      if (text && !cannotAnswer) answerFree(selector, text, e);
+    };
     const cancel = (e) => {
       if (!cancelArmed) {
         // Arming is a press too: it must end on the card it began on (Codex P1).
         if (!pressGuard.current.take(e, selector)) {
-          setSelNote('The prompt changed while you were tapping. Nothing was sent, check the card again.');
-          setTimeout(() => setSelNote(''), 4000);
+          showSelNote('The prompt changed while you were tapping. Nothing was sent, check the card again.');
           return;
         }
         setCancelArmedKey(cardKey);
@@ -1521,12 +1621,58 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       setCancelArmedKey(null);
       sendSelectorKey(selector, '\x1b', true, e);
     };
+    const shownOn = (o) => (pending && pending.num === o.num && pending.checked !== null ? pending.checked : o.checked === true);
+    const row = (opt, label, detail) => {
+      const on = shownOn(opt);
+      const busyRow = pending?.num === opt.num;
+      return (
+        <button key={opt.num} type="button" className={`ask-opt${busyRow ? ' pending' : ''}${multi && on ? ' on' : ''}`}
+          disabled={cannotAnswer} role={multi ? 'checkbox' : undefined} aria-checked={multi ? on : undefined}
+          onClick={(e) => tap(opt, e)}>
+          {multi
+            ? <span className={`ask-box${on ? ' on' : ''}`} aria-hidden="true">{on && <CheckMark />}</span>
+            : <span className="ask-num" aria-hidden="true">{opt.num}</span>}
+          <span className="ask-opt-body">
+            <span className="ask-opt-label">{label}</span>
+            {detail && <span className="ask-opt-detail">{detail}</span>}
+          </span>
+          {busyRow && !multi && <span className="ask-spin" aria-hidden="true" />}
+        </button>
+      );
+    };
+    const free = lay.free;
+    let freeEl = null;
+    if (free && canText && free.empty) {
+      freeEl = (
+        <div className={`ask-free${freeBusy ? ' pending' : ''}`}>
+          {multi ? <span className="ask-box" aria-hidden="true" /> : <span className="ask-num ask-pen" aria-hidden="true">✎</span>}
+          <input
+            className="ask-free-input" value={freeDraft} maxLength={2000} enterKeyHint={multi ? 'done' : 'send'}
+            placeholder={multi ? 'Add your own' : 'Type your own answer'} aria-label="Your own answer"
+            disabled={selector.token === ''}
+            onChange={(e) => setFreeDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); sendFree(null); } }}
+          />
+          <button type="button" className="ask-free-send" disabled={cannotAnswer || !freeDraft.trim()}
+            aria-label={multi ? 'Add your answer' : 'Send your answer'} onClick={(e) => sendFree(e)}>
+            {freeBusy ? <span className="ask-spin" aria-hidden="true" /> : multi ? 'Add' : '↑'}
+          </button>
+        </div>
+      );
+    } else if (free && multi && !free.empty) {
+      freeEl = row({ num: free.num, checked: free.checked }, free.text, ''); // the words typed into it: a box like any other
+    } else if (free) {
+      // An older Mac: the number opens Claude's own field, and the words go in from the message box.
+      freeEl = row({ num: free.num, checked: free.checked }, 'Type your own answer', 'Then type it in the message box below');
+    }
     return (
       <div
-        className="ask-card"
-        key={selectorCardKey(selector)}
+        className={`ask-card${cannotAnswer ? ' busy' : ''}`}
+        key={askViewKey}
         onPointerDownCapture={(e) => pressGuard.current.pointerDown(e, selector)}
         onKeyDownCapture={(e) => {
+          // The free field's keys are typing, not presses on the card.
+          if (e.target instanceof HTMLInputElement) return;
           // A held Enter auto-repeats as clicks: it must never confirm the
           // cancel or re-answer by itself (Codex P1).
           if (e.repeat && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); return; }
@@ -1553,26 +1699,21 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         {onReview ? <AskReview text={selector.prompt || ''} /> : steps ? (
           <div className="ask-question">{selector.prompt || 'Claude is waiting for you to choose:'}</div>
         ) : <AskPrompt text={selector.prompt} />}
-        <div className="ask-options">
-          {main.map((opt) => (
-            <button key={opt.num} className="ask-opt" disabled={cannotAnswer} onClick={(e) => chooseOption(selector, opt.num, e)}>
-              <span className="ask-opt-label">{opt.label}</span>
-              {opt.detail && <span className="ask-opt-detail">{opt.detail}</span>}
-            </button>
-          ))}
+        {multi && !onReview && <div className="ask-hint">Choose any that apply, then {lay.action === 'Next' ? 'Next' : 'Submit'}.</div>}
+        <div className="ask-options" role={multi ? 'group' : undefined}>
+          {lay.main.map((opt) => row(opt, opt.label, opt.detail))}
+          {freeEl}
         </div>
-        {extra.length > 0 && (
-          <div className="ask-extra">
-            {extra.map((opt) => (
-              <button key={opt.num} className="ask-extra-opt" disabled={cannotAnswer} onClick={(e) => chooseOption(selector, opt.num, e)}>
-                {opt.label.replace(/\.$/, '')}
-              </button>
-            ))}
-          </div>
+        {multi && !onReview && (
+          <button type="button" className={`ask-primary${pending?.num === 'advance' ? ' pending' : ''}`} disabled={cannotAnswer} onClick={advance}>
+            {pending?.num === 'advance' ? <span className="ask-spin" aria-hidden="true" /> : (lay.action || 'Submit')}
+          </button>
         )}
-        {(askKeys || multi) && (
-          // Fine-control row: arrows/space for multiSelect movement + toggle,
-          // enter/esc to confirm/cancel, without leaving Chat. v1.0.53.
+        {lay.chat && (
+          <button type="button" className="ask-chat" disabled={cannotAnswer} onClick={(e) => tap(lay.chat, e, false)}>Chat about this instead</button>
+        )}
+        {askKeys && (
+          // Fine-control row: arrows, space, enter and esc, as the terminal has them.
           <div className="ask-keys">
             {SELECTOR_KEYS.map(([label, seq, closes]) => (
               <button key={label} className="ask-key" disabled={cannotAnswer} onClick={(e) => sendSelectorKey(selector, seq, closes, e)}>
@@ -1584,7 +1725,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         {cancelArmed && <div className="ask-note">Tap again to cancel Claude's question.</div>}
         {selNote && <div className="ask-note">{selNote}</div>}
         <div className="ask-foot">
-          {!multi && <button className="ask-link" onClick={() => setAskKeys((v) => !v)}>{askKeys ? 'Hide keys' : 'Keys'}</button>}
+          <button className="ask-link" onClick={() => setAskKeys((v) => !v)}>{askKeys ? 'Hide keys' : 'Keys'}</button>
           {onOpenTerminal && <button className="ask-link" onClick={onOpenTerminal}>Open terminal</button>}
         </div>
       </div>
@@ -1647,7 +1788,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     <PhoneCards pending={phone.pending} busy={cardBusy} note={cardNote} onAnswer={answerCard} />
   );
   // Claude's own prompts on the tab's screen mean nothing while the phone has it: the run's cards replace them.
-  const prompts = phoneOn ? phoneCards : selectorPopup;
+  const askToastEl = askToast && <div className="ask-toast" role="status"><CheckMark /> {askToast}</div>;
+  const prompts = phoneOn ? phoneCards : (selectorPopup || askToastEl);
   const moveSheetEl = moveSheet && (
     <div className="sheet-backdrop" onClick={() => { if (!moveSheet.busy) setMoveSheet(null); }}>
       <div className="sheet phone-sheet" role="dialog" aria-modal="true" aria-labelledby="phone-move-title" onClick={(e) => e.stopPropagation()}>
@@ -1720,10 +1862,12 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           }}
           placeholder={phoneOn
             ? (working ? 'Queue for after this turn...' : 'Message Claude...')
+            : selector?.canText === true && askLayout(selector).free?.empty
+            ? 'Or type your own answer...'
             : sessionId
             ? (tab && !tab.claudeLive
               ? 'Claude exited, to terminal...'
-              : tab?.status === 'working' ? 'Queue for after this turn...' : 'Message Claude...')
+              : working ? 'Queue for after this turn...' : 'Message Claude...')
             : 'Type into the terminal...'}
           rows={1}
         />

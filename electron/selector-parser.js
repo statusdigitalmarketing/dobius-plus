@@ -370,6 +370,9 @@ const SCREEN_HINT_RE = /Enter to (?:select|confirm)|Esc to cancel|to navigate/i;
 const SCREEN_RULE_RE = /^[\s─━-]{6,}$/;
 const SCREEN_CHROME_RE = /[☐☒]|^\s*←|^\s*→\s*$/;
 
+// A multi-select option's checkbox, as Claude Code draws it ("[ ] Cheese", "[✔] Cheese", older "☐"/"☒").
+const OPTION_BOX_RE = /^(\[[ x✓✔]\]|[☐☒])\s/;
+
 export function parseSelectorFromScreen(lines) {
   if (!Array.isArray(lines) || lines.length === 0) return null;
   // Liveness anchor, two forms:
@@ -448,6 +451,23 @@ export function parseSelectorFromScreen(lines) {
   for (let i = 0; i < options.length; i += 1) {
     if (options[i].num !== i + 1) return null;
   }
+  // A multi-select question (checkbox rows) draws its own button, "Submit" or "Next", unnumbered under its last
+  // checkbox row (the "Type something" row) and indented like a description (Claude Code 2.1.3xx, captured live). It
+  // is the question's button, not that row's description: a row reading "extra spicy Submit" never matched the words
+  // typed into it.
+  let action = null;
+  const lastBox = [...options].reverse().find((o) => OPTION_BOX_RE.test(o.label));
+  if (lastBox?.detail) {
+    const rows = lastBox.detail.split('\n');
+    const tail = rows[rows.length - 1].trim();
+    if (tail === 'Submit' || tail === 'Next') {
+      action = tail;
+      rows.pop();
+      detailEnds.get(lastBox)?.pop();
+      detailFirst.get(lastBox)?.pop();
+      if (rows.length) lastBox.detail = rows.join('\n'); else delete lastBox.detail;
+    }
+  }
   // The ❯ cursor row, read directly off the block's screen rows. It is
   // REQUIRED in every form: a real Claude Code selector always renders one,
   // and a numbered list in prose (even one followed by "Press Enter to
@@ -472,6 +492,7 @@ export function parseSelectorFromScreen(lines) {
   const opts = prose ? options.map((o) => (o.detail ? { ...o, detail: reflow(o.detail.split('\n'), detailEnds.get(o), frameW, null, detailFirst.get(o)) } : o)) : options;
   const out = { prompt: screenPrompt(lines, blockTop, prose, frameW), options: opts, selectedIndex: sel };
   if (steps) out.steps = steps;
+  if (action) out.action = action;
   // For selectorFingerprint only: the uncapped screen above the block, so two
   // same-worded prompts for different commands or edits never match. Not
   // enumerable, so it stays out of every JSON payload and card.

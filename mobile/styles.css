@@ -1020,24 +1020,75 @@ button.secondary:disabled { opacity: 0.4; }
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .ask-options { display: flex; flex-direction: column; }
+/* One row per answer: a number (single choice) or a box (choose any), then the label and its description. */
 .ask-opt {
-  display: flex; flex-direction: column; gap: 3px; text-align: left;
-  padding: 13px 6px; margin: 0 -6px; width: calc(100% + 12px);
-  background: transparent; border: 0; border-radius: 10px; color: var(--fg); cursor: pointer;
-  touch-action: manipulation;
+  display: flex; align-items: flex-start; gap: 12px; text-align: left;
+  padding: 12px 8px; margin: 0 -8px; width: calc(100% + 16px);
+  background: transparent; border: 0; border-radius: 12px; color: var(--fg); cursor: pointer;
+  touch-action: manipulation; transition: background-color 120ms ease;
 }
-.ask-opt + .ask-opt { border-top: 1px solid var(--border); border-radius: 0 0 10px 10px; }
+/* The line between rows is drawn inset, so a pressed row's rounded corners never bend it. */
+.ask-opt + .ask-opt, .ask-opt + .ask-free { position: relative; }
+.ask-opt + .ask-opt::before, .ask-opt + .ask-free::before {
+  content: ''; position: absolute; top: 0; left: 8px; right: 8px; height: 1px; background: var(--border);
+}
+.ask-opt + .ask-free::before { left: 0; right: 0; }
 .ask-opt:active { background: var(--surface-2); }
 .ask-opt:disabled { opacity: 0.5; }
+/* Waiting on the Mac's next read: the card stays readable; only taps pause. */
+.ask-card.busy .ask-opt:disabled, .ask-card.busy .ask-primary:disabled, .ask-card.busy .ask-chat:disabled { opacity: 1; cursor: default; }
+.ask-opt.pending { background: var(--accent-soft); }
+.ask-opt-body { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
 .ask-opt-label { font-size: 16px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
 .ask-opt-detail { font-size: 14px; color: var(--dim); line-height: 1.42; white-space: pre-wrap; overflow-wrap: anywhere; }
-.ask-extra { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--border); }
-.ask-extra-opt {
-  padding: 7px 13px; border: 1px solid var(--border); border-radius: 999px;
-  background: transparent; color: var(--dim); font-size: 13px; cursor: pointer;
+.ask-num {
+  flex-shrink: 0; width: 26px; height: 26px; margin-top: -2px; border-radius: 13px; display: flex; align-items: center; justify-content: center;
+  background: var(--surface-2); color: var(--dim); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums;
 }
-.ask-extra-opt:active { background: var(--surface-2); color: var(--fg); }
-.ask-extra-opt:disabled { opacity: 0.5; }
+.ask-pen { font-size: 14px; }
+.ask-box {
+  flex-shrink: 0; width: 24px; height: 24px; margin-top: -1px; border-radius: 7px; display: flex; align-items: center; justify-content: center;
+  border: 2px solid var(--dim); color: var(--on-accent); transition: background-color 120ms ease, border-color 120ms ease;
+}
+.ask-box.on { background: var(--accent); border-color: var(--accent); }
+.ask-hint { margin: -4px 0 6px; font-size: 13px; color: var(--dim); }
+/* Claude's "Type something" row, as a field in the card. */
+.ask-free { display: flex; align-items: center; gap: 12px; padding: 10px 0 8px; }
+.ask-free-input {
+  flex: 1; min-width: 0; height: 40px; padding: 0 12px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg); color: var(--fg); font-size: 16px; /* 16px: iOS zooms into a smaller field */
+}
+.ask-free-input:focus { outline: none; border-color: var(--accent); }
+.ask-free-send {
+  flex-shrink: 0; min-width: 40px; height: 40px; padding: 0 12px; border: 0; border-radius: 20px;
+  background: var(--accent); color: var(--on-accent); font-size: 16px; font-weight: 600; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.ask-free-send:disabled { opacity: 0.35; }
+.ask-free.pending .ask-free-send:disabled { opacity: 1; }
+.ask-primary {
+  margin-top: 10px; min-height: 46px; border: 0; border-radius: 14px; background: var(--accent); color: var(--on-accent);
+  font-size: 16px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.ask-primary:active { filter: brightness(0.92); }
+.ask-primary:disabled { opacity: 0.5; }
+.ask-chat { align-self: center; margin-top: 8px; padding: 8px 12px; border: 0; background: none; color: var(--dim); font-size: 14px; cursor: pointer; }
+.ask-chat:disabled { opacity: 0.5; }
+.ask-spin {
+  flex-shrink: 0; width: 16px; height: 16px; margin-top: 3px; border-radius: 50%;
+  border: 2px solid currentColor; border-right-color: transparent; animation: ask-spin 0.7s linear infinite;
+}
+.ask-free-send .ask-spin, .ask-primary .ask-spin { margin-top: 0; }
+@keyframes ask-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .ask-spin { animation-duration: 2s; } }
+/* The question was answered and its card went away: say it worked. */
+.ask-toast {
+  align-self: center; display: flex; align-items: center; gap: 6px; margin: 8px 10px 6px; padding: 8px 14px;
+  border-radius: 999px; background: var(--surface); border: 1px solid var(--border); color: var(--fg); font-size: 14px;
+  animation: ask-toast-in 180ms ease-out;
+}
+.ask-toast svg { color: var(--status-done); }
+@keyframes ask-toast-in { from { opacity: 0; transform: translateY(6px); } }
 .ask-keys { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .ask-key {
   flex: 1; min-width: 48px; padding: 8px 0; border: 1px solid var(--border); border-radius: 10px;

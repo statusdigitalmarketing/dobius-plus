@@ -7,7 +7,7 @@ import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, t
 import { parseSelector, parseSelectorFromScreen, stripAnsi, selectorFingerprint, selectorCountdown, spinnerStatus } from './selector-parser.js';
 export { selectorFingerprint };
 import { renderScreenLines, FILL } from './screen-render.js';
-import { FREE_TEXT_LABEL } from '../shared/chat-rows.js';
+import { FREE_TEXT_LABEL, optionMark } from '../shared/chat-rows.js';
 
 // The live selector for a tab, via the headless-xterm SCREEN render (v1.0.62).
 // The old strip-and-regex path missed Ink's incremental repaints entirely: on
@@ -369,8 +369,13 @@ let phoneTabFn = () => false;
 const onPhone = (id) => { try { return phoneTabFn(id) === true; } catch { return true; } };
 export function setPhoneTabCheck(fn) { phoneTabFn = typeof fn === 'function' ? fn : () => false; }
 
-export async function answerSelector(id, data, token, stillOk0 = () => true, beforeWrite = () => {}) {
-  if (typeof data !== 'string' || !data || data.length > 16 || typeof token !== 'string') return { ok: false };
+export function answerSelector(id, data, token, stillOk0 = () => true, beforeWrite = () => {}) {
+  return answerChecked(id, data, token, stillOk0, beforeWrite, 16);
+}
+
+// answerSelector with a longer `data` allowed: the free-text answer's own paste, when the cursor already sits on its row.
+async function answerChecked(id, data, token, stillOk0, beforeWrite, maxLen) {
+  if (typeof data !== 'string' || !data || data.length > maxLen || typeof token !== 'string') return { ok: false };
   if (onPhone(id)) return { ok: false, onPhone: true };
   const stillOk = () => !onPhone(id) && stillOk0();
   const [base, fp] = token.split('|');
@@ -442,6 +447,8 @@ export async function answerSelector(id, data, token, stillOk0 = () => true, bef
  */
 const FREE_TEXT_OPEN_MS = 2000;
 const FREE_TEXT_SHOW_MS = 1500;
+// The longest paste a free-text answer may write in one key (the words, at most 2000 characters from the phone).
+const FREE_TEXT_PASTE_MAX = 8192;
 const collapse = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
 export async function answerSelectorWithText(id, num, text, token, stillOk = () => true, beforeWrite = () => {}) {
   if (!Number.isInteger(num) || num < 1 || num > 9 || typeof text !== 'string' || typeof token !== 'string') return { ok: false };
@@ -455,12 +462,16 @@ export async function answerSelectorWithText(id, num, text, token, stillOk = () 
   if (!live || selectorFingerprint(live) !== fp) return { ok: false, stale: true };
   const freeLabel = String(optOf(live)?.label ?? '');
   const freeDetail = optOf(live)?.detail;
-  if (!FREE_TEXT_LABEL.test(freeLabel.trim())) return { ok: false, reason: 'not-free-text' };
+  if (!FREE_TEXT_LABEL.test(optionMark(freeLabel).text)) return { ok: false, reason: 'not-free-text' };
+  // A multi-select question draws its rows with checkboxes ("[ ] Type something"): words typed there check the row
+  // and Enter would uncheck it, so that card takes its own path below.
+  const multi = optionMark(freeLabel).checked !== null;
+  const rowText = (o) => (multi ? optionMark(o?.label).text : String(o?.label ?? ''));
   // The words as the row shows them: a long answer wraps onto indented rows, which the parser reads as the option's
   // detail. Compared with whitespace collapsed, or (a word cut at the edge) with none at all.
   const squash = (t) => String(t ?? '').replace(/\s+/g, '');
   const showsLine = (o) => {
-    const shown = `${o?.label ?? ''} ${o?.detail ?? ''}`;
+    const shown = `${rowText(o)} ${o?.detail ?? ''}`;
     return collapse(shown) === line || squash(shown) === squash(line);
   };
   // The card as it reads with words typed into the free row: everything else exactly as read.
@@ -473,11 +484,8 @@ export async function answerSelectorWithText(id, num, text, token, stillOk = () 
     });
     return selectorFingerprint(asRead) === fp;
   };
-  const r = await answerSelector(id, String(num), token, stillOk, beforeWrite);
-  if (!r?.ok) return r || { ok: false };
-  // Same PTY and nothing typed since our own key: the last thing in the tab is the number we pressed.
+  // Same PTY and nothing typed since our own key: the last thing in the tab is the key we pressed.
   const inputKey = () => { const pty = terminalInstance(id); return pty ? `${ptySerials.get(pty)}:${terminalInputSeq(id)}` : ''; };
-  const key0 = inputKey();
   const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
   // A read that counts: settled, and neither input nor output reached the tab while it was rendered.
   const readQuiet = async () => {
@@ -487,6 +495,75 @@ export async function answerSelectorWithText(id, num, text, token, stillOk = () 
     try { sel = await liveSelectorForTab(id); } catch { sel = null; }
     return sel && selectorToken(id) === tok ? { sel, out: terminalRawOutputSeq(id) } : null;
   };
+  // Multi-select (Claude Code 2.1.3xx, captured live): a number toggles its row WITHOUT moving the cursor, so the cursor
+  // is walked to the free row with arrows; words pasted there check it; Enter would uncheck it, so none is pressed; and
+  // while the cursor sits in the row every key (a number, an arrow) is typed into the words, so one up arrow leaves it.
+  // The first key goes through every answerSelector check; each later one only after a quiet read shows the same card
+  // with the cursor where the last key put it, written in that same tick. Returns { ok: true, checked: true } with the
+  // question still open, or a refusal ('uncertain' once the words may be in the row).
+  const answerMultiWithText = async () => {
+    const at = live.options.findIndex((o) => o?.num === num);
+    const from = live.selectedIndex;
+    if (!Number.isInteger(from) || from < 0 || Math.abs(at - from) > 9) return { ok: false, stale: true };
+    const step = Math.sign(at - from);
+    const arrow = step > 0 ? '\x1b[B' : '\x1b[A';
+    const paste = `\x1b[200~${line}\x1b[201~`;
+    const first = await answerChecked(id, step === 0 ? paste : arrow, token, stillOk, beforeWrite, FREE_TEXT_PASTE_MAX);
+    if (!first?.ok) return first || { ok: false };
+    let key = inputKey();
+    let pos = from + step; // where the cursor should be now
+    let pasted = step === 0;
+    let since = Date.now();
+    const gone = (reason) => (pasted ? { ok: false, reason, uncertain: true } : { ok: false, reason });
+    for (;;) {
+      await sleep(80);
+      if (!stillOk()) return gone('not_allowed');
+      if (inputKey() !== key || submitPending(id)) return gone('interrupted');
+      const read = await readQuiet();
+      if (read && inputKey() === key) {
+        const guard = () => stillOk() && inputKey() === key && terminalRawOutputSeq(id) === read.out;
+        if (!pasted) {
+          if (selectorFingerprint(read.sel) !== fp) return { ok: false, stale: true };
+          if (read.sel.selectedIndex === pos) {
+            const w = await writeRawInput(id, pos === at ? paste : arrow, guard);
+            if (!w?.ok) return { ok: false, reason: w?.reason || 'not_allowed' };
+            key = inputKey();
+            since = Date.now();
+            if (pos === at) pasted = true; else pos += step;
+            continue;
+          }
+        } else if (typedCard(read.sel) && optionMark(optOf(read.sel)?.label).checked === true) {
+          // The words are in and checked: the answer stands even if leaving the row is refused (a person typing).
+          if (at > 0) await writeRawInput(id, '\x1b[A', guard);
+          return { ok: true, checked: true };
+        }
+      }
+      if (Date.now() - since > (pasted ? FREE_TEXT_SHOW_MS : FREE_TEXT_OPEN_MS)) return pasted ? { ok: false, reason: 'stranded', uncertain: true } : { ok: false, reason: 'not-open' };
+    }
+  };
+  if (multi) return answerMultiWithText();
+  // The cursor already in the row (its input open): the number would be typed into it, so the words are the first
+  // key, through every answerSelector check, and Enter follows once the row shows them, in the tick of that read.
+  if (selected(live)) {
+    const first = await answerChecked(id, `\x1b[200~${line}\x1b[201~`, token, stillOk, beforeWrite, FREE_TEXT_PASTE_MAX);
+    if (!first?.ok) return first || { ok: false };
+    const key1 = inputKey();
+    const until = Date.now() + FREE_TEXT_SHOW_MS;
+    for (;;) {
+      await sleep(80);
+      if (!stillOk()) return { ok: false, reason: 'not_allowed', uncertain: true };
+      if (inputKey() !== key1 || submitPending(id)) return { ok: false, reason: 'interrupted', uncertain: true };
+      const shown = await readQuiet();
+      if (shown && inputKey() === key1 && typedCard(shown.sel)) {
+        const w = await writeRawInput(id, '\r', () => stillOk() && inputKey() === key1 && terminalRawOutputSeq(id) === shown.out);
+        return w?.ok ? { ok: true } : { ok: false, reason: 'stranded', uncertain: true };
+      }
+      if (Date.now() > until) return { ok: false, reason: 'stranded', uncertain: true };
+    }
+  }
+  const r = await answerSelector(id, String(num), token, stillOk, beforeWrite);
+  if (!r?.ok) return r || { ok: false };
+  const key0 = inputKey();
   const started = Date.now();
   for (;;) {
     await sleep(80);

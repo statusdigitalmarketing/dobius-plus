@@ -166,6 +166,9 @@
   flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%; display: inline-flex;
   align-items: center; justify-content: center; font-size: 11px; background: var(--surface); color: var(--dim);
 }
+.chatp-option-box { border-radius: 5px; background: transparent; border: 1.5px solid var(--dim); color: var(--on-accent, #fff); font-size: 12px; font-weight: 700; }
+.chatp-option-box.on { background: var(--accent); border-color: var(--accent); }
+.chatp-option-primary { justify-content: center; background: var(--accent); border-color: var(--accent); color: var(--on-accent, #fff); font-weight: 600; }
 .chatp-keys { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
 .chatp-key {
   background: var(--bg); border: 1px solid var(--border); color: var(--dim);
