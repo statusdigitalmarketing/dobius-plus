@@ -128,18 +128,20 @@ if [ "$BUMP" = resume ]; then
   # Main must still be this commit now that the tests are done, and the tag is pushed onto it BEFORE the build:
   # electron-builder names no target commit, so GitHub would otherwise tag whatever main is when the release is
   # created, which a push during the build could move (Codex). An existing tag wins over the default branch.
+  BUILD_SHA="$(git rev-parse HEAD)"
   GH_MAIN="$(github_main)" || exit 1
-  [ "$(git rev-parse HEAD)" = "$GH_MAIN" ] || { echo "ERROR: GitHub's main moved while the tests ran; run the resume again" >&2; exit 1; }
+  [ "$BUILD_SHA" = "$GH_MAIN" ] || { echo "ERROR: GitHub's main moved while the tests ran; run the resume again" >&2; exit 1; }
   # Created through the API, which refuses a tag that already exists: of two runs releasing one version (two resumes,
   # or a resume and a normal run), only one gets past here (Codex rounds 2 and 3). The local tag moves too: release-notes.mjs reads the range from it.
-  gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/tags/v$V" -f sha="$(git rev-parse HEAD)" >/dev/null \
+  gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/tags/v$V" -f sha="$BUILD_SHA" >/dev/null \
     || { echo "ERROR: could not create tag v$V on GitHub (another run may have created it); nothing was built" >&2; exit 1; }
-  git tag -f "v$V" HEAD >/dev/null
+  git tag -f "v$V" "$BUILD_SHA" >/dev/null
 else
   step "Version bump ($BUMP)"
   npm version "$BUMP"
   V="$(node -p "require('./package.json').version")"
   echo "version: $V"
+  BUILD_SHA="$(git rev-parse HEAD)"
 
   step "Push main first (tag lands on the right commit)"
   # --no-follow-tags: with push.followTags set, npm version's local tag would go up with main and the claim below would
@@ -147,7 +149,7 @@ else
   git push --no-follow-tags origin main
   # The same exclusive claim resume makes: the tag is created through the API (refused when it exists) before the
   # build, so a normal run and a resume of one version can never both build it (Codex round 3).
-  gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/tags/v$V" -f sha="$(git rev-parse HEAD)" >/dev/null \
+  gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/tags/v$V" -f sha="$BUILD_SHA" >/dev/null \
     || { echo "ERROR: could not create tag v$V on GitHub (another run may be releasing it); nothing was built" >&2; exit 1; }
 fi
 
@@ -156,6 +158,9 @@ npm run electron:build -- --publish always
 # The release is still a draft here. Refuse an app that lacks a production dependency (2.2.34 shipped without every
 # scoped package and died at launch): nobody can update to a draft, and an app that cannot start cannot update itself.
 node scripts/verify-packaged-deps.mjs "dist-electron/mac-universal/Dobius+.app/Contents/Resources/app.asar" || { echo "ERROR: the packaged app is incomplete; v$V stays a draft" >&2; exit 1; }
+# The build is of the tagged commit only if the checkout never moved: something else changing it during the build would
+# ship other code under this tag (Codex round 5). The release is still a draft here, so stopping costs nothing public.
+[ "$(git rev-parse HEAD)" = "$BUILD_SHA" ] && [ -z "$(git status --porcelain)" ] || { echo "ERROR: the checkout changed during the build; v$V stays a draft" >&2; exit 1; }
 # Everything below replaces files on the release, so it must still be this run's draft. electron-builder succeeds
 # without uploading when it finds the release already published (another run got there first), and re-uploading the
 # manifest and DMG onto that live release would pair them with the other run's zip (Codex round 2).
