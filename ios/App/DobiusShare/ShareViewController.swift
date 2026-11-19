@@ -17,7 +17,7 @@ final class ShareModel: ObservableObject {
     @Published var selected: String? { didSet { if selected != oldValue { shareId = UUID().uuidString } } }
     // Compared as sent (trimmed): a stray space must not turn a retry of the same share into a second paste.
     @Published var note = "" { didSet { if Self.sentNote(note) != Self.sentNote(oldValue) { shareId = UUID().uuidString } } }
-    nonisolated static func sentNote(_ s: String) -> String { clipUTF8(s.trimmingCharacters(in: .whitespacesAndNewlines), bytes: ShareClient.maxNoteBytes) }
+    nonisolated static func sentNote(_ s: String) -> String { normalizeNote(s) }
     @Published var payload: SharePayload?
     @Published var payloadProblem: String?
     @Published var listProblem: String?
@@ -107,10 +107,13 @@ final class ShareModel: ObservableObject {
     /// The image as a FILE: ImageIO reads the size and a thumbnail straight from disk, so a huge image is never loaded
     /// whole into the extension's memory (loadDataRepresentation would copy all of it first). The file lives only for
     /// the duration of the callback, so the work happens there.
-    private static func thumbnailFromFile(_ p: NSItemProvider) async -> (Data, UIImage)? {
+    private enum FileImage { case ok(Data, UIImage), unreadable, none }
+
+    private static func thumbnailFromFile(_ p: NSItemProvider) async -> FileImage {
         await withCheckedContinuation { cont in
             _ = p.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) { url, _ in
-                cont.resume(returning: url.flatMap { ImagePrep.fromURL($0) })
+                guard let url else { cont.resume(returning: .none); return }
+                if let out = ImagePrep.fromURL(url) { cont.resume(returning: .ok(out.0, out.1)) } else { cont.resume(returning: .unreadable) }
             }
         }
     }
@@ -124,7 +127,13 @@ final class ShareModel: ObservableObject {
     // Encoded bytes first (a file or data: ImageIO thumbnails it without a full decode); a UIImage (the screenshot
     // editor hands one over) is drawn down instead.
     private static func image(from p: NSItemProvider) async -> (Data, UIImage)? {
-        if let out = await thumbnailFromFile(p) { return out }
+        switch await thumbnailFromFile(p) {
+        case .ok(let d, let img): return (d, img)
+        // The file was there and too big or not an image: loading it another way would only pull it into memory.
+        case .unreadable: return nil
+        case .none: break
+        }
+        // No file form at all: what is left is an image object (the screenshot editor) or a URL.
         let item = await load(p, UTType.image)
         if let url = item as? URL { return ImagePrep.fromURL(url) }
         // Data the host app already holds in memory: bounded so a huge one is not decoded on top of it.

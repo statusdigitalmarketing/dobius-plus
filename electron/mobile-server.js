@@ -52,7 +52,9 @@ import { transcribeAudio, transcribeAvailable } from './voice-transcribe.js';
 import { getVapidPublicKey, subscribePush } from './push.js';
 import { isAbsPath, baseName } from '../shared/platform.js';
 import { stripControls } from './bridge-open-tab.js';
-import { mountShareRoutes, orderTargets } from './phone-share.js';
+import { mountShareRoutes, orderTargets, shareState } from './phone-share.js';
+// Receipts, pending ids and kept images outlive a server restart (certificate renewal) in the same process.
+const SHARE_STATE = shareState();
 
 // A transcript as one line of plain text: no escape sequence or control key (a Ctrl+C would interrupt the tab).
 const voiceLine = (t) => stripControls(t).slice(0, 4000).replace(/\s*\n\s*/g, ' ').trim();
@@ -1576,6 +1578,7 @@ async function doStartMobileServer(stillCurrent) {
 
   // Share sheet (docs/phone-share.md): before the json parser too, with its own auth-first raw parser.
   const shareRoutes = mountShareRoutes(expApp, {
+    state: SHARE_STATE,
     auth: bearerOk,
     targets: shareTargets,
     tabAlive: (id) => listTerminals().some((t) => t.id === id),

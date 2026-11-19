@@ -82,10 +82,18 @@ export function cleanNote(raw) {
  *   label(tabId) -> string
  *   now() -> ms (optional), deadlineMs (optional, tests)
  */
+/**
+ * What outlives one server: the phone server is restarted in place (HTTPS certificate renewal, port change) while tabs
+ * keep running, and a retry after the restart must still find its receipt. mobile-server keeps one for the process.
+ */
+export function shareState() {
+  return { busy: false, unsettled: 0, receipts: new Map(), pendingIds: new Set(), liveFiles: new Map() };
+}
+
 export function mountShareRoutes(app, deps) {
   const now = deps.now || Date.now;
-  let busy = false;
-  const receipts = new Map(); // shareId -> { at, status, body }
+  const st = deps.state || shareState();
+  const { receipts, pendingIds, liveFiles } = st; // receipts: shareId -> { at, status, body, fp }
   // The receipt of a delivery that has not settled is never evicted: it is the only thing stopping a second paste.
   // pendingIds is bounded by MAX_UNSETTLED, so this cannot grow past RECEIPTS_MAX + MAX_UNSETTLED.
   const prune = () => {
@@ -108,12 +116,9 @@ export function mountShareRoutes(app, deps) {
 
   // Ids whose delivery has not settled (past the deadline too): a retry of one is told it is still going, never run
   // again. Image files a delivery may still paste: the upload prune must not delete them (protectedFiles()).
-  const pendingIds = new Set();
   // file -> protected until (ms; Infinity while its delivery runs). A typed-but-unconfirmed paste may still be read by
   // Claude later, so its image stays a while after the delivery settles. ponytail: at most MAX_UNSETTLED running plus
   // KEPT_FILES_MAX settled entries (oldest dropped), so the protection itself can hold at most ~20 x 12 MB.
-  const liveFiles = new Map();
-  let unsettled = 0;
   const protectedFiles = () => {
     const t = now();
     const out = new Set();
@@ -155,15 +160,15 @@ export function mountShareRoutes(app, deps) {
     if (Number.isFinite(declared) && declared > cap) return res.status(413).json({ ok: false, error: kind === 'image' ? 'the image is too big' : 'the text is too long' });
     // busy: one share reads and starts at a time. unsettled: deliveries still running, past their deadline too (each one
     // holds an image and a receipt), so a run of hung deliveries cannot pile up.
-    if (busy || unsettled >= MAX_UNSETTLED) return res.status(429).json({ ok: false, error: 'another share is still being delivered; try again in a moment', reason: 'busy' });
-    busy = true;
+    if (st.busy || st.unsettled >= MAX_UNSETTLED) return res.status(429).json({ ok: false, error: 'another share is still being delivered; try again in a moment', reason: 'busy' });
+    st.busy = true;
     if (shareId) pendingIds.add(shareId);
     const claim = { released: false, delivering: false };
     req.shareClaim = claim;
     req.shareRelease = () => {
       if (claim.released) return;
       claim.released = true;
-      busy = false;
+      st.busy = false;
       if (!claim.delivering && shareId) pendingIds.delete(shareId);
     };
     // The body read can fail (aborted, too large) before the handler runs: the claim goes with the request.
@@ -215,14 +220,14 @@ export function mountShareRoutes(app, deps) {
       const labelOf = () => { try { return deps.label(req.shareTab); } catch { return ''; } };
       const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(null), deps.deadlineMs ?? DELIVER_DEADLINE_MS); });
       claim.delivering = true;
-      unsettled++;
+      st.unsettled++;
       if (req.shareFile) liveFiles.set(req.shareFile, Infinity);
       const allowed = () => { try { return !!deps.auth(req); } catch { return false; } };
       const delivery = Promise.resolve().then(() => deps.deliver(req.shareTab, message, req.shareFile ? [req.shareFile] : null, allowed));
       // Settled for real (possibly long after the deadline): the receipt then says what really happened, and only then
       // may a retry run. An image is kept a while when its paste may still be read (typed, or not known).
       delivery.then((r) => r, () => null).then((r) => {
-        unsettled--;
+        st.unsettled--;
         const b = r?.body || {};
         const typedMaybe = !b.ok && (b.typed || !r);
         if (req.shareFile) keepFile(req.shareFile, typedMaybe ? TYPED_KEEP_MS : 0);

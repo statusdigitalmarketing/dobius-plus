@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
-import { mountShareRoutes, orderTargets, shareMessage, cleanNote, imageKind, MAX_IMAGE_BYTES, MAX_TEXT_BYTES, SHARE_PREFIX } from '../phone-share.js';
+import { mountShareRoutes, shareState, orderTargets, shareMessage, cleanNote, imageKind, MAX_IMAGE_BYTES, MAX_TEXT_BYTES, SHARE_PREFIX } from '../phone-share.js';
 
 const TOKEN = 'a'.repeat(64);
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(32, 1)]);
@@ -346,4 +346,16 @@ test('a typed-but-unconfirmed image stays protected from the prune after the del
     assert.deepEqual([...s.routes.protectedFiles()], ['/tmp/up-1-share.png']);
     assert.deepEqual(s.calls.discarded, []);
   } finally { await s.close(); }
+});
+
+test('a receipt outlives a phone server restart that shares the process state', async () => {
+  const state = shareState();
+  const a = await server({ state });
+  try { assert.equal((await a.post('kind=text&tab=t1&id=keep-00001', 'x')).status, 200); } finally { await a.close(); }
+  const b = await server({ state });
+  try {
+    const again = await b.post('kind=text&tab=t1&id=keep-00001', 'x');
+    assert.equal((await again.json()).repeat, true);
+    assert.deepEqual(b.calls.delivered, []);
+  } finally { await b.close(); }
 });

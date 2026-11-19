@@ -79,6 +79,22 @@ func clipUTF8(_ text: String, bytes: Int) -> String {
     return out
 }
 
+/// The note as the Mac will keep it (electron/phone-share.js cleanNote): control and line/paragraph separators become
+/// spaces, every run of whitespace one space, trimmed, then clipped to fit the request line. Two notes that normalize
+/// the same are the same share.
+func normalizeNote(_ raw: String) -> String {
+    var out = ""
+    var space = false
+    for u in raw.unicodeScalars {
+        let blank = CharacterSet.whitespacesAndNewlines.contains(u) || CharacterSet.controlCharacters.contains(u)
+            || u.value == 0x2028 || u.value == 0x2029 || u.value == 0xFEFF || (0x80...0x9f).contains(u.value) // JS \s also matches U+FEFF
+        if blank { space = !out.isEmpty; continue }
+        if space { out.append(" "); space = false }
+        out.unicodeScalars.append(u)
+    }
+    return clipUTF8(out, bytes: ShareClient.maxNoteBytes)
+}
+
 /// The demo pairing App Review uses (mobile/demo.js): answered here, never sent anywhere.
 enum Demo {
     static let origin = "http://demo.dobius:8420"
@@ -162,7 +178,7 @@ final class ShareClient {
         case .text(let t): body = Data(t.utf8); kind = "text"
         }
         var query = [URLQueryItem(name: "kind", value: kind), URLQueryItem(name: "tab", value: tab), URLQueryItem(name: "id", value: shareId)]
-        let n = clipUTF8(note.trimmingCharacters(in: .whitespacesAndNewlines), bytes: Self.maxNoteBytes)
+        let n = normalizeNote(note)
         if !n.isEmpty { query.append(URLQueryItem(name: "note", value: n)) }
         var req = try request(pairing, path: "/share", query: query)
         req.httpMethod = "POST"
