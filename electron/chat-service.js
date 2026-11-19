@@ -7,7 +7,7 @@ import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, t
 import { parseSelector, parseSelectorFromScreen, stripAnsi, selectorFingerprint, selectorCountdown, spinnerStatus } from './selector-parser.js';
 export { selectorFingerprint };
 import { renderScreenLines, FILL } from './screen-render.js';
-import { FREE_TEXT_LABEL, optionMark, askLayout } from '../shared/chat-rows.js';
+import { FREE_TEXT_LABEL, FREE_TEXT_MAX, optionMark, askLayout } from '../shared/chat-rows.js';
 
 // The live selector for a tab, via the headless-xterm SCREEN render (v1.0.62).
 // The old strip-and-regex path missed Ink's incremental repaints entirely: on
@@ -476,7 +476,8 @@ async function answerChecked(id, data, token, stillOk0, beforeWrite, maxLen, own
  */
 const FREE_TEXT_OPEN_MS = 2000;
 const FREE_TEXT_SHOW_MS = 1500;
-// The longest paste a free-text answer may write in one key (the words, at most 2000 characters from the phone).
+// The longest paste a free-text answer may write in one key (FREE_TEXT_MAX characters, up to 4 bytes each, plus the
+// paste wrapper).
 const FREE_TEXT_PASTE_MAX = 8192;
 const collapse = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
 export async function answerSelectorWithText(id, num, text, token, stillOk = () => true, beforeWrite = () => {}) {
@@ -506,6 +507,7 @@ async function answerFreeText(id, num, text, token, stillOk, beforeWrite, state)
   // The row's own label as the answer (checked after control characters become spaces) would read as the empty row
   // again, and a second answer would add a copy (Codex, rounds 3 and 4).
   if (FREE_TEXT_LABEL.test(line)) return { ok: false, reason: 'bad_request' };
+  if (line.length > FREE_TEXT_MAX) return { ok: false, reason: 'too_large' };
   const fp = token.split('|')[1];
   const optOf = (sel) => (Array.isArray(sel?.options) ? sel.options.find((o) => o?.num === num) : null);
   const selected = (sel) => (Array.isArray(sel?.options) ? sel.options[sel.selectedIndex] : null)?.num === num;

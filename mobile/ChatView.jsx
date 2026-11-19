@@ -4,7 +4,7 @@ import SpecialKeys from './SpecialKeys';
 import Lightbox from './Lightbox';
 import remarkGfm from 'remark-gfm';
 import { pairingKey } from './pairings';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, askLayout, askCardKey, FREE_TEXT_LABEL, tokenFingerprint, createPressGuard, stepImages, createImageCache, stepSummary } from '../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, askLayout, askCardKey, FREE_TEXT_LABEL, FREE_TEXT_MAX, tokenFingerprint, createPressGuard, stepImages, createImageCache, stepSummary } from '../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 import { remarkCommandBoxes, CMD_TAG } from './command-blocks.js';
 import PhoneCards from './PhoneCards';
@@ -1674,7 +1674,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     // _suspect: a liveness probe after a wake, when the socket may be dead though it still reads open (Codex Medium).
     // A socket mid-close still reads authed until onclose, and would drop this unqueued message (Codex Medium, round 9).
     if (connection.status !== 'authed' || connection._suspect || connection.ws?.readyState !== 1) { showSelNote('Still connecting to the Mac. Nothing was sent, try again in a moment.'); return false; }
-    if (text.length > 2000) { showSelNote('That answer is too long for the card. Keep it under 2000 characters.'); return false; }
+    if (text.length > FREE_TEXT_MAX) { showSelNote(`That answer is too long for the card. Keep it under ${FREE_TEXT_MAX} characters.`); return false; }
     // Those exact words would read as the empty row again, and a second send would add them twice (Codex, round 3).
     if (FREE_TEXT_LABEL.test(text.trim())) { showSelNote('Type your own answer in your own words, not the row\'s label.'); return false; }
     if (!pressGuard.current.take(e, card)) { showSelNote('The prompt changed while you were tapping. Nothing was sent, check the card again.'); return false; }
@@ -1795,7 +1795,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         <div className={`ask-free${freeBusy ? ' pending' : ''}`}>
           {multi ? <span className="ask-box" aria-hidden="true" /> : <span className="ask-num ask-pen" aria-hidden="true">✎</span>}
           <input
-            className="ask-free-input" value={freeDraft} maxLength={2000} enterKeyHint={multi ? 'done' : 'send'}
+            className="ask-free-input" value={freeDraft} maxLength={FREE_TEXT_MAX} enterKeyHint={multi ? 'done' : 'send'}
             placeholder={multi ? 'Add your own' : 'Type your own answer'} aria-label="Your own answer"
             // Read-only while its answer is out: words typed now would be stranded when the row turns into a box
             // (Codex Medium, round 11).

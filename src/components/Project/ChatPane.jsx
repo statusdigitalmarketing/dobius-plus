@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/store';
 import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, askLayout, askCardKey, optionMark, tokenFingerprint, createPressGuard, stepImages, createImageCache, foldTurns } from '../../../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, askLayout, askCardKey, optionMark, FREE_TEXT_MAX, tokenFingerprint, createPressGuard, stepImages, createImageCache, foldTurns } from '../../../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../../../shared/chat-activity.js';
 import ModelMenu from './ModelMenu';
 import './ChatPane.css';
@@ -946,6 +946,7 @@ export default function ChatPane({ tabId, visible }) {
     const free = lf?.empty ? selector.options.find((o) => o.num === lf.num) : null;
     if (!free) { flash('Claude is waiting for you to pick one of the options above. Pick one, or press Stop to dismiss it and type.'); return; }
     if (!selector.token) { flash('One moment, the question is still updating. Try again.'); return; }
+    if (text.replace(/\s+/g, ' ').trim().length > FREE_TEXT_MAX) { flash(`That answer is too long for the question's field (${FREE_TEXT_MAX} characters at most). Shorten it, or press Stop to dismiss the question and send it as a message.`); return; }
     // The words answer only the card they were typed against (its fingerprint at the last edit): one that replaced it
     // since, even one reading the same, gets a look first (Codex High, round 3).
     const stamp = cardStamp(selector); // two question tabs can read the same

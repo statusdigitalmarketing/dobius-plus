@@ -204,6 +204,9 @@ export function tokenFingerprint(token) {
 // pressing its number opens an input in place, pasted text goes into it, Enter sends it as the answer. Chat sends typed
 // text through it while such a card is up (Asana 1220550214785317), never as a bare paste plus Enter, which would pick
 // whatever option is highlighted.
+// The longest answer in a question card's own field, from any client (Mac check, desktop and phone fields): one limit
+// for every path, so an answer never passes one path and fails another (Codex Low, round 13).
+export const FREE_TEXT_MAX = 2000;
 export const FREE_TEXT_LABEL = /^type something\.?$/i;
 export function freeTextOption(sel) {
   if (!sel || !Array.isArray(sel.options)) return null;

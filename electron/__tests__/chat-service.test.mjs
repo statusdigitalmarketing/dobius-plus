@@ -840,6 +840,9 @@ ok('own words answer only the Type something row, and Enter only once the card s
   const r9 = await readSelectorForAnswer('a');
   assert.deepEqual(await answerSelectorWithText('a', 3, ' type  Something ', r9.token), { ok: false, reason: 'bad_request' });
   assert.deepEqual(await answerSelectorWithText('a', 3, 'Type\u0000something', r9.token), { ok: false, reason: 'bad_request' }, 'after control characters become spaces');
+  const wb = writes.length;
+  assert.deepEqual(await answerSelectorWithText('a', 3, 'x'.repeat(2001), r9.token), { ok: false, reason: 'too_large' }, 'one length limit on every path');
+  assert.equal(writes.length, wb, 'nothing written for an answer over the limit');
   assert.deepEqual([...writes], []);
   // A plain numbered menu (no question tab bar) whose option reads "Type something": a real answer, never a field.
   const rule2 = '─'.repeat(80);
