@@ -41,6 +41,7 @@ function loadPhoneOutbox(base, tabId) {
 const cardStamp = (sel) => `${sel?.fp ?? ''}|${sel?.steps?.current ?? ''}`;
 // Question cards whose "Type something" field keeps its own unsent words (ChatView freeDrafts).
 const FREE_DRAFT_CARDS = 8;
+const SENT_TEXTS_MAX = 8;
 const LATE_TEXT_MAX = 4; // timed-out own-words answers still listened for
 const HISTORY_PAGE = 200;
 const HISTORY_MAX = 2000;
@@ -668,7 +669,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // selectorTexts the phone stopped waiting for (reqId -> request, the newest LATE_TEXT_MAX): a late refusal that
   // wrote nothing gives its words back.
   const lateReqRef = useRef(new Map());
-  const lastSendTextRef = useRef('');
+  // reqId -> text of the newest SENT_TEXTS_MAX chat sends: a guarded refusal of any of them gives its words back.
+  const sentTextsRef = useRef(new Map());
   const askViewKey = selector ? askCardKey(selector) : null;
   const freeDraft = (askViewKey && freeDrafts[askViewKey]) || '';
   const freeDraftsRef = useRef(freeDrafts);
@@ -1096,21 +1098,24 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         }
       } else if (msg.type === 'terminalText' && msg.id === tabId) {
         setShellText(typeof msg.text === 'string' ? msg.text : '');
+      } else if (msg.type === 'opError' && msg.op === 'submitPrompt' && msg.id === tabId && msg.reqId != null
+          && !msg.uncertain && (msg.code === 'prompt_open' || msg.code === 'screen_busy') && sentTextsRef.current.has(msg.reqId)) {
+        // Refused before anything was typed (a prompt on screen, or a screen too busy to check), for ANY recent send:
+        // the words come back to the message box (after whatever is there now, never instead of it) and their bubble
+        // goes (Codex Medium, rounds 9 and 10).
+        const back = sentTextsRef.current.get(msg.reqId);
+        sentTextsRef.current.delete(msg.reqId);
+        setDraft((cur) => (cur.trim() ? `${cur.trimEnd()} ${back}` : back));
+        setEchoes((cur) => { const i = cur.map((x) => x.content).lastIndexOf(back); return i < 0 ? cur : [...cur.slice(0, i), ...cur.slice(i + 1)]; });
+        setSendNote(SEND_REFUSED[msg.code]);
+        clearTimeout(sendNoteTimer.current);
+        sendNoteTimer.current = setTimeout(() => setSendNote(''), 6000);
       } else if (msg.type === 'opError' && msg.op === 'submitPrompt' && msg.id === tabId
           && msg.reqId != null && msg.reqId === lastSendRef.current) {
         // Macs from v1.0.88 answer a send that did not go through; older ones
         // dropped it without a word. Say so instead of leaving the echo bubble
         // looking delivered.
         const note = msg.uncertain ? SEND_UNCERTAIN : SEND_REFUSED[msg.code];
-        // Refused before anything was typed (a prompt on screen, or a screen too busy to check): the words come back
-        // to the message box, and their bubble goes (Codex Medium, round 9).
-        if (!msg.uncertain && (msg.code === 'prompt_open' || msg.code === 'screen_busy')) {
-          const back = lastSendTextRef.current;
-          if (back) {
-            setDraft((cur) => (cur.trim() ? cur : back));
-            setEchoes((cur) => { const i = cur.map((x) => x.content).lastIndexOf(back); return i < 0 ? cur : [...cur.slice(0, i), ...cur.slice(i + 1)]; });
-          }
-        }
         if (msg.code === 'stale_view' || msg.code === 'on_phone') connection.send(phoneStateRequest(tabId, echoesRef.current));
         if (note) {
           setSendNote(note);
@@ -1501,7 +1506,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     if (!w.ok) { showSendNote(NOT_READY); return; }
     const reqId = `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     lastSendRef.current = reqId;
-    lastSendTextRef.current = text;
+    sentTextsRef.current.set(reqId, text);
+    while (sentTextsRef.current.size > SENT_TEXTS_MAX) sentTextsRef.current.delete(sentTextsRef.current.keys().next().value);
     // guard: the Mac checks its screen for a question or permission prompt before typing, every time (the desktop
     // chat always has): the phone's own picture of the screen can be behind, and a paste plus Enter onto an unseen
     // prompt confirms its highlighted "Yes" (Codex Critical, rounds 8 and 9: any window of time had a hole).
