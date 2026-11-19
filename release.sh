@@ -29,6 +29,15 @@ REPO="statusdigitalmarketing/dobius-plus"
 IDENTITY="E95B5A61D673D466CCDA22615C9BF0F061BB9F2B"
 
 step() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
+# The commit GitHub's main is on right now, asked of GitHub itself: a local origin/main can be stale even after a fetch
+# (a fetch refspec that does not map main), and resume has no push to catch that (Codex round 4).
+github_main() {
+  local line
+  line="$(git ls-remote origin refs/heads/main)" || { echo "ERROR: could not ask GitHub where main is" >&2; return 1; }
+  line="${line%%[[:space:]]*}"
+  [ -n "$line" ] || { echo "ERROR: GitHub has no main branch" >&2; return 1; }
+  printf '%s' "$line"
+}
 
 step "Preflight"
 [ "$(git branch --show-current)" = "main" ] || { echo "ERROR: not on main" >&2; exit 1; }
@@ -96,7 +105,8 @@ node scripts/whats-new-check.mjs "$([ "$BUMP" = resume ] && echo current || echo
 if [ "$BUMP" = resume ]; then
   # Only a version a release run bumped and pushed, that never got a tag or a release (draft included).
   V="$(node -p "require('./package.json').version")"
-  [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "ERROR: resume releases what origin/main holds; push or drop local commits first" >&2; exit 1; }
+  GH_MAIN="$(github_main)" || exit 1
+  [ "$(git rev-parse HEAD)" = "$GH_MAIN" ] || { echo "ERROR: resume releases exactly what GitHub's main holds, and this checkout is not on it; pull, or push or drop local commits, first" >&2; exit 1; }
   # No -q: grep leaving early would SIGPIPE git log, and pipefail would read a match as a failure.
   git log --format=%s HEAD | grep -xF "$V" >/dev/null || { echo "ERROR: no version commit \"$V\" on main; resume only finishes a bumped version" >&2; exit 1; }
   # A lookup that fails stops the run: read as "absent", it would let a live release be overwritten (Codex).
@@ -118,8 +128,8 @@ if [ "$BUMP" = resume ]; then
   # Main must still be this commit now that the tests are done, and the tag is pushed onto it BEFORE the build:
   # electron-builder names no target commit, so GitHub would otherwise tag whatever main is when the release is
   # created, which a push during the build could move (Codex). An existing tag wins over the default branch.
-  git fetch -q origin main
-  [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "ERROR: origin/main moved while the tests ran; run the resume again" >&2; exit 1; }
+  GH_MAIN="$(github_main)" || exit 1
+  [ "$(git rev-parse HEAD)" = "$GH_MAIN" ] || { echo "ERROR: GitHub's main moved while the tests ran; run the resume again" >&2; exit 1; }
   # Created through the API, which refuses a tag that already exists: of two runs releasing one version (two resumes,
   # or a resume and a normal run), only one gets past here (Codex rounds 2 and 3). The local tag moves too: release-notes.mjs reads the range from it.
   gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/tags/v$V" -f sha="$(git rev-parse HEAD)" >/dev/null \
@@ -132,7 +142,9 @@ else
   echo "version: $V"
 
   step "Push main first (tag lands on the right commit)"
-  git push origin main
+  # --no-follow-tags: with push.followTags set, npm version's local tag would go up with main and the claim below would
+  # find it taken (Codex round 4).
+  git push --no-follow-tags origin main
   # The same exclusive claim resume makes: the tag is created through the API (refused when it exists) before the
   # build, so a normal run and a resume of one version can never both build it (Codex round 3).
   gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/tags/v$V" -f sha="$(git rev-parse HEAD)" >/dev/null \
