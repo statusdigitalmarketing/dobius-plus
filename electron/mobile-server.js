@@ -1535,11 +1535,14 @@ async function doStartMobileServer(stillCurrent) {
   // under a unique prefix so nothing is ever overwritten. Prunes entries older than 24h first (one readdir), so the dir
   // never grows unbounded. Throws on a write failure.
   // Share-sheet images are also capped (pruneUploads in phone-share.js); other uploads keep the 24 hour rule only.
-  const saveUpload = (body, rawName) => {
-    const safeName = path.basename(rawName).replace(/[^\w.@-]+/g, '_').slice(0, 80) || 'upload';
+  const saveUpload = (body, rawName, { share = false } = {}) => {
+    let safeName = path.basename(rawName).replace(/[^\w.@-]+/g, '_').slice(0, 80) || 'upload';
+    // Only the share route may name a file as a share image (those fall under the share cap); a chat upload that
+    // happens to be called that is renamed so the cap never touches it.
+    if (!share) safeName = safeName.replace(/dobius-share/gi, 'dobius_share');
     fs.mkdirSync(UPLOAD_DIR, { recursive: true });
     try {
-      pruneUploads(UPLOAD_DIR, { incoming: { name: rawName, size: body.length }, protectedFiles: shareRoutes?.protectedFiles() ?? new Set(),
+      pruneUploads(UPLOAD_DIR, { incoming: { name: safeName, size: body.length }, protectedFiles: shareRoutes?.protectedFiles() ?? new Set(),
         maxAgeMs: MAX_UPLOAD_AGE_MS, keepBytes: UPLOAD_KEEP_BYTES, keepFiles: UPLOAD_KEEP_FILES });
     } catch { /* prune is best-effort */ }
     const dest = path.join(UPLOAD_DIR, `up-${Date.now()}-${crypto.randomBytes(3).toString('hex')}-${safeName}`);
@@ -1564,7 +1567,7 @@ async function doStartMobileServer(stillCurrent) {
     auth: bearerOk,
     targets: shareTargets,
     tabAlive: (id) => listTerminals().some((t) => t.id === id),
-    saveImage: (buf, ext) => saveUpload(buf, `dobius-share.${ext}`),
+    saveImage: (buf, ext) => saveUpload(buf, `dobius-share.${ext}`, { share: true }),
     deliver: (tabId, message, images, allowed) => (shareDelivery ? shareDelivery(tabId, message, images, allowed) : Promise.resolve({ status: 503, body: { ok: false, error: 'Dobius is still starting; try again in a moment' } })),
     discard: (file) => { if (path.dirname(file) === UPLOAD_DIR) fs.rmSync(file, { force: true }); },
     label: (id) => configTabLabels().get(id) || parseTermLabel(id, '').label || 'that tab',
