@@ -20,6 +20,7 @@ final class ShareModel: ObservableObject {
     nonisolated static func sentNote(_ s: String) -> String { normalizeNote(s) }
     @Published var payload: SharePayload?
     @Published var payloadProblem: String?
+    @Published var payloadNotice: String?
     @Published var listProblem: String?
     @Published var loadingTargets = false
     @Published var phase: Phase = .loading
@@ -98,7 +99,9 @@ final class ShareModel: ObservableObject {
         }
         if let p = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) }),
            let text = await Self.load(p, UTType.plainText) as? String, !text.isEmpty {
-            payload = .text(clipUTF8(text, bytes: 30_000))
+            let clipped = clipUTF8(text, bytes: 30_000)
+            if clipped.count < text.count { payloadNotice = "Long text: only the first \(clipped.count) of \(text.count) characters will be sent." }
+            payload = .text(clipped)
             return
         }
         payloadProblem = "Dobius+ can send an image, text or a link."
@@ -227,6 +230,7 @@ struct ShareView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8)).accessibilityLabel("Image to send")
         case .text(let t):
             Text(t).font(.callout).lineLimit(4).foregroundColor(.secondary)
+            if let n = model.payloadNotice { Text(n).font(.footnote).foregroundColor(.orange) }
         case nil:
             if let p = model.payloadProblem { Text(p).foregroundColor(.red) } else { ProgressView() }
         }

@@ -12,6 +12,8 @@
 // refused with 429 without buffering it); body caps per kind; a receipt map of at most RECEIPTS_MAX entries for an
 // hour, so a retried Send (lost answer) is answered again instead of typed twice.
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
 
 export const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 export const MAX_TEXT_BYTES = 32 * 1024;
@@ -82,6 +84,36 @@ export function cleanNote(raw) {
  *   label(tabId) -> string
  *   now() -> ms (optional), deadlineMs (optional, tests)
  */
+/** A share-sheet image as saved in the upload folder (saveImage names them `dobius-share.<ext>`). */
+export const SHARE_FILE_RE = /(^|-)dobius-share\.(png|jpg|gif|webp)$/;
+
+/**
+ * Prunes the phone upload folder before a new file is written: anything older than maxAgeMs goes (the rule /upload
+ * always had). ponytail: share-sheet images are also capped at keepBytes / keepFiles, oldest first, so a day of shares
+ * can never fill the disk; other uploads (chat attachments that may sit in a draft) are never evicted by the cap, and a
+ * protected file (a share still being delivered or typed) is never touched. One readdir, at most a few hundred stats.
+ */
+export function pruneUploads(dir, { incoming, protectedFiles = new Set(), now = Date.now(), maxAgeMs, keepBytes, keepFiles }) {
+  const shares = [];
+  for (const f of fs.readdirSync(dir)) {
+    const fp = path.join(dir, f);
+    if (protectedFiles.has(fp)) continue;
+    try {
+      const st = fs.statSync(fp);
+      if (now - st.mtimeMs > maxAgeMs) fs.rmSync(fp, { force: true });
+      else if (st.isFile() && SHARE_FILE_RE.test(f)) shares.push({ fp, size: st.size, at: st.mtimeMs });
+    } catch { /* raced with another delete */ }
+  }
+  shares.sort((a, b) => a.at - b.at);
+  const isShare = !!incoming && SHARE_FILE_RE.test(incoming.name);
+  let total = shares.reduce((n, k) => n + k.size, 0) + (isShare ? incoming.size : 0);
+  let count = shares.length + (isShare ? 1 : 0);
+  for (const k of shares) {
+    if (total <= keepBytes && count <= keepFiles) break;
+    try { fs.rmSync(k.fp, { force: true }); total -= k.size; count -= 1; } catch { /* raced */ }
+  }
+}
+
 /**
  * What outlives one server: the phone server is restarted in place (HTTPS certificate renewal, port change) while tabs
  * keep running, and a retry after the restart must still find its receipt. mobile-server keeps one for the process.
@@ -235,7 +267,8 @@ export function mountShareRoutes(app, deps) {
           const fp = fingerprint(req.shareTab, req.shareKind, req.shareNote);
           if (b.ok) receipts.set(req.shareId, { at: now(), status: 200, fp, body: { ok: true, sent: true, label: labelOf() } });
           else if (b.typed) receipts.set(req.shareId, { at: now(), status: 200, fp, body: { ok: true, sent: false, typed: true, enterPressed: b.enterPressed === true, label: labelOf(), note: b.note || '' } });
-          // Refused late: nothing was typed, so the uncertain receipt stays (the phone was told to check the tab).
+          // Refused late: nothing was typed, so the uncertain receipt goes and the same share may be sent again.
+          else receipts.delete(req.shareId);
         }
         if (req.shareId) pendingIds.delete(req.shareId);
       });

@@ -52,7 +52,7 @@ import { transcribeAudio, transcribeAvailable } from './voice-transcribe.js';
 import { getVapidPublicKey, subscribePush } from './push.js';
 import { isAbsPath, baseName } from '../shared/platform.js';
 import { stripControls } from './bridge-open-tab.js';
-import { mountShareRoutes, orderTargets, shareState } from './phone-share.js';
+import { mountShareRoutes, orderTargets, shareState, pruneUploads } from './phone-share.js';
 // Receipts, pending ids and kept images outlive a server restart (certificate renewal) in the same process.
 const SHARE_STATE = shareState();
 
@@ -1534,31 +1534,13 @@ async function doStartMobileServer(stillCurrent) {
   // Saves one upload (the /upload and /share routes): basename-only, control/separator chars stripped, length-capped,
   // under a unique prefix so nothing is ever overwritten. Prunes entries older than 24h first (one readdir), so the dir
   // never grows unbounded. Throws on a write failure.
-  // ponytail: the folder is also capped at UPLOAD_KEEP_BYTES / UPLOAD_KEEP_FILES, oldest first, so a day of uploads can
-  // never fill the disk; with the file cap the sync readdir + stats stay a few hundred entries at most.
+  // Share-sheet images are also capped (pruneUploads in phone-share.js); other uploads keep the 24 hour rule only.
   const saveUpload = (body, rawName) => {
     const safeName = path.basename(rawName).replace(/[^\w.@-]+/g, '_').slice(0, 80) || 'upload';
     fs.mkdirSync(UPLOAD_DIR, { recursive: true });
     try {
-      const now = Date.now();
-      const kept = [];
-      for (const f of fs.readdirSync(UPLOAD_DIR)) {
-        const fp = path.join(UPLOAD_DIR, f);
-        // An image a share is still delivering is never pruned (its path is about to be pasted).
-        if (shareRoutes?.protectedFiles().has(fp)) continue;
-        try {
-          const st = fs.statSync(fp);
-          if (now - st.mtimeMs > MAX_UPLOAD_AGE_MS) fs.rmSync(fp, { force: true });
-          else if (st.isFile()) kept.push({ fp, size: st.size, at: st.mtimeMs });
-        } catch { /* raced */ }
-      }
-      kept.sort((a, b) => a.at - b.at);
-      let total = kept.reduce((n, k) => n + k.size, 0) + body.length;
-      let count = kept.length + 1;
-      for (const k of kept) {
-        if (total <= UPLOAD_KEEP_BYTES && count <= UPLOAD_KEEP_FILES) break;
-        try { fs.rmSync(k.fp, { force: true }); total -= k.size; count -= 1; } catch { /* raced */ }
-      }
+      pruneUploads(UPLOAD_DIR, { incoming: { name: rawName, size: body.length }, protectedFiles: shareRoutes?.protectedFiles() ?? new Set(),
+        maxAgeMs: MAX_UPLOAD_AGE_MS, keepBytes: UPLOAD_KEEP_BYTES, keepFiles: UPLOAD_KEEP_FILES });
     } catch { /* prune is best-effort */ }
     const dest = path.join(UPLOAD_DIR, `up-${Date.now()}-${crypto.randomBytes(3).toString('hex')}-${safeName}`);
     fs.writeFileSync(dest, body);
@@ -1582,7 +1564,7 @@ async function doStartMobileServer(stillCurrent) {
     auth: bearerOk,
     targets: shareTargets,
     tabAlive: (id) => listTerminals().some((t) => t.id === id),
-    saveImage: (buf, ext) => saveUpload(buf, `share.${ext}`),
+    saveImage: (buf, ext) => saveUpload(buf, `dobius-share.${ext}`),
     deliver: (tabId, message, images, allowed) => (shareDelivery ? shareDelivery(tabId, message, images, allowed) : Promise.resolve({ status: 503, body: { ok: false, error: 'Dobius is still starting; try again in a moment' } })),
     discard: (file) => { if (path.dirname(file) === UPLOAD_DIR) fs.rmSync(file, { force: true }); },
     label: (id) => configTabLabels().get(id) || parseTermLabel(id, '').label || 'that tab',

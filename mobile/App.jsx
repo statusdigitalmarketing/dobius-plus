@@ -414,7 +414,12 @@ export default function App() {
   }, []);
 
   // The share sheet's copy follows every change to the document, and is refreshed once at launch.
-  useEffect(() => { if (state) mirrorPairings(state); }, [state]);
+  // Queued behind any pairing save, and mirrors what is current WHEN it runs: a stale captured state written after a
+  // removal's own mirror would hand the extension the removed token again (Codex standard review).
+  useEffect(() => {
+    if (!state) return;
+    writes.current = writes.current.then(() => (stateRef.current ? mirrorPairings(stateRef.current) : true), () => true);
+  }, [state]);
 
   useEffect(() => {
     if (!state) return undefined;

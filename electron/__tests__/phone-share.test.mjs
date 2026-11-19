@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
-import { mountShareRoutes, shareState, orderTargets, shareMessage, cleanNote, imageKind, MAX_IMAGE_BYTES, MAX_TEXT_BYTES, SHARE_PREFIX } from '../phone-share.js';
+import { mountShareRoutes, shareState, pruneUploads, orderTargets, shareMessage, cleanNote, imageKind, MAX_IMAGE_BYTES, MAX_TEXT_BYTES, SHARE_PREFIX } from '../phone-share.js';
 
 const TOKEN = 'a'.repeat(64);
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(32, 1)]);
@@ -358,4 +358,40 @@ test('a receipt outlives a phone server restart that shares the process state', 
     assert.equal((await again.json()).repeat, true);
     assert.deepEqual(b.calls.delivered, []);
   } finally { await b.close(); }
+});
+
+test('a delivery refused after its deadline clears the unknown receipt, so the same share can be sent again', async () => {
+  let release;
+  let n = 0;
+  const s = await server({ deadlineMs: 20, deliver: () => { n++; return n === 1 ? new Promise((r) => { release = () => r({ status: 409, body: { ok: false, error: 'busy tab' } }); }) : Promise.resolve({ status: 200, body: { ok: true } }); } });
+  try {
+    assert.equal((await s.post('kind=text&tab=t1&id=refl-00001', 'x')).status, 504);
+    release();
+    await new Promise((r) => setTimeout(r, 10));
+    const again = await s.post('kind=text&tab=t1&id=refl-00001', 'x');
+    assert.equal(again.status, 200);
+    assert.equal(n, 2);
+  } finally { await s.close(); }
+});
+
+test('pruneUploads: the cap evicts old share images only; chat uploads keep the 24 hour rule; protected files stay', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-prune-'));
+  try {
+    const put = (name, ageMs) => { const fp = path.join(dir, name); fs.writeFileSync(fp, Buffer.alloc(10)); const t = (Date.now() - ageMs) / 1000; fs.utimesSync(fp, t, t); return fp; };
+    const chat = put('up-1-aaa-photo.jpg', 60_000);
+    const oldShare = put('up-2-bbb-dobius-share.jpg', 50_000);
+    const busy = put('up-3-ccc-dobius-share.png', 40_000);
+    const newShare = put('up-4-ddd-dobius-share.jpg', 1000);
+    const stale = put('up-0-eee-notes.txt', 25 * 3600 * 1000);
+    pruneUploads(dir, { incoming: { name: 'dobius-share.jpg', size: 10 }, protectedFiles: new Set([busy]), maxAgeMs: 24 * 3600 * 1000, keepBytes: 1e9, keepFiles: 2 });
+    assert.deepEqual(fs.readdirSync(dir).sort(), [path.basename(chat), path.basename(busy), path.basename(newShare)].sort());
+    assert.equal(fs.existsSync(oldShare), false);
+    assert.equal(fs.existsSync(stale), false);
+    // A chat upload never triggers or suffers the share cap.
+    pruneUploads(dir, { incoming: { name: 'photo.jpg', size: 10 }, maxAgeMs: 24 * 3600 * 1000, keepBytes: 1e9, keepFiles: 1 });
+    assert.equal(fs.existsSync(chat), true);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
