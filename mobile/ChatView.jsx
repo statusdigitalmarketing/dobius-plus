@@ -4,7 +4,7 @@ import SpecialKeys from './SpecialKeys';
 import Lightbox from './Lightbox';
 import remarkGfm from 'remark-gfm';
 import { pairingKey } from './pairings';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, askLayout, askCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache, stepSummary } from '../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, askLayout, askCardKey, FREE_TEXT_LABEL, tokenFingerprint, createPressGuard, stepImages, createImageCache, stepSummary } from '../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 import { remarkCommandBoxes, CMD_TAG } from './command-blocks.js';
 import PhoneCards from './PhoneCards';
@@ -36,6 +36,8 @@ function loadPhoneOutbox(base, tabId) {
 // Older messages load a page at a time when the reader reaches the top (Sam:
 // "when I scroll to the top I can't find older stuff"), never all at once.
 // The Mac caps one request at 2000 entries.
+// Question cards whose "Type something" field keeps its own unsent words (ChatView freeDrafts).
+const FREE_DRAFT_CARDS = 8;
 const HISTORY_PAGE = 200;
 const HISTORY_MAX = 2000;
 
@@ -646,27 +648,32 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // when the Mac's next reading of the screen arrives. freeDraft: the words in the card's "Type something" field.
   // answeredRef: a tap that may have finished the question ({ key, at }); the card going away after it shows askToast.
   const [pendingPick, setPendingPick] = useState(null);
-  const [freeDraft, setFreeDraft] = useState('');
+  // Per card (askCardKey), so words typed for one question never sit in another's field: { [key]: text }, newest last,
+  // at most FREE_DRAFT_CARDS cards (the oldest is dropped).
+  const [freeDrafts, setFreeDrafts] = useState({});
   const [freeBusy, setFreeBusy] = useState(false);
   const freeReqRef = useRef(null); // { reqId, key, multi } the selectorText in flight
   const answeredRef = useRef(null);
   const freeInputRef = useRef(null);
   // The card's fingerprint when its field was last edited: Enter in the field (no tap to bind) sends only to that card.
   const freeFpRef = useRef(null);
-  // A selectorText that timed out: if its answer turns up late and says the words went in, they are taken back out.
-  const lateReqRef = useRef(null);
   const [askToast, setAskToast] = useState('');
   const askViewKey = selector ? askCardKey(selector) : null;
-  // Another question: its field starts empty.
-  const freeDraftRef = useRef('');
-  freeDraftRef.current = freeDraft;
-  // Another card: words still in the old card's field go back to the message box (which never answers a card), so
-  // they are neither lost nor sitting in the new card's field as if typed for it.
-  useEffect(() => {
-    const left = freeDraftRef.current.trim();
-    if (left) setDraft((cur) => (cur.trim() ? cur : left));
-    setFreeDraft('');
-  }, [askViewKey]); // eslint-disable-line react-hooks/exhaustive-deps -- setDraft is stable per tab
+  const freeDraft = (askViewKey && freeDrafts[askViewKey]) || '';
+  // Words go only into the field of the card they belong to; a card that comes back (Back to an earlier question)
+  // finds its own. Never moved into the message box: words there could be sent again after they already went in.
+  const setFreeDraftFor = (key, next) => {
+    if (!key) return;
+    setFreeDrafts((all) => {
+      const cur = all[key] || '';
+      const v = typeof next === 'function' ? next(cur) : next;
+      const { [key]: _drop, ...rest } = all;
+      const keys = Object.keys(rest);
+      while (keys.length >= FREE_DRAFT_CARDS) delete rest[keys.shift()];
+      return v ? { ...rest, [key]: v } : rest;
+    });
+  };
+  const setFreeDraft = (next) => setFreeDraftFor(askViewKey, next);
   // Question card: the fine-control key row is folded away unless asked for
   // (or the prompt is a multi-select), and the close button needs a second
   // tap, because Esc cancels Claude's whole question.
@@ -1051,35 +1058,21 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         // Either way the server's follow-up read (or the next probe) re-arms it.
         setTimeout(() => connection.send({ type: 'selectorSnapshot', id: tabId }), msg.ok ? 450 : 0);
       } else if (msg.type === 'selectorTextResult' && msg.id === tabId) {
-        const late = lateReqRef.current;
-        if (late && msg.reqId === late.reqId) {
-          // Answered after the phone gave up and put the words back: if they went in, take the copy back out of
-          // wherever it sits now, or a second Send would put them in twice (Codex High, round 2).
-          lateReqRef.current = null;
-          if (msg.ok || msg.uncertain) {
-            const drop = (cur) => (cur.trim() === late.text ? '' : cur);
-            setFreeDraft(drop);
-            setDraft(drop);
-            showSelNote(msg.ok ? 'Your answer did go in.' : 'Your words went in, but Claude did not show them yet. Check the card before sending them again.');
-          }
-        }
         const req = freeReqRef.current;
         if (req && msg.reqId === req.reqId) {
           freeReqRef.current = null;
           setFreeBusy(false);
-          // Clear only the words that were sent: the field stays editable while the answer is in flight (Codex Medium).
-          const clearSent = () => setFreeDraft((cur) => (cur.trim() === req.text ? '' : cur));
+          // The field was emptied when the words went out; only a refusal the Mac guarantees wrote nothing puts them
+          // back, and only into the field of the card they were typed for.
           if (msg.ok) {
-            clearSent();
             // A single-select answer goes in with Enter; a multi-select one is now a ticked box on the open card.
             if (!req.multi) answeredRef.current = { key: req.key, at: Date.now(), confirmed: true };
           } else if (msg.uncertain) {
             // The words may already sit in Claude's field: sending them again could put them in twice.
-            clearSent();
             showSelNote('Your words went in, but Claude did not show them yet. Check the card before sending them again.');
           } else {
             setSelBusy(false);
-            restoreFree(req);
+            setFreeDraftFor(req.key, (cur) => (cur.trim() ? cur : req.text));
             showSelNote(msg.stale ? 'The question changed before your words went in. Nothing was sent.' : 'Could not send your answer. Nothing was sent.');
           }
         }
@@ -1465,12 +1458,12 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         requestAnimationFrame(() => { freeInputRef.current?.focus(); freeInputRef.current?.scrollIntoView?.({ block: 'nearest' }); });
         return;
       }
-      // An older Mac with the row's field open (its number was tapped): the words go in as typed, as they always did.
-      const oldMacField = selector.canText !== true && lay.free && selector.options[selector.selectedIndex]?.num === lay.free.num;
-      if (!oldMacField) {
-        showSendNote('Claude is waiting on the card above. Answer it there, or tap ✕ to dismiss it first.');
-        return;
-      }
+      // Any other card, and every card from an older Mac (whose answer to typed words is an unguarded paste and
+      // Enter that a permission prompt arriving first would take): never typed in (Codex Critical, round 3).
+      showSendNote(selector.canText === true
+        ? 'Claude is waiting on the card above. Answer it there, or tap ✕ to dismiss it first.'
+        : 'Claude is waiting on the card above. Answer it there or in the terminal, or tap ✕ to dismiss it first.');
+      return;
     }
     if (e && e.repeat) return;
     // submitPrompt: the server bracketed-pastes the text, then presses Enter as
@@ -1594,10 +1587,6 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     setAskToast('Answer sent to Claude');
     setTimeout(() => setAskToast(''), 2600);
   };
-  // Words the Mac refused (or never answered about) go back where they were typed, unless something new is there.
-  const restoreFree = (req) => {
-    if (req?.text) setFreeDraft((cur) => (cur.trim() ? cur : req.text));
-  };
 
   // Your own words into a question card's "Type something" row, through the Mac's checks (selectorText): a
   // single-select card is answered with them, a multi-select one gets them as a ticked box. True when they went out.
@@ -1608,14 +1597,17 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     // letting the connection drop it while the words vanish from the screen (Codex Medium).
     if (connection.status !== 'authed') { showSelNote('Still connecting to the Mac. Nothing was sent, try again in a moment.'); return false; }
     if (text.length > 2000) { showSelNote('That answer is too long for the card. Keep it under 2000 characters.'); return false; }
+    // Those exact words would read as the empty row again, and a second send would add them twice (Codex, round 3).
+    if (FREE_TEXT_LABEL.test(text.trim())) { showSelNote('Type your own answer in your own words, not the row\'s label.'); return false; }
     if (!pressGuard.current.take(e, card)) { showSelNote('The prompt changed while you were tapping. Nothing was sent, check the card again.'); return false; }
     const { token } = pressGuard.current.pressedCard(e, card);
     if (!token) return false;
     const w = writeGen();
     if (!w.ok) { showSelNote('Still connecting to the Mac. Nothing was sent, try again in a moment.'); return false; }
     const reqId = freshId('t');
-    freeReqRef.current = { reqId, key: askCardKey(card), multi: lay.multi, text };
-    lateReqRef.current = null;
+    const key = askCardKey(card);
+    freeReqRef.current = { reqId, key, multi: lay.multi, text };
+    setFreeDraftFor(key, ''); // out of the field as it goes, like a sent message
     setFreeBusy(true);
     connection.send({ type: 'selectorText', id: tabId, num: lay.free.num, text, token, reqId, gen: w.gen });
     // No answer at all (the connection dropped): the card comes back to life rather than spinning forever.
@@ -1623,10 +1615,9 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       const req = freeReqRef.current;
       if (req?.reqId !== reqId) return;
       freeReqRef.current = null;
-      lateReqRef.current = req;
       setFreeBusy(false);
-      restoreFree(req);
-      showSelNote('No answer from the Mac yet. Check the card before sending again.');
+      // Not put back: they may have gone in, and the answer to say so may never arrive.
+      showSelNote(`No answer from the Mac yet. Your words may have gone in: check the card before typing "${req.text.length > 40 ? `${req.text.slice(0, 40)}...` : req.text}" again.`);
     }, 15000);
     return true;
   };
@@ -1734,8 +1725,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     } else if (free && multi && !free.empty) {
       freeEl = row({ num: free.num, checked: free.checked }, free.text, ''); // the words typed into it: a box like any other
     } else if (free) {
-      // An older Mac: the number opens Claude's own field, and the words go in from the message box.
-      freeEl = row({ num: free.num, checked: free.checked }, 'Type your own answer', 'Then type it in the message box below');
+      // An older Mac: its free row only opens Claude's own field, so the words go in from the terminal.
+      freeEl = row({ num: free.num, checked: free.checked }, 'Type your own answer', 'Open the terminal to type it, or update Dobius+ on your Mac to type it here');
     }
     return (
       <div

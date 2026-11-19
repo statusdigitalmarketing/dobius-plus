@@ -513,6 +513,7 @@ export default function ChatPane({ tabId, visible }) {
   const [status, setStatus] = useState(null);
   const [activity, setActivity] = useState(null);
   const [selector, setSelector] = useState(null); // { prompt, options, token, fp }
+  const ownWordsFpRef = useRef(null); // the card's fingerprint when the message box was last edited
   // Which card each pointer / key press began on (see createPressGuard).
   const pressGuard = useRef(null);
   if (!pressGuard.current) pressGuard.current = createPressGuard();
@@ -931,6 +932,13 @@ export default function ChatPane({ tabId, visible }) {
     const free = freeTextOption(selector);
     if (!free) { flash('Claude is waiting for you to pick one of the options above. Pick one, or press Stop to dismiss it and type.'); return; }
     if (!selector.token) { flash('One moment, the question is still updating. Try again.'); return; }
+    // The words answer only the card they were typed against (its fingerprint at the last edit): one that replaced it
+    // since, even one reading the same, gets a look first (Codex High, round 3).
+    if (ownWordsFpRef.current !== selector.fp) {
+      ownWordsFpRef.current = selector.fp;
+      flash('The question changed since you typed. Check it, then press Enter again.');
+      return;
+    }
     const token = selector.token;
     setDraft('');
     setTabAttachments(tabId, []);
@@ -1335,12 +1343,12 @@ export default function ChatPane({ tabId, visible }) {
             value={draft}
             rows={1}
             placeholder={placeholder}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => { ownWordsFpRef.current = selector?.fp ?? null; setDraft(e.target.value); }}
             onPaste={onPaste}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
-                send();
+                if (!e.repeat) send(); // a held Enter sends once, never again onto whatever card comes next
               }
             }}
           />

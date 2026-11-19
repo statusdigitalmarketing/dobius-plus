@@ -827,6 +827,11 @@ ok('own words answer only the Type something row, and Enter only once the card s
   assert.deepEqual(writes.map((w) => w[1]), [PASTE('basil')], 'one paste only');
   buffers.set('a', card(3, 'basil')); emitOutput('a');
   assert.deepEqual(await firstOne, { ok: true, checked: true });
+  // The row's own label as the answer would read as the empty row again: refused before anything is written.
+  reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(3)); emitOutput('a');
+  const r9 = await readSelectorForAnswer('a');
+  assert.deepEqual(await answerSelectorWithText('a', 3, ' type  Something ', r9.token), { ok: false, reason: 'bad_request' });
+  assert.deepEqual([...writes], []);
   // A plain numbered menu (no question tab bar) whose option reads "Type something": a real answer, never a field.
   const rule2 = '─'.repeat(80);
   reset(); ptys.set('a', {}); cols.set('a', 80);

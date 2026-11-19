@@ -1249,3 +1249,21 @@
 - **FIX**: After writing, replace raw U+2028/2029 with escapes (`python3` replace) and `node --check` every new file.
 - **CONTEXT**: Any regex or string that names line/paragraph separators.
 - **DETECTION**: `grep -rlP '\x{2028}|\x{2029}' electron mobile shared scripts`
+
+### [Testing] - 2026-11-19
+- **MISTAKE**: Rebuilt dist-mobile (`npm run build:mobile`) while the isolated dev harness was running. Vite reloaded the harness renderer, which restarted every harness terminal ("previous session") and killed the real Claude being driven there, so a probe then typed its prompt into a bare shell.
+- **FIX**: After any mobile or renderer rebuild during a harness run, check the harness terminal (`hdrive.mjs screen`) and start Claude again before driving the phone. Also switch the harness window back to the Terminal view before typing into it (Chat view's scroll pane intercepts the click).
+- **CONTEXT**: Phone ship-tests against the harness phone server (8461). The web phone app reads pairings from plain localStorage `dobius-mobile-pairings-v1` (no `CapacitorStorage.` prefix, that is the iOS simulator's defaults key).
+- **DETECTION**: `node scratchpad/hdrive.mjs screen 3` shows "previous session" after a rebuild.
+
+### [Architecture] - 2026-11-19
+- **MISTAKE**: Routed the phone's message-box Send into a question card's "Type something" row. Three Codex rounds kept breaking every way of binding a message-box send to the right card (a held Send while the card is replaced, two questions that read the same, Enter key repeat, restored drafts rebinding), and a permission prompt that replaced the card got the paste and Enter.
+- **FIX**: The message box never answers or types into a card. With an empty free row it moves the words into the card's own field (sent by a tap, which the press guard binds to that card); with any other card up it refuses. Only an older Mac with the row's field already open still takes typed words, as before.
+- **CONTEXT**: Any input that is not part of the card itself has no press to bind to a card token. Keep card answers on the card.
+- **DETECTION**: `grep -n "answerFree(" mobile/ChatView.jsx` must show only the card's own field calling it.
+
+### [Architecture] - 2026-11-19
+- **MISTAKE**: The question card's React key included the checkbox marks and the fingerprint, so every tick remounted the card and reset its scroll (Sam: "it refreshes the whole thing then i have to scroll down").
+- **FIX**: `askCardKey` (shared/chat-rows.js) keys a multi-select card on its step, prompt and option labels without marks. Safety stays with the press guard and token, never the React key.
+- **CONTEXT**: Claude Code draws multi-select rows as `[ ] X` / `[✔] X`; a digit toggles without moving the cursor, Enter on the typed free row unchecks it, and while the cursor is in that row every key is typed into the words (verified live on 2.1.328).
+- **DETECTION**: `grep -n "askCardKey" mobile/ChatView.jsx src/components/Project/ChatPane.jsx`

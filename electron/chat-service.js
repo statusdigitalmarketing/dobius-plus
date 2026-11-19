@@ -387,7 +387,7 @@ const freeTextBusy = (id) => {
   if (freeTextPending.has(id)) return true;
   const hold = freeTextHold.get(id);
   if (!hold) return false;
-  if (hold.until > Date.now() && hold.pty === terminalInstance(id)) return true;
+  if (hold.pty === terminalInstance(id) && (hold.until > Date.now() || terminalRawOutputSeq(id) === hold.out)) return true;
   freeTextHold.delete(id);
   return false;
 };
@@ -473,6 +473,9 @@ const FREE_TEXT_PASTE_MAX = 8192;
 const collapse = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
 export async function answerSelectorWithText(id, num, text, token, stillOk = () => true, beforeWrite = () => {}) {
   if (freeTextBusy(id)) return { ok: false, stale: true, reason: 'busy' };
+  // The row's own label as the answer would read as the empty row again (a second answer would add a copy).
+  if (FREE_TEXT_LABEL.test(String(text ?? '').replace(/\s+/g, ' ').trim())) return { ok: false, reason: 'bad_request' };
+  const pty0 = terminalInstance(id);
   freeTextPending.add(id);
   let result = null;
   // Once words may have been written, a failure says so: they may be in Claude's field, and "not sent" invites a
@@ -485,7 +488,9 @@ export async function answerSelectorWithText(id, num, text, token, stillOk = () 
     result = { ok: false, reason: 'error', ...(state.pasted ? { uncertain: true } : {}) };
   } finally {
     freeTextPending.delete(id);
-    if (result?.uncertain) freeTextHold.set(id, { until: Date.now() + FREE_TEXT_HOLD_MS, pty: terminalInstance(id) });
+    // Ends after FREE_TEXT_HOLD_MS only once Claude has drawn anything since (a suspended Claude has consumed nothing
+    // and a fresh read would still show the empty row: Codex High, round 3), or when the tab gets a new terminal.
+    if (result?.uncertain) freeTextHold.set(id, { until: Date.now() + FREE_TEXT_HOLD_MS, pty: pty0, out: terminalRawOutputSeq(id) });
   }
   return result;
 }
