@@ -473,12 +473,10 @@ const SEND_REFUSED = {
   cancelled: 'Not sent: a cancel key dropped it.',
   on_phone: 'Not sent: this conversation is on your phone now. Send it again.',
   stale_view: 'Not sent: the tab changed since you looked. Check it and send again.',
-  prompt_open: 'Not sent: Claude is showing a question or permission prompt. Answer it first.',
-  screen_busy: 'Not sent: Claude\'s screen was changing too fast to check. Send it again in a moment.',
+  prompt_open: 'Not sent: Claude is showing a question or permission prompt. Answer it first, your words are back in the box.',
+  screen_busy: 'Not sent: Claude\'s screen was changing too fast to check. Your words are back in the box, send again in a moment.',
 };
-// After a card goes away, a send asks the Mac to check the screen for a prompt first (guard), for this long: another
-// prompt may already be up that the phone has not heard of yet.
-const CARD_GONE_GUARD_MS = 10000;
+
 // How long a phone mode request waits for the Mac's answer. A move stops the tab's Claude (up to 10 s) and waits for
 // the runner to start (up to 30 s), so it gets longer (electron/phone-mode.js STOP_MS, HELLO_MS).
 const PHONE_REPLY_MS = 15_000;
@@ -670,8 +668,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // selectorTexts the phone stopped waiting for (reqId -> request, the newest LATE_TEXT_MAX): a late refusal that
   // wrote nothing gives its words back.
   const lateReqRef = useRef(new Map());
-  const cardGoneAtRef = useRef(0);
-  const hadCardRef = useRef(false);
+  const lastSendTextRef = useRef('');
   const askViewKey = selector ? askCardKey(selector) : null;
   const freeDraft = (askViewKey && freeDrafts[askViewKey]) || '';
   const freeDraftsRef = useRef(freeDrafts);
@@ -1043,9 +1040,6 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           const sel = msg.selector && Array.isArray(msg.selector.options) ? msg.selector : null;
           // canText: this Mac answers the "Type something" row with the card's own field (selectorText).
           const next = sel ? { ...sel, token: 'token' in msg ? (msg.token || '') : null, fp: tokenFingerprint(msg.token), canText: msg.text === true } : null;
-          // Only a card going away starts the guarded window (an empty probe while none was up does not).
-          if (!next && hadCardRef.current) cardGoneAtRef.current = Date.now();
-          hadCardRef.current = !!next;
           setSelector(next);
           setSelBusy(false);
           setPendingPick(null);
@@ -1108,6 +1102,15 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         // dropped it without a word. Say so instead of leaving the echo bubble
         // looking delivered.
         const note = msg.uncertain ? SEND_UNCERTAIN : SEND_REFUSED[msg.code];
+        // Refused before anything was typed (a prompt on screen, or a screen too busy to check): the words come back
+        // to the message box, and their bubble goes (Codex Medium, round 9).
+        if (!msg.uncertain && (msg.code === 'prompt_open' || msg.code === 'screen_busy')) {
+          const back = lastSendTextRef.current;
+          if (back) {
+            setDraft((cur) => (cur.trim() ? cur : back));
+            setEchoes((cur) => { const i = cur.map((x) => x.content).lastIndexOf(back); return i < 0 ? cur : [...cur.slice(0, i), ...cur.slice(i + 1)]; });
+          }
+        }
         if (msg.code === 'stale_view' || msg.code === 'on_phone') connection.send(phoneStateRequest(tabId, echoesRef.current));
         if (note) {
           setSendNote(note);
@@ -1498,8 +1501,11 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     if (!w.ok) { showSendNote(NOT_READY); return; }
     const reqId = `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     lastSendRef.current = reqId;
-    const guard = Date.now() - cardGoneAtRef.current < CARD_GONE_GUARD_MS;
-    connection.send({ type: 'submitPrompt', id: tabId, text, reqId, gen: w.gen, ...(guard ? { guard: true } : {}) });
+    lastSendTextRef.current = text;
+    // guard: the Mac checks its screen for a question or permission prompt before typing, every time (the desktop
+    // chat always has): the phone's own picture of the screen can be behind, and a paste plus Enter onto an unseen
+    // prompt confirms its highlighted "Yes" (Codex Critical, rounds 8 and 9: any window of time had a hole).
+    connection.send({ type: 'submitPrompt', id: tabId, text, reqId, gen: w.gen, guard: true });
     setSendNote(''); // a refusal note is about the PREVIOUS send
     sentAtRef.current = Date.now();
     setEchoes((cur) => [...cur, { content: text, at: Date.now() }]);
@@ -1640,7 +1646,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     // selectorText is never queued across a reconnect (a stale answer must not land later): refuse it here instead of
     // letting the connection drop it while the words vanish from the screen (Codex Medium).
     // _suspect: a liveness probe after a wake, when the socket may be dead though it still reads open (Codex Medium).
-    if (connection.status !== 'authed' || connection._suspect) { showSelNote('Still connecting to the Mac. Nothing was sent, try again in a moment.'); return false; }
+    // A socket mid-close still reads authed until onclose, and would drop this unqueued message (Codex Medium, round 9).
+    if (connection.status !== 'authed' || connection._suspect || connection.ws?.readyState !== 1) { showSelNote('Still connecting to the Mac. Nothing was sent, try again in a moment.'); return false; }
     if (text.length > 2000) { showSelNote('That answer is too long for the card. Keep it under 2000 characters.'); return false; }
     // Those exact words would read as the empty row again, and a second send would add them twice (Codex, round 3).
     if (FREE_TEXT_LABEL.test(text.trim())) { showSelNote('Type your own answer in your own words, not the row\'s label.'); return false; }

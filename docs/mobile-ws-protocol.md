@@ -190,9 +190,10 @@ Claude's next question tab or, after the last one, its review step.
   `reqId: null`).
 - `selectorKey` may carry a `reqId` (string of at most 64, or a number); a Mac that has this echoes it on
   `selectorKeyResult`, so a reply is matched to its own tap.
-- `submitPrompt` may carry `guard: true` (the phone sets it for 10 s after a card went away): the Mac then checks the
-  screen first and refuses with `prompt_open` (a question or permission prompt is up) or `screen_busy` (the screen
-  never held still long enough to check), typing nothing. An older Mac ignores the flag.
+- `submitPrompt` may carry `guard: true` (the phone's Chat view sets it on every message, as the desktop chat always
+  checks): the Mac then checks the screen first and refuses with `prompt_open` (a question or permission prompt is up)
+  or `screen_busy` (the screen never held still long enough to check), typing nothing; the phone puts the words back
+  in the message box. An older Mac ignores the flag.
 - The phone's message box never answers a card. With a question's empty "Type something" row on screen, Send moves the
   words into the card's field; with any other card up, it says Claude is waiting on the card.
 
