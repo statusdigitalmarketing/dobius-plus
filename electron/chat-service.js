@@ -377,32 +377,31 @@ export function answerSelector(id, data, token, stillOk0 = () => true, beforeWri
 // ends: between its paste and the redraw that shows the words, a fresh read still shows the empty row, and a second
 // answer read then would paste its words in as well (Codex High). Entries live only while their answer runs.
 const freeTextPending = new Set();
-// Tabs whose last free-text answer ended with its words possibly in the field but not drawn (uncertain): the card it
-// answered (its fingerprint) is held, so nothing read off that still-empty card can paste the words again or type
-// into them (Codex High, rounds 2 to 4: every timer or output count let a second answer through, or held forever).
-// The hold ends when the card changes (the words showing change it), with a new terminal, or by Esc, which is always
-// let through. tab id -> { pty, fp }; at most one entry per tab id.
+// Tabs whose last free-text answer ended with its words possibly in the field but not drawn (uncertain). The QUESTION
+// is held (its tab, prompt and option numbers: holdKey), not a fingerprint: output above the card, a box ticked
+// elsewhere or a half-drawn frame all change the fingerprint while the words may still be on their way (Codex High,
+// rounds 2 to 7). While that question's free row still reads empty, nothing but Esc is written to it. It ends, on a
+// read that matched the live card, when the row shows anything (the words arrived), the question is another one, an
+// Esc onto it went through, or the tab has a new terminal. tab id -> { pty, key }; at most one entry per tab id.
 const freeTextHold = new Map();
-const freeTextBusy = (id, fp, data = '') => {
-  if (freeTextPending.has(id)) return true;
+const holdKey = (sel) => JSON.stringify([sel?.steps?.current ?? null, sel?.steps?.labels ?? null, String(sel?.prompt ?? ''),
+  (Array.isArray(sel?.options) ? sel.options : []).map((o) => o?.num)]);
+const freeTextBusy = (id) => freeTextPending.has(id);
+// `live` is a card the request just matched (never a failed or unsettled read): true when the hold refuses it.
+const holdRefuses = (id, live, data = '') => {
   const hold = freeTextHold.get(id);
   if (!hold) return false;
-  if (hold.pty !== terminalInstance(id)) { freeTextHold.delete(id); return false; }
-  // A token from another card is not held, but it does not end the hold either: only a request that then proves the
-  // LIVE card changed does (releaseHold), or a stale request would lift it (Codex High, round 5).
-  return hold.fp === fp && data !== '\x1b';
+  if (hold.pty !== terminalInstance(id) || holdKey(live) !== hold.key || !askLayout(live).free?.empty) {
+    freeTextHold.delete(id);
+    return false;
+  }
+  return data !== '\x1b';
 };
-// Called once a request has matched the live card: a different card than the held one, or an Esc onto it, ends it.
-const releaseHold = (id, fp, data = '') => {
-  const hold = freeTextHold.get(id);
-  if (hold && (hold.fp !== fp || data === '\x1b')) freeTextHold.delete(id);
-};
-const tokenFp = (token) => (typeof token === 'string' ? token.split('|')[1] || '' : '');
 
 // answerSelector with a longer `data` allowed (the free-text answer's own paste) and `own`: the caller IS the
 // free-text answer holding the tab.
 async function answerChecked(id, data, token, stillOk0, beforeWrite, maxLen, own) {
-  if (!own && freeTextBusy(id, tokenFp(token), data)) return { ok: false, stale: true };
+  if (!own && freeTextBusy(id)) return { ok: false, stale: true };
   if (typeof data !== 'string' || !data || data.length > maxLen || typeof token !== 'string') return { ok: false };
   if (onPhone(id)) return { ok: false, onPhone: true };
   const stillOk = () => !onPhone(id) && stillOk0();
@@ -452,7 +451,8 @@ async function answerChecked(id, data, token, stillOk0, beforeWrite, maxLen, own
     settled = true;
   }
   if (!settled || !live || selectorToken(id) !== now || submitPending(id) || !stillOk()) return { ok: false, stale: true };
-  releaseHold(id, fp, data);
+  if (!own && holdRefuses(id, live, data)) return { ok: false, stale: true };
+  if (data === '\x1b') freeTextHold.delete(id); // an Esc onto the held question cancels it
   beforeWrite();
   writeRawInput(id, data, stillOk);
   const next = selectorToken(id);
@@ -480,7 +480,7 @@ const FREE_TEXT_SHOW_MS = 1500;
 const FREE_TEXT_PASTE_MAX = 8192;
 const collapse = (t) => String(t ?? '').replace(/\s+/g, ' ').trim();
 export async function answerSelectorWithText(id, num, text, token, stillOk = () => true, beforeWrite = () => {}) {
-  if (freeTextBusy(id, tokenFp(token))) return { ok: false, stale: true, reason: 'busy' };
+  if (freeTextBusy(id)) return { ok: false, stale: true, reason: 'busy' };
   const pty0 = terminalInstance(id);
   freeTextPending.add(id);
   let result = null;
@@ -494,7 +494,7 @@ export async function answerSelectorWithText(id, num, text, token, stillOk = () 
     result = { ok: false, reason: 'error', ...(state.pasted ? { uncertain: true } : {}) };
   } finally {
     freeTextPending.delete(id);
-    if (result?.uncertain) freeTextHold.set(id, { pty: pty0, fp: tokenFp(token) });
+    if (result?.uncertain && state.key) freeTextHold.set(id, { pty: pty0, key: state.key });
   }
   return result;
 }
@@ -512,7 +512,8 @@ async function answerFreeText(id, num, text, token, stillOk, beforeWrite, state)
   let live = null;
   try { live = await liveSelectorForTab(id); } catch { live = null; }
   if (!live || selectorFingerprint(live) !== fp) return { ok: false, stale: true };
-  releaseHold(id, fp);
+  if (holdRefuses(id, live)) return { ok: false, stale: true, reason: 'busy' };
+  state.key = holdKey(live);
   const freeLabel = String(optOf(live)?.label ?? '');
   const freeDetail = optOf(live)?.detail;
   // Only an AskUserQuestion card (its tab bar parsed as `steps`): a plain menu can have a real option that reads

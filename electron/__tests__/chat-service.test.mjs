@@ -814,7 +814,13 @@ ok('own words answer only the Type something row, and Enter only once the card s
   assert.deepEqual(await answerSelectorWithText('a', 3, 'basil', held?.token || 'x|y'), { ok: false, stale: true, reason: 'busy' });
   assert.equal(writes.length, before, 'nothing written while held');
   assert.deepEqual(await answerSelector('a', '1', held.token), { ok: false, stale: true }, 'a tick is held too');
-  assert.equal((await answerSelector('a', '\x1b', held.token)).ok, true, 'Esc always goes through');
+  // Output above the card changes its fingerprint, not the question: still held.
+  buffers.set('a', `other output\r\n${card(3)}`); emitOutput('a');
+  const moved = await readSelectorForAnswer('a');
+  assert.ok(moved?.token && moved.token !== held.token);
+  assert.deepEqual(await answerSelectorWithText('a', 3, 'basil', moved.token), { ok: false, stale: true, reason: 'busy' });
+  assert.equal(writes.length, before, 'nothing written while held');
+  assert.equal((await answerSelector('a', '\x1b', moved.token)).ok, true, 'Esc always goes through');
   // While one answer is in progress, a second one (another phone, the desktop) is refused, with a fresh token too:
   // between the paste and the redraw, a read still shows the empty row, and its words would go in as well.
   reset(); ptys.set('a', {}); cols.set('a', 80); buffers.set('a', card(3)); emitOutput('a');

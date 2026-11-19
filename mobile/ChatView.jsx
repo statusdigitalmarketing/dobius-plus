@@ -1675,7 +1675,11 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     // This Mac answers the free row from the card's own field; an older one only takes the row's number.
     const canText = selector.canText === true;
     // The cursor sits in the free row's field: a number or an arrow sent now would be typed into the words.
-    const inField = !!lay.free && selector.options[selector.selectedIndex]?.num === lay.free.num;
+    // The free row is the one before "Chat about this" on a question card, filled or not: a single-select row holding
+    // typed words is no longer `lay.free`, and a number sent there would be typed into them (Codex Medium, round 7).
+    const chatAt = lay.chat ? selector.options.findIndex((o) => o?.num === lay.chat.num) : -1;
+    const freeNum = lay.free?.num ?? (selector.steps && chatAt > 0 ? selector.options[chatAt - 1]?.num : null);
+    const inField = freeNum != null && selector.options[selector.selectedIndex]?.num === freeNum;
     const pending = pendingPick && pendingPick.key === askViewKey ? pendingPick : null;
     const leaveField = (e) => {
       if (sendSelector(selector, '\x1b[A', e)) showSelNote('Stepped out of the text field first. Tap your choice again.');
@@ -1687,7 +1691,8 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       if (!sent) return;
       if (selector.token == null) { setSelector(null); return; }
       setPendingPick({ key: askViewKey, num: opt.num, checked: toggles ? !opt.checked : null });
-      if (!toggles) { atBottomRef.current = true; answeredRef.current = { key: askViewKey, at: Date.now(), reqId: sent }; }
+      // An older Mac's free row only opens Claude's field: nothing is answered yet, so no "sent" toast for it.
+      if (!toggles && opt.num !== freeNum) { atBottomRef.current = true; answeredRef.current = { key: askViewKey, at: Date.now(), reqId: sent }; }
     };
     // A multi-select question's own Submit / Next: Claude's next question tab (the right arrow), or its review step.
     const advance = (e) => {
@@ -1784,10 +1789,10 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
             <div className="ask-stepper">
               {/* Claude's own question tabs: left/right arrows move between them. */}
               <button className="ask-nav" aria-label="Previous question" disabled={cannotAnswer || steps.current === 0}
-                onClick={(e) => sendSelectorKey(selector, '\x1b[D', false, e)}>‹</button>
+                onClick={(e) => { if (inField && canText) leaveField(e); else sendSelectorKey(selector, '\x1b[D', false, e); }}>‹</button>
               <span className="ask-count">{onReview ? 'Review' : `${steps.current + 1} of ${steps.total}`}</span>
               <button className="ask-nav" aria-label="Next question" disabled={cannotAnswer || onReview}
-                onClick={(e) => sendSelectorKey(selector, '\x1b[C', false, e)}>›</button>
+                onClick={(e) => { if (inField && canText) leaveField(e); else sendSelectorKey(selector, '\x1b[C', false, e); }}>›</button>
             </div>
           ) : (
             <span className="ask-eyebrow">{steps?.labels[0] || promptParts(selector.prompt).tool || 'Claude needs your answer'}</span>

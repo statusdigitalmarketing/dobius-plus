@@ -58,6 +58,11 @@ function deliverDraft(tabId, update, notice) {
 const withUnsent = (text) => (cur) => (!cur ? text : cur.split('\n\n').includes(text) ? cur : `${cur}\n\n${text}`);
 // Tabs with an own-words card answer still going in (module level: it outlives a remounted pane).
 const answeringTabs = new Set();
+// tab id -> the card (fingerprint and question tab) the message box's words were last edited against. Per tab and
+// outside the pane, so a pane remounted while an answer was out reads the same binding the refusal clears (Codex High,
+// round 7). One entry per tab id ever opened in a chat pane, removed when the words are handed back or sent.
+const ownWordsStamps = new Map();
+const cardStamp = (sel) => (sel ? `${sel.fp}|${sel.steps?.current ?? ''}` : null);
 const NOT_SENT = 'Not sent. The tab was interrupted, closed or moved to another window.';
 const STRANDED = 'Other input reached the terminal while this was being sent, so Chat cannot tell whether it went through. Check the terminal.';
 const SELECTOR_POLL_MS = 2500;
@@ -513,7 +518,6 @@ export default function ChatPane({ tabId, visible }) {
   const [status, setStatus] = useState(null);
   const [activity, setActivity] = useState(null);
   const [selector, setSelector] = useState(null); // { prompt, options, token, fp }
-  const ownWordsFpRef = useRef(null); // the card's fingerprint when the message box was last edited
   // Which card each pointer / key press began on (see createPressGuard).
   const pressGuard = useRef(null);
   if (!pressGuard.current) pressGuard.current = createPressGuard();
@@ -936,9 +940,9 @@ export default function ChatPane({ tabId, visible }) {
     if (!selector.token) { flash('One moment, the question is still updating. Try again.'); return; }
     // The words answer only the card they were typed against (its fingerprint at the last edit): one that replaced it
     // since, even one reading the same, gets a look first (Codex High, round 3).
-    const stamp = `${selector.fp}|${selector.steps?.current ?? ''}`; // two question tabs can read the same
-    if (ownWordsFpRef.current !== stamp) {
-      ownWordsFpRef.current = stamp;
+    const stamp = cardStamp(selector); // two question tabs can read the same
+    if (ownWordsStamps.get(tabId) !== stamp) {
+      ownWordsStamps.set(tabId, stamp);
       flash('The question changed since you typed. Check it, then press Enter again.');
       return;
     }
@@ -955,14 +959,14 @@ export default function ChatPane({ tabId, visible }) {
       try { r = await window.electronAPI?.chatAnswerText?.(tabId, free.num, text, token); } catch (err) { console.warn('[chat] answer failed:', err?.message || err); r = null; }
       // The draft goes back whether or not this pane is still mounted (deliverDraft finds the pane showing the tab
       // now, else the saved draft); only the refreshes need this pane.
-      if (r?.ok) { revokeAll(imgs); if (mountedRef.current) refreshSoon(); }
+      if (r?.ok) { ownWordsStamps.delete(tabId); revokeAll(imgs); if (mountedRef.current) refreshSoon(); }
       // Pasted but not confirmed (stranded, or a write that may have landed): the words may already sit in Claude's
       // input, so handing them back would send them twice.
       else if (r?.reason === 'stranded' || r?.uncertain) { revokeAll(imgs); deliverDraft(tabId, (cur) => cur, STRANDED); }
       else {
         for (const a of imgs) deliverAttachment(tabId, a);
         // Words handed back are bound to no card: the next Enter on one asks for a look first (Codex High, round 6).
-        ownWordsFpRef.current = null;
+        ownWordsStamps.delete(tabId);
         deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, r?.stale ? 'That question changed. Nothing was sent, check it again.' : 'Not sent. Your answer is back in the box.');
       }
       // Sends stay on the card path until a settled read says what is on screen now (another card, a permission
@@ -1286,7 +1290,9 @@ export default function ChatPane({ tabId, visible }) {
             <div className="chatp-selector-title">{selector.prompt || 'Claude is waiting for you to choose:'}</div>
             {selector.options.map((opt) => {
               // A multi-select row draws a box, ticked or not, in place of Claude's "[ ]" / "[✔]" text.
-              const mark = optionMark(opt.label);
+              // Boxes only on a multi-select question; a single-select answer keeps its own text (Codex Low, round 7).
+              const lay = askLayout(selector);
+              const mark = lay.multi ? optionMark(opt.label) : { checked: null, text: opt.label };
               return (
                 <button type="button" key={opt.num} className="chatp-option" disabled={!selector.token} onClick={(e) => chooseOption(opt.num, e)}
                   role={mark.checked !== null ? 'checkbox' : undefined} aria-checked={mark.checked !== null ? mark.checked : undefined}>
@@ -1294,7 +1300,7 @@ export default function ChatPane({ tabId, visible }) {
                     ? <span className="chatp-option-num">{opt.num}</span>
                     : <span className={`chatp-option-num chatp-option-box${mark.checked ? ' on' : ''}`} aria-hidden="true">{mark.checked ? '\u2713' : ''}</span>}
                   <span className="chatp-option-text">
-                    {mark.checked !== null && /^type something\.?$/i.test(mark.text) ? 'Type your own answer in the box below' : mark.text}
+                    {lay.free?.empty && opt.num === lay.free.num ? 'Type your own answer in the box below' : mark.text}
                     {opt.detail && <span className="chatp-option-detail">{opt.detail}</span>}
                   </span>
                 </button>
@@ -1348,7 +1354,7 @@ export default function ChatPane({ tabId, visible }) {
             value={draft}
             rows={1}
             placeholder={placeholder}
-            onChange={(e) => { ownWordsFpRef.current = selector ? `${selector.fp}|${selector.steps?.current ?? ''}` : null; setDraft(e.target.value); }}
+            onChange={(e) => { ownWordsStamps.set(tabId, cardStamp(selector)); setDraft(e.target.value); }}
             onPaste={onPaste}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
