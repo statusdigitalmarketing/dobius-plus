@@ -677,3 +677,18 @@ test('a tab whose conversation is on the phone: refused before anything is typed
   assert.equal(b.t.submitted, 0);
   assert.equal(asked, 2);
 });
+
+test('allowed(): a sender revoked before the paste types nothing; revoked after it, Enter is never pressed', async () => {
+  const a = fakeTab();
+  const r1 = await sendToTab(a.deps, 'tab', BRIEF, { claudeOnly: true, allowed: () => false });
+  assert.equal(r1.status, 403);
+  assert.equal(r1.body.reason, 'revoked');
+  assert.equal(a.t.pasted, null);
+  const b = fakeTab();
+  const r2 = await sendToTab(b.deps, 'tab', BRIEF, { claudeOnly: true, allowed: () => b.t.pasted === null });
+  assert.equal(r2.body.typed, true);
+  assert.equal(r2.body.ok, false);
+  assert.equal(b.t.submitted, 0);
+  const c = fakeTab();
+  assert.equal((await sendToTab(c.deps, 'tab', BRIEF, { claudeOnly: true, allowed: () => true })).body.ok, true);
+});

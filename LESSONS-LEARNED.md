@@ -1231,3 +1231,21 @@
 - **FIX**: Identify the phone by what is LIVE: the peer whose LastSeen matches the restart, or the source IP of a connection to :8420 (`lsof -nP -iTCP:8420`). Then split network from name with two Safari tests: `https://<magicname>:8420/health` and `http://<tailnet ip>:8420/health`. IP works but name fails = phone-side DNS (Private Relay, another VPN/DNS profile); workaround is Change Mac Address to `<tailnet ip>:8420`.
 - **CONTEXT**: Sam travelling, phone off-LAN. The Mac side (server, cert, Tailscale) was healthy throughout; nothing reached the Mac until the IP address was used.
 - **DETECTION**: `/Applications/Tailscale.app/Contents/MacOS/Tailscale status --json | python3 -I -c "import sys,json;[print(p['DNSName'].split('.')[0],p['Online'],p.get('LastSeen')) for p in json.load(sys.stdin)['Peer'].values() if p.get('OS')=='iOS']"`
+
+### [Configuration] - 2026-11-19
+- **MISTAKE**: Gave the new iOS Share Extension `NSAllowsLocalNetworking` plus the app's `ts.net` exception, expecting it to reach a Mac paired at a tailnet IP. Every request failed: `Cannot start load ... since it does not conform to ATS policy`, NSURLErrorDomain -1022. The app itself never hit this because its WKWebView runs under `NSAllowsArbitraryLoadsInWebContent`, which does not apply to native URLSession calls.
+- **FIX**: The extension's Info.plist sets `NSAllowsArbitraryLoads` and NOT `NSAllowsLocalNetworking` (its presence makes iOS ignore arbitrary loads). The extension only connects to origins from the app's own pairing list. Sam's phone is paired at `<tailnet ip>:8420` (see 2026-11-17), so this is his real setup, not an edge case.
+- **CONTEXT**: No ATS exception can name an IP literal, and 100.64/10 tailnet addresses are not "local networking". Codex flagged it in the design audit; the simulator confirmed it.
+- **DETECTION**: `xcrun simctl spawn booted log show --last 5m --predicate 'process == "DobiusShare"' | grep -i "ATS policy"`
+
+### [Architecture] - 2026-11-19
+- **MISTAKE**: Planned to deliver a shared image by pasting its path into Claude with sendToTab unchanged. Claude Code replaces a pasted image path on its own line with `[Image #N]` and moves it to the FRONT of the box (`[Image #1][shared from the phone] look`), so boxHoldsMessage never saw its own message and Enter was never pressed (Codex design audit, High).
+- **FIX**: sendToTab takes `images` (the paths it pasted on purpose); boxIsMessage then also accepts exactly one marker per path plus the message minus those paths. A send that names no image is matched exactly as before. A path glued to text on the same line (`look /tmp/x.png`) is NOT converted: keep it on its own line.
+- **CONTEXT**: Verified live with a real `claude` in a pty (no tokens: paste, read the box, Ctrl+C) and end to end in the harness. Any feature pasting files into Claude must account for the conversion.
+- **DETECTION**: `grep -n "images" electron/tab-send.js electron/bridge-open-tab.js`
+
+### [Build] - 2026-11-19
+- **MISTAKE**: Writing ` ` inside a regex in a new file with the Write tool produced a raw U+2028 character, and `node --check` failed with "Invalid regular expression: missing /" (the NOTES 2026-11-10 trap, hit through the tool, not by typing it).
+- **FIX**: After writing, replace raw U+2028/2029 with escapes (`python3` replace) and `node --check` every new file.
+- **CONTEXT**: Any regex or string that names line/paragraph separators.
+- **DETECTION**: `grep -rlP '\x{2028}|\x{2029}' electron mobile shared scripts`

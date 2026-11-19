@@ -24,6 +24,11 @@ const SELF = fileURLToPath(import.meta.url);
 const ROOT = path.resolve(path.dirname(SELF), '..');
 const BUNDLE_ID = 'com.statusdigital.dobiusplus';
 const TEAM_ID = 'Z349CC556Z';
+// Every bundle in the IPA: the app, and the share-sheet extension inside it (docs/phone-share.md). The extension shares
+// the paired Macs with the app through one Keychain group.
+const SHARE_BUNDLE_ID = `${BUNDLE_ID}.share`;
+const BUNDLES = [{ id: BUNDLE_ID, name: 'Dobius', push: true }, { id: SHARE_BUNDLE_ID, name: 'Dobius Share', push: false, appex: 'DobiusShare.appex' }];
+const SHARED_KEYCHAIN_GROUP = `${TEAM_ID}.${BUNDLE_ID}.shared`;
 const PROCESSING_TIMEOUT_MS = 45 * 60_000;
 const POLL_MS = 30_000;
 const MIN = 60_000;
@@ -331,8 +336,29 @@ async function verifyIpa(ipa, marketing, buildNo, work) {
   if (ent['get-task-allow'] === true) problems.push('get-task-allow is on (a development signature)');
   if (ent['com.apple.developer.team-identifier'] !== TEAM_ID) problems.push(`team ${ent['com.apple.developer.team-identifier']}`);
   if (ent['application-identifier'] !== `${TEAM_ID}.${BUNDLE_ID}`) problems.push(`application-identifier ${ent['application-identifier']}`);
+  // The share sheet (docs/phone-share.md): the app writes the paired Macs into this group and the extension reads them,
+  // so both signatures and both Info.plists must name it, or sharing silently finds no Mac.
+  const groupOk = (e, who) => { if (!(e['keychain-access-groups'] || []).includes(SHARED_KEYCHAIN_GROUP)) problems.push(`${who} is not signed for the Keychain group ${SHARED_KEYCHAIN_GROUP}`); };
+  groupOk(ent, 'the app');
+  if (info.DobiusKeychainGroup !== SHARED_KEYCHAIN_GROUP) problems.push(`the app's DobiusKeychainGroup is ${info.DobiusKeychainGroup}`);
+  for (const b of BUNDLES.filter((x) => x.appex)) {
+    const appex = path.join(app, 'PlugIns', b.appex);
+    if (!fs.existsSync(appex)) { problems.push(`${b.appex} is missing from the app`); continue; }
+    const xi = plistJson(path.join(appex, 'Info.plist'));
+    if (xi.CFBundleIdentifier !== b.id) problems.push(`${b.appex} bundle id ${xi.CFBundleIdentifier}`);
+    if (xi.CFBundleShortVersionString !== marketing || String(xi.CFBundleVersion) !== String(buildNo)) problems.push(`${b.appex} version ${xi.CFBundleShortVersionString} (${xi.CFBundleVersion})`);
+    if (xi.DobiusKeychainGroup !== SHARED_KEYCHAIN_GROUP) problems.push(`${b.appex} DobiusKeychainGroup is ${xi.DobiusKeychainGroup}`);
+    // Its own executable, so App Store Connect wants its own privacy manifest (it reads UserDefaults).
+    if (!fs.existsSync(path.join(appex, 'PrivacyInfo.xcprivacy'))) problems.push(`${b.appex} has no PrivacyInfo.xcprivacy`);
+    const xf = path.join(work, `entitlements-${b.id}.plist`);
+    fs.writeFileSync(xf, read('codesign', ['-d', '--entitlements', '-', '--xml', appex]));
+    const xe = plistJson(xf);
+    if (xe['application-identifier'] !== `${TEAM_ID}.${b.id}`) problems.push(`${b.appex} application-identifier ${xe['application-identifier']}`);
+    if (xe['get-task-allow'] === true) problems.push(`${b.appex} has get-task-allow on`);
+    groupOk(xe, b.appex);
+  }
   if (problems.length) throw new Error(`the signed app is not what the App Store should get: ${problems.join('; ')}`);
-  say(`checked: ${BUNDLE_ID} ${marketing} (${buildNo}), team ${TEAM_ID}, push production, distribution signed`);
+  say(`checked: ${BUNDLE_ID} ${marketing} (${buildNo}) with its share extension, team ${TEAM_ID}, push production, Keychain group shared, distribution signed`);
 }
 
 // ---- App Store signing: this Mac's Apple Distribution identity and a profile made for it through the API ----
@@ -381,17 +407,21 @@ function decodeProfile(contentB64, work) {
         'application-identifier': v('Entitlements.application-identifier'),
         'aps-environment': v('Entitlements.aps-environment'),
         'get-task-allow': v('Entitlements.get-task-allow') === 'true',
+        'keychain-access-groups': Array.from({ length: Math.min(20, Number(v('Entitlements.keychain-access-groups')) || 0) }, (_, i) => v(`Entitlements.keychain-access-groups.${i}`)),
       },
     },
   };
 }
 
-/** Why this profile cannot sign the App Store build (empty when it can). */
-function profileProblems(plist, certDerB64) {
+/** Why this profile cannot sign `bundle` in the App Store build (empty when it can). */
+function profileProblems(plist, certDerB64, bundle = BUNDLES[0]) {
   const out = [];
   const ent = plist?.Entitlements || {};
-  if (ent['application-identifier'] !== `${TEAM_ID}.${BUNDLE_ID}`) out.push(`it is for ${ent['application-identifier']}`);
-  if (ent['aps-environment'] !== 'production') out.push(`its push entitlement is ${ent['aps-environment'] ?? 'missing'}`);
+  if (ent['application-identifier'] !== `${TEAM_ID}.${bundle.id}`) out.push(`it is for ${ent['application-identifier']}`);
+  if (bundle.push && ent['aps-environment'] !== 'production') out.push(`its push entitlement is ${ent['aps-environment'] ?? 'missing'}`);
+  // The share sheet's Keychain group (docs/phone-share.md): every App Store profile allows TEAM.*, which covers it.
+  const groups = ent['keychain-access-groups'] || [];
+  if (!groups.includes(`${TEAM_ID}.*`) && !groups.includes(SHARED_KEYCHAIN_GROUP)) out.push(`its Keychain groups (${groups.join(', ') || 'none'}) do not allow ${SHARED_KEYCHAIN_GROUP}`);
   if (ent['get-task-allow'] === true || plist?.ProvisionedDevices !== null) out.push('it is not an App Store profile');
   const exp = Date.parse(plist?.ExpirationDate);
   if (!(exp > Date.now() + PROFILE_MIN_DAYS * 24 * 60 * MIN)) out.push(`it expires ${plist?.ExpirationDate}`);
@@ -401,10 +431,25 @@ function profileProblems(plist, certDerB64) {
   return out;
 }
 
+/** The App Store Connect record of `bundle`, registered when missing (never in a dry run: null then). */
+async function bundleRecord(asc, bundle, create) {
+  const found = (await asc.all(`/v1/bundleIds?filter[identifier]=${bundle.id}&limit=50`)).filter((b) => b.attributes?.identifier === bundle.id);
+  if (found.length > 1) throw new Error(`App Store Connect lists ${found.length} bundle ids named ${bundle.id}`);
+  if (found.length === 1) return found[0];
+  // The app's own id must exist (it is on the App Store); only a new extension is registered here.
+  if (bundle.push) throw new Error(`App Store Connect has no bundle id ${bundle.id}`);
+  if (!create) { say(`[dry run] would register the bundle id ${bundle.id}`); return null; }
+  say(`registering the bundle id ${bundle.id} (${bundle.name})`);
+  const made = await asc.post('/v1/bundleIds', { data: { type: 'bundleIds', attributes: { identifier: bundle.id, name: bundle.name, platform: 'IOS' } } });
+  if (!made?.data?.id) throw new Error(`Apple did not register ${bundle.id}`);
+  return made.data;
+}
+
 /**
- * The certificate and profile the export signs with: an active App Store profile for this app that holds this Mac's
- * distribution certificate and the push entitlement, else a new one made through the API (never in a dry run).
- * Installed where Xcode looks for profiles. Returns { sha1, uuid, name } or null in a dry run with nothing usable.
+ * The certificate and profiles the export signs with: for EVERY bundle in the IPA (the app and its share extension),
+ * an active App Store profile holding this Mac's distribution certificate (and push, for the app), all with the same
+ * certificate; any missing one is made through the API (never in a dry run). Installed where Xcode looks for profiles.
+ * Returns { sha1, profiles: { [bundleId]: { uuid, name } } } or null in a dry run with something missing.
  */
 async function appStoreSigning(asc, { create }) {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-ios-sign-'));
@@ -420,36 +465,49 @@ async function appStoreSigning(asc, { create }) {
       return { id: c.id, der, sha1, expires: Date.parse(c.attributes?.expirationDate) };
     }).filter((c) => c.sha1 && local.has(c.sha1) && c.expires > soon).sort((a, b) => b.expires - a.expires);
     if (!candidates.length) throw new Error(`no Apple Distribution certificate of team ${TEAM_ID} with ${PROFILE_MIN_DAYS}+ days left has its private key on this Mac`);
-    const bundles = (await asc.all(`/v1/bundleIds?filter[identifier]=${BUNDLE_ID}&limit=50`)).filter((b) => b.attributes?.identifier === BUNDLE_ID);
-    if (bundles.length !== 1) throw new Error(`App Store Connect lists ${bundles.length} bundle ids named ${BUNDLE_ID}`);
-    const profiles = await asc.all(`/v1/bundleIds/${bundles[0].id}/profiles?limit=200`);
-    let chosen = null;
-    for (const p of profiles) {
-      if (p.attributes?.profileType !== 'IOS_APP_STORE' || p.attributes?.profileState !== 'ACTIVE') continue;
-      const d = decodeProfile(p.attributes.profileContent, work);
-      const cert = d && candidates.find((c) => !profileProblems(d.plist, c.der).length);
-      if (cert) { chosen = { ...d, name: p.attributes.name, cert }; break; }
+    // Per bundle, every usable profile by the certificate it holds.
+    const usable = [];
+    for (const bundle of BUNDLES) {
+      const rec = await bundleRecord(asc, bundle, create);
+      const byCert = new Map();
+      const profiles = rec ? await asc.all(`/v1/bundleIds/${rec.id}/profiles?limit=200`) : [];
+      for (const p of profiles) {
+        if (p.attributes?.profileType !== 'IOS_APP_STORE' || p.attributes?.profileState !== 'ACTIVE') continue;
+        const d = decodeProfile(p.attributes.profileContent, work);
+        for (const c of candidates) if (d && !byCert.has(c.id) && !profileProblems(d.plist, c.der, bundle).length) byCert.set(c.id, { ...d, name: p.attributes.name });
+      }
+      usable.push({ bundle, rec, byCert });
     }
-    if (!chosen) {
-      const cert = candidates[0];
-      if (!create) { say('[dry run] would make an App Store profile for this Mac\'s distribution certificate'); return null; }
-      const name = `Dobius App Store ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`;
-      say(`making App Store profile "${name}" (no active one holds this Mac's certificate and push)`);
-      const made = await asc.post('/v1/profiles', { data: {
-        type: 'profiles',
-        attributes: { name, profileType: 'IOS_APP_STORE' },
-        relationships: { bundleId: { data: { type: 'bundleIds', id: bundles[0].id } }, certificates: { data: [{ type: 'certificates', id: cert.id }] } },
-      } });
-      const d = decodeProfile(made?.data?.attributes?.profileContent, work);
-      const problems = d ? profileProblems(d.plist, cert.der) : ['Apple sent no profile back'];
-      if (problems.length) throw new Error(`the new profile cannot sign the app: ${problems.join('; ')} (is Push Notifications on for the App ID?)`);
-      chosen = { ...d, name, cert };
+    // The certificate the most bundles already have a profile for (longest-lived on a tie): the fewest new profiles.
+    const cert = [...candidates].sort((a, b) => usable.filter((u) => u.byCert.has(b.id)).length - usable.filter((u) => u.byCert.has(a.id)).length)[0];
+    const chosen = {};
+    for (const u of usable) {
+      let pick = u.byCert.get(cert.id);
+      if (!pick) {
+        if (!create || !u.rec) { say(`[dry run] would make an App Store profile for ${u.bundle.id}`); return null; }
+        const name = `${u.bundle.name} App Store ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`;
+        say(`making App Store profile "${name}" (no active one for ${u.bundle.id} holds this Mac's certificate${u.bundle.push ? ' and push' : ''})`);
+        const made = await asc.post('/v1/profiles', { data: {
+          type: 'profiles',
+          attributes: { name, profileType: 'IOS_APP_STORE' },
+          relationships: { bundleId: { data: { type: 'bundleIds', id: u.rec.id } }, certificates: { data: [{ type: 'certificates', id: cert.id }] } },
+        } });
+        const d = decodeProfile(made?.data?.attributes?.profileContent, work);
+        const problems = d ? profileProblems(d.plist, cert.der, u.bundle) : ['Apple sent no profile back'];
+        if (problems.length) throw new Error(`the new profile cannot sign ${u.bundle.id}: ${problems.join('; ')}${u.bundle.push ? ' (is Push Notifications on for the App ID?)' : ''}`);
+        pick = { ...d, name };
+      }
+      chosen[u.bundle.id] = pick;
     }
-    if (!create) { say(`[dry run] would sign with "${chosen.name}" (${chosen.plist.UUID})`); return null; }
+    if (!create) { for (const [id, c] of Object.entries(chosen)) say(`[dry run] would sign ${id} with "${c.name}" (${c.plist.UUID})`); return null; }
     fs.mkdirSync(PROFILE_DIR, { recursive: true });
-    fs.copyFileSync(chosen.file, path.join(PROFILE_DIR, `${chosen.plist.UUID}.mobileprovision`));
-    say(`signing with "${chosen.name}" (${chosen.plist.UUID}), expires ${chosen.plist.ExpirationDate}`);
-    return { sha1: chosen.cert.sha1, uuid: chosen.plist.UUID, name: chosen.name };
+    const profiles = {};
+    for (const [id, c] of Object.entries(chosen)) {
+      fs.copyFileSync(c.file, path.join(PROFILE_DIR, `${c.plist.UUID}.mobileprovision`));
+      say(`signing ${id} with "${c.name}" (${c.plist.UUID}), expires ${c.plist.ExpirationDate}`);
+      profiles[id] = { uuid: c.plist.UUID, name: c.name };
+    }
+    return { sha1: cert.sha1, profiles };
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
   }
@@ -495,7 +553,7 @@ async function buildAndUpload(cfg, signing, marketing, buildNo) {
   <key>teamID</key><string>${TEAM_ID}</string>
   <key>signingStyle</key><string>manual</string>
   <key>signingCertificate</key><string>${signing.sha1}</string>
-  <key>provisioningProfiles</key><dict><key>${BUNDLE_ID}</key><string>${signing.uuid}</string></dict>
+  <key>provisioningProfiles</key><dict>${BUNDLES.map((b) => `<key>${b.id}</key><string>${signing.profiles[b.id].uuid}</string>`).join('')}</dict>
   <key>uploadSymbols</key><true/>
   <key>manageAppVersionAndBuildNumber</key><false/>
 </dict></plist>

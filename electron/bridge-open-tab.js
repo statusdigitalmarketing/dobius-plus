@@ -290,8 +290,22 @@ const squash = (x) => String(x).replace(/\s+/g, '');
 // long-running orchestrator, past its first paste: `anyPaste` accepts any
 // number, still with the message's own line count.
 const PASTE_MARKER_RE = /^\[Pasted text #(\d+)(?: \+(\d+) lines?)?\]$/;
-function boxIsMessage(boxText, message, anyPaste = false) {
+// A pasted image path on its own line becomes Claude's "[Image #N]" attachment, which Claude moves to the front of the
+// box (2.1.x: "[Image #1][shared from the phone] look"). `images` names the paths a send pasted on purpose (the phone
+// share sheet): then the box may hold exactly one marker per path plus the message without those paths. Nothing else
+// changes: a send that names no images is matched exactly as before.
+function boxIsMessage(boxText, message, anyPaste = false, images = null) {
   if (typeof boxText !== 'string') return false;
+  if (Array.isArray(images) && images.length) {
+    const box = squash(boxText);
+    let rest = message;
+    for (const p of images) rest = rest.split(p).join('');
+    // Claude's attachment markers lead the box, one per image; the text after them must be the message without its
+    // paths, exactly. A literal "[Image #1]" the note itself contains stays part of that text (Codex round 1).
+    const lead = new RegExp(`^(?:\\[Image#\\d+\\]){${images.length}}`);
+    const m = lead.exec(box);
+    if (m && box.slice(m[0].length) === squash(rest)) return true;
+  }
   const marker = PASTE_MARKER_RE.exec(boxText.trim());
   if (marker) {
     const lines = message.split('\n').length;

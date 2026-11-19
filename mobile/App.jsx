@@ -14,6 +14,7 @@ import { normaliseHost, mixedContent, reachabilityMessage } from './host';
 import { forgetPush } from './push-client';
 import { onNativeTap, unregisterNativePush, isNativeApp, enableNativePush, forwardTokenChanges } from './native-push';
 import { PAIRINGS_KEY, activePairing, loadPairings, readPairings, savePairings, upsertPairing, switchPairing, renamePairing, removePairing } from './pairings';
+import { mirrorPairings, withoutAdditions } from './share-mirror.js';
 
 // A keyed tree owns all state for one connection lifetime, including terminal,
 // selector, transcript, History and skills state. Rename does not remount it.
@@ -381,6 +382,13 @@ export default function App() {
           // A superseded tap returns the document unchanged, and an older
           // operation predates the warning: neither may clear it (Codex).
           if (next !== base && mySeq > errorSeqRef.current) setError('');
+          // A Mac removed (or its token replaced) leaves the share sheet's copy FIRST: if the app dies between the two
+          // writes, the extension must not still hold a token this phone no longer keeps (Codex design audit).
+          if (next !== base) {
+            const pre = withoutAdditions(base, next);
+            // A removal (or replaced token) is saved only once the extension's copy has dropped it (Codex round 1).
+            if (!(await mirrorPairings(pre)) && pre.pairings.length < base.pairings.length) throw new Error('share sheet copy not updated');
+          }
           await savePairings(storage, next);
           adopt(next);
         });
@@ -404,6 +412,14 @@ export default function App() {
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
   }, []);
+
+  // The share sheet's copy follows every change to the document, and is refreshed once at launch.
+  // Queued behind any pairing save, and mirrors what is current WHEN it runs: a stale captured state written after a
+  // removal's own mirror would hand the extension the removed token again (Codex standard review).
+  useEffect(() => {
+    if (!state) return;
+    writes.current = writes.current.then(() => (stateRef.current ? mirrorPairings(stateRef.current) : true), () => true);
+  }, [state]);
 
   useEffect(() => {
     if (!state) return undefined;
