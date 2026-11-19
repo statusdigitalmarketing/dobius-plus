@@ -120,8 +120,8 @@ if [ "$BUMP" = resume ]; then
   # created, which a push during the build could move (Codex). An existing tag wins over the default branch.
   git fetch -q origin main
   [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "ERROR: origin/main moved while the tests ran; run the resume again" >&2; exit 1; }
-  # Created through the API, which refuses a tag that already exists: of two resumes started together, only one gets
-  # past here (Codex round 2). The local tag moves too: release-notes.mjs reads the range from it.
+  # Created through the API, which refuses a tag that already exists: of two runs releasing one version (two resumes,
+  # or a resume and a normal run), only one gets past here (Codex rounds 2 and 3). The local tag moves too: release-notes.mjs reads the range from it.
   gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/tags/v$V" -f sha="$(git rev-parse HEAD)" >/dev/null \
     || { echo "ERROR: could not create tag v$V on GitHub (another run may have created it); nothing was built" >&2; exit 1; }
   git tag -f "v$V" HEAD >/dev/null
@@ -133,6 +133,10 @@ else
 
   step "Push main first (tag lands on the right commit)"
   git push origin main
+  # The same exclusive claim resume makes: the tag is created through the API (refused when it exists) before the
+  # build, so a normal run and a resume of one version can never both build it (Codex round 3).
+  gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/tags/v$V" -f sha="$(git rev-parse HEAD)" >/dev/null \
+    || { echo "ERROR: could not create tag v$V on GitHub (another run may be releasing it); nothing was built" >&2; exit 1; }
 fi
 
 step "Build + sign + notarize + publish (electron-builder)"
