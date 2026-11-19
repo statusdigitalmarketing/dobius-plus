@@ -1267,3 +1267,9 @@
 - **FIX**: `askCardKey` (shared/chat-rows.js) keys a multi-select card on its step, prompt and option labels without marks. Safety stays with the press guard and token, never the React key.
 - **CONTEXT**: Claude Code draws multi-select rows as `[ ] X` / `[✔] X`; a digit toggles without moving the cursor, Enter on the typed free row unchecks it, and while the cursor is in that row every key is typed into the words (verified live on 2.1.328).
 - **DETECTION**: `grep -n "askCardKey" mobile/ChatView.jsx src/components/Project/ChatPane.jsx`
+
+### Testing: 2026-11-19
+- **MISTAKE**: After `npx vite build` (desktop renderer) the dev harness reloaded, the harness tab's Claude was gone, and the next `hdrive.mjs type` sent the question prompt to zsh ("command not found: Use"). The earlier lesson only named the mobile rebuild.
+- **FIX**: After ANY build (desktop or mobile) while a dev harness runs, read the tab's screen first (`node hdrive.mjs screen 6`) and restart `claude --model haiku` before typing a prompt.
+- **CONTEXT**: Harness ship-tests of the question card, branch feat/phone-ask-card. A prompt typed into a shell is harmless here but wastes a cycle, and on a real project a shell line could run something.
+- **DETECTION**: `node scratchpad/hdrive.mjs screen 6 | grep -q '❯' || echo "Claude not running in harness tab"`
