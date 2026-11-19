@@ -74,6 +74,14 @@ process.stdout.write([c.keyId, c.issuerId, c.keyPath].join("\t") + "\n");
 [[ "$APPLE_API_ISSUER" =~ ^[0-9a-f-]{36}$ ]] || { echo "ERROR: ASC_ISSUER_ID is not an App Store Connect issuer id" >&2; exit 1; }
 [ -r "$APPLE_API_KEY" ] || { echo "ERROR: the App Store Connect key file (ASC_KEY_PATH) is missing or unreadable" >&2; exit 1; }
 export APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER
+# electron-builder reads electron-builder.env in the project folder and adds every variable not already set, so a
+# stale APPLE_ID there would bring back the Apple ID path the unset above removed (Codex). Read with the same parser.
+node -e '
+const fs = require("fs");
+let data; try { data = fs.readFileSync("electron-builder.env", "utf8"); } catch (e) { if (e.code === "ENOENT") process.exit(0); throw e; }
+const bad = Object.keys(require("dotenv").parse(data)).filter((k) => /^APPLE_(ID|APP_SPECIFIC_PASSWORD|KEYCHAIN|KEYCHAIN_PROFILE)$/.test(k));
+if (bad.length) { console.error("ERROR: electron-builder.env sets " + bad.join(", ") + ", which would replace the App Store Connect key; remove them"); process.exit(1); }
+' || exit 1
 # Ask Apple before anything is bumped or pushed: a credential Apple refuses used to fail only at the notarize step,
 # after the version was already public (2.2.42).
 xcrun notarytool history --key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" >/dev/null 2>&1 \
@@ -91,8 +99,14 @@ if [ "$BUMP" = resume ]; then
   [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "ERROR: resume releases what origin/main holds; push or drop local commits first" >&2; exit 1; }
   # No -q: grep leaving early would SIGPIPE git log, and pipefail would read a match as a failure.
   git log --format=%s HEAD | grep -xF "$V" >/dev/null || { echo "ERROR: no version commit \"$V\" on main; resume only finishes a bumped version" >&2; exit 1; }
-  [ -z "$(git ls-remote --tags origin "refs/tags/v$V")" ] || { echo "ERROR: tag v$V already exists on GitHub; nothing to resume" >&2; exit 1; }
-  if gh release view "v$V" >/dev/null 2>&1; then echo "ERROR: a release v$V (or its draft) already exists; finish or delete it by hand" >&2; exit 1; fi
+  # A lookup that fails stops the run: read as "absent", it would let a live release be overwritten (Codex).
+  REMOTE_TAG="$(git ls-remote origin "refs/tags/v$V")" || { echo "ERROR: could not ask GitHub for tag v$V" >&2; exit 1; }
+  # A tag is allowed only on this exact commit (a resume that died after pushing it, below); anywhere else it is a
+  # release that already happened.
+  [ -z "$REMOTE_TAG" ] || [ "${REMOTE_TAG%%[[:space:]]*}" = "$(git rev-parse HEAD)" ] || { echo "ERROR: tag v$V already exists on GitHub on another commit; nothing to resume" >&2; exit 1; }
+  # Every release, drafts included (a draft has no tag yet, so a tag lookup cannot see it).
+  RELEASE_TAGS="$(gh api --paginate "repos/${REPO}/releases?per_page=100" --jq '.[].tag_name')" || { echo "ERROR: could not list the GitHub releases" >&2; exit 1; }
+  if printf '%s\n' "$RELEASE_TAGS" | grep -xF "v$V" >/dev/null; then echo "ERROR: a release v$V (or its draft) already exists; finish or delete it by hand" >&2; exit 1; fi
 fi
 npm test >/dev/null 2>&1 || { echo "ERROR: npm test failed; not releasing a red build" >&2; exit 1; }
 [ "$(git rev-parse HEAD)" = "$TESTED_SHA" ] || { echo "ERROR: HEAD moved while the tests ran; run the release again" >&2; exit 1; }
@@ -101,6 +115,12 @@ echo "preflight OK (tests green)"
 
 if [ "$BUMP" = resume ]; then
   step "Resume v$V (already bumped and pushed, no new bump)"
+  # Main must still be this commit now that the tests are done, and the tag is pushed onto it BEFORE the build:
+  # electron-builder names no target commit, so GitHub would otherwise tag whatever main is when the release is
+  # created, which a push during the build could move (Codex). An existing tag wins over the default branch.
+  git fetch -q origin main
+  [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "ERROR: origin/main moved while the tests ran; run the resume again" >&2; exit 1; }
+  if [ -z "$REMOTE_TAG" ]; then git push origin "$(git rev-parse HEAD):refs/tags/v$V"; fi
 else
   step "Version bump ($BUMP)"
   npm version "$BUMP"

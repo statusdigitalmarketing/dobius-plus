@@ -44,9 +44,13 @@ key still works (`notarytool history`) before it bumps anything, and takes the G
 unsets `APPLE_ID` and `APPLE_APP_SPECIFIC_PASSWORD`, because electron-builder prefers that path over the key whenever
 either is set.
 
-For the manual steps below, export the key the way `release.sh` does:
+For the manual steps below, set up the shell the way `release.sh` does. The `unset` matters: a shell still holding the
+old `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` exports makes electron-builder use the refused password instead of the
+key.
 
 ```bash
+unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_KEYCHAIN APPLE_KEYCHAIN_PROFILE
+export GH_TOKEN="$(gh auth token)"   # electron-builder publishes with it
 export APPLE_TEAM_ID="Z349CC556Z"
 export APPLE_API_KEY="$HOME/.appstoreconnect/private_keys/AuthKey_RVU59FRA7H.p8"
 export APPLE_API_KEY_ID="RVU59FRA7H"
