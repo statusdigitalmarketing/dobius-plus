@@ -275,8 +275,8 @@ export default function VoiceButton({ connection }) {
     // Ask first: a Mac that does not know /voice/target would act on the audio the moment it arrives.
     const tgt = await loadTarget();
     if (!live()) return;
-    if (tgt === 'old') { failed('Update Dobius+ on your Mac to use voice. This version would send it without asking.'); return; }
-    if (!tgt) { failed('Can’t reach the Mac. Nothing was sent.'); return; }
+    if (tgt === 'old') { failed('Update Dobius+ on your computer to use voice. This version would send it without asking.'); return; }
+    if (!tgt) { failed('Can’t reach the computer. Nothing was sent.'); return; }
     try {
       const res = await connection.request('/voice/audio?confirm=1', {
         method: 'POST',
@@ -287,7 +287,7 @@ export default function VoiceButton({ connection }) {
       const j = await res.json();
       if (!live()) return;
       if (!j.ok) { failed(j.error || 'Transcription failed'); return; }
-      if (!j.held) { failed('This Mac did not hold it for you to confirm. Update Dobius+ on the Mac.'); return; }
+      if (!j.held) { failed('This computer did not hold it for you to confirm. Update Dobius+ on the computer.'); return; }
       const text = String(j.transcript || '').trim();
       if (!text && !draft.heard) { setState('error'); setLine('Didn’t catch anything. Try again.'); resetSoon(3000); return; }
       if (text && draft.status !== 'editing') { failed('That message may already have gone. Discard it before adding more.'); return; }
@@ -506,7 +506,7 @@ export default function VoiceButton({ connection }) {
           <div className="voice-panel-head">HEARD</div>
           <div className="voice-heard">{heard ? `“${heard}”` : ''}{state === 'transcribing' && <span className="voice-dim">{heard ? ' …' : 'Transcribing…'}</span>}</div>
           {target?.label && <div className="voice-panel-sub">Goes to: {target.label}</div>}
-          {target && !target.label && state === 'confirm' && <div className="voice-panel-err">Nothing on the Mac is listening for voice right now.</div>}
+          {target && !target.label && state === 'confirm' && <div className="voice-panel-err">Nothing on the computer is listening for voice right now.</div>}
           {line && state !== 'transcribing' && <div className="voice-panel-err">{line}</div>}
           <div className="voice-row">
             <button className="voice-btn" onClick={discard} disabled={state !== 'confirm'}>Discard</button>

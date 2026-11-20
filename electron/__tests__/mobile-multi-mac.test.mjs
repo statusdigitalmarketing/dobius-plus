@@ -323,7 +323,7 @@ test('transport diagnostics distinguish mixed content and describe possible olde
   assert.equal(mixedContent('http://100.64.0.1:8420', a.origin), true);
   assert.equal(mixedContent(a.origin, b.origin), false);
   assert.equal(mixedContent('http://100.64.0.1:8420', 'capacitor://localhost'), false);
-  assert.equal(reachabilityMessage(b.origin, a.origin), 'Could not reach this Mac. Check Tailscale and that the Mac is awake. If it is reachable directly, update Dobius+ on that Mac to allow connections from this app.');
+  assert.equal(reachabilityMessage(b.origin, a.origin), 'Could not reach this computer. Check Tailscale and that the computer is awake. If it is reachable directly, update Dobius+ on that computer to allow connections from this app.');
 });
 
 test('voice cancellation works on iOS without AbortSignal.any and does not close the connection', async () => {

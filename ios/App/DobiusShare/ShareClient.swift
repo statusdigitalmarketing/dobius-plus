@@ -142,10 +142,10 @@ final class ShareClient {
     deinit { session.invalidateAndCancel() }
 
     private func request(_ pairing: SharedPairing, path: String, query: [URLQueryItem] = []) throws -> URLRequest {
-        guard var comps = URLComponents(string: pairing.origin) else { throw ShareError.unreachable("That Mac's address is not valid.") }
+        guard var comps = URLComponents(string: pairing.origin) else { throw ShareError.unreachable("That computer's address is not valid.") }
         comps.path = path
         comps.percentEncodedQuery = query.isEmpty ? nil : strictQuery(query)
-        guard let url = comps.url, url.host == URL(string: pairing.origin)?.host else { throw ShareError.unreachable("That Mac's address is not valid.") }
+        guard let url = comps.url, url.host == URL(string: pairing.origin)?.host else { throw ShareError.unreachable("That computer's address is not valid.") }
         var req = URLRequest(url: url)
         req.setValue("Bearer \(pairing.token)", forHTTPHeaderField: "Authorization")
         req.httpShouldHandleCookies = false
@@ -159,19 +159,19 @@ final class ShareClient {
             else { (data, resp) = try await session.data(for: req) }
             return (data, (resp as? HTTPURLResponse)?.statusCode ?? 0)
         } catch {
-            throw ShareError.unreachable("Could not reach the Mac. Check that Tailscale is on and Dobius+ is running there.")
+            throw ShareError.unreachable("Could not reach the computer. Check that Tailscale is on and Dobius+ is running there.")
         }
     }
 
     func targets(_ pairing: SharedPairing) async throws -> TargetsReply {
-        if Demo.isDemo(pairing) { return TargetsReply(ok: true, mac: "Demo Mac", orchestrator: "demo-orch", tabs: Demo.targets, error: nil) }
+        if Demo.isDemo(pairing) { return TargetsReply(ok: true, mac: "Demo computer", orchestrator: "demo-orch", tabs: Demo.targets, error: nil) }
         var req = try request(pairing, path: "/share/targets")
         req.timeoutInterval = 10
         let (data, status) = try await send(req)
-        if status == 401 { throw ShareError.refused("This Mac no longer knows this phone. Open Dobius+ and pair again.") }
-        if status == 404 { throw ShareError.refused("Update Dobius+ on the Mac to share from the phone.") }
+        if status == 401 { throw ShareError.refused("This computer no longer knows this phone. Open Dobius+ and pair again.") }
+        if status == 404 { throw ShareError.refused("Update Dobius+ on the computer to share from the phone.") }
         guard let reply = try? JSONDecoder().decode(TargetsReply.self, from: data), reply.ok else {
-            throw ShareError.unreachable("The Mac did not answer as expected (\(status)).")
+            throw ShareError.unreachable("The computer did not answer as expected (\(status)).")
         }
         return reply
     }
@@ -195,12 +195,12 @@ final class ShareClient {
         req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         req.timeoutInterval = 45
         let (data, status) = try await send(req, body: body)
-        if status == 401 { throw ShareError.refused("This Mac no longer knows this phone. Open Dobius+ and pair again.") }
+        if status == 401 { throw ShareError.refused("This computer no longer knows this phone. Open Dobius+ and pair again.") }
         let reply = try? JSONDecoder().decode(ShareReply.self, from: data)
-        if status == 404, reply?.reason == nil { throw ShareError.refused("Update Dobius+ on the Mac to share from the phone.") }
-        guard let reply else { throw ShareError.unreachable("The Mac did not answer as expected (\(status)).") }
+        if status == 404, reply?.reason == nil { throw ShareError.refused("Update Dobius+ on the computer to share from the phone.") }
+        guard let reply else { throw ShareError.unreachable("The computer did not answer as expected (\(status)).") }
         if reply.ok { return reply }
-        let msg = reply.error ?? "The Mac did not take it."
+        let msg = reply.error ?? "The computer did not take it."
         if reply.uncertain == true || status == 504 { throw ShareError.uncertain(msg) }
         // Busy with another share: nothing of this one was typed, but nothing is lost by keeping its id either.
         if status == 429 { throw ShareError.unreachable(msg) }

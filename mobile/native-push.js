@@ -118,17 +118,17 @@ async function sendRegister(connection, token) {
 
 async function sendRegisterOnce(connection, token) {
   const tokenSeq = await seen(token); // not `seq`: that name is the request counter above
-  if (connection.status !== 'authed') return Promise.resolve({ ok: false, error: 'Not connected to your Mac.' });
+  if (connection.status !== 'authed') return Promise.resolve({ ok: false, error: 'Not connected to your computer.' });
   // A Mac from before native push does not know the message: do not send it at all.
-  if (!(Array.isArray(connection.features) && connection.features.includes('apns'))) return Promise.resolve({ ok: false, error: 'This Mac needs a newer Dobius+ for notifications in this app.' });
+  if (!(Array.isArray(connection.features) && connection.features.includes('apns'))) return Promise.resolve({ ok: false, error: 'This computer needs a newer Dobius+ for notifications in this app.' });
   const reqId = `apns-${Date.now().toString(36)}-${++seq}`;
   return new Promise((resolve) => {
-    const timer = setTimeout(() => { off(); resolve({ ok: false, error: 'No answer from your Mac.' }); }, 15000);
+    const timer = setTimeout(() => { off(); resolve({ ok: false, error: 'No answer from your computer.' }); }, 15000);
     const off = connection.onMessage((m) => {
       if (m.type !== 'apnsResult' || m.reqId !== reqId) return;
       clearTimeout(timer);
       off();
-      resolve(m.ok ? { ok: true } : { ok: false, code: typeof m.error === 'string' ? m.error : 'failed', haveSeq: typeof m.haveSeq === 'number' ? m.haveSeq : undefined, error: 'Your Mac would not take this phone for notifications.' });
+      resolve(m.ok ? { ok: true } : { ok: false, code: typeof m.error === 'string' ? m.error : 'failed', haveSeq: typeof m.haveSeq === 'number' ? m.haveSeq : undefined, error: 'Your computer would not take this phone for notifications.' });
     });
     connection.send({ type: 'apnsRegister', token, pairingId: connection.pairing?.id || null, ...(tokenSeq !== undefined ? { seq: tokenSeq } : {}), reqId });
   });

@@ -186,7 +186,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
     requestRef.current?.abort();
     inFlightKeyRef.current = '';
     setBusy(false);
-    if (!normalised) { setError('That code has no Mac address in it. Enter the address instead.'); setStep('host'); return; }
+    if (!normalised) { setError('That code has no computer address in it. Enter the address instead.'); setStep('host'); return; }
     setHost(normalised);
     setCode(scannedCode || '');
     setError('');
@@ -200,10 +200,10 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
     <div className={`screen pairing${onCancel ? ' pairing-dismissable' : ''}`} {...swipe}>
       {onCancel && <div className="sheet-handle pairing-handle" aria-hidden="true" />}
       <div className="pairing-card">
-        <h1>{addMode ? 'Add a Mac' : 'Dobius+'}</h1>
+        <h1>{addMode ? 'Add a computer' : 'Dobius+'}</h1>
         {step === 'confirm' ? (
           <>
-            <p className="muted">Pair with this Mac?</p>
+            <p className="muted">Pair with this computer?</p>
             <div
               style={{
                 background: 'rgba(255,255,255,0.05)',
@@ -220,7 +220,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
               {host || '(no address)'}
             </div>
             <p className="muted" style={{ fontSize: 13, marginBottom: 16 }}>
-              Only continue if this is YOUR Mac. Scanned addresses are not verified: a .ts.net name
+              Only continue if this is YOUR computer. Scanned addresses are not verified: a .ts.net name
               can be served publicly through Tailscale Funnel, and CGNAT addresses are shared with
               other networks.
             </p>
@@ -264,8 +264,8 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
           <>
             <p className="muted">
               {canScanQr()
-                ? <>Open Dobius+ on your Mac &rsaquo; Settings &rsaquo; Mobile Access, then scan the QR code shown there.</>
-                : <>Enter your Mac's Tailscale address or hostname. Open Dobius+ on your Mac &rsaquo; Settings &rsaquo; Mobile Access to see it.</>}
+                ? <>Open Dobius+ on your computer &rsaquo; Settings &rsaquo; Mobile Access, then scan the QR code shown there.</>
+                : <>Enter your computer's Tailscale address or hostname. Open Dobius+ on your computer &rsaquo; Settings &rsaquo; Mobile Access to see it.</>}
             </p>
             {canScanQr() && (
               <>
@@ -299,7 +299,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
           </>
         ) : (
           <>
-            <p className="muted">Enter the 6-digit code from Settings &rsaquo; Mobile Access on your Mac.</p>
+            <p className="muted">Enter the 6-digit code from Settings &rsaquo; Mobile Access on your computer.</p>
             <input
               ref={codeRef}
               className="code-input"
@@ -329,13 +329,13 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
               disabled={busy}
               style={{ marginTop: 12, background: 'none', border: 'none', color: 'var(--fg)', opacity: 0.7, fontSize: 14 }}
             >
-              Change Mac address
+              Change computer address
             </button>
             {error && <p className="error">{error}</p>}
           </>
         )}
-        {error && normaliseHost(host) && <a className="mac-direct" href={normaliseHost(host)} target="_blank" rel="noreferrer">Open this Mac directly</a>}
-        {onCancel && <button className="mac-cancel" onClick={onCancel} disabled={busy}>Back to your Macs</button>}
+        {error && normaliseHost(host) && <a className="mac-direct" href={normaliseHost(host)} target="_blank" rel="noreferrer">Open this computer directly</a>}
+        {onCancel && <button className="mac-cancel" onClick={onCancel} disabled={busy}>Back to your computers</button>}
       </div>
     </div>
   );

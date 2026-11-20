@@ -78,7 +78,7 @@ final class ShareModel: ObservableObject {
             if let last, ids.contains(last) { selected = last }
             else if let o = reply.orchestrator, ids.contains(o) { selected = o }
             else { selected = targets.first { $0.claude }?.id ?? targets.first?.id }
-            if targets.isEmpty { listProblem = "No tabs are open in Dobius+ on this Mac." }
+            if targets.isEmpty { listProblem = "No tabs are open in Dobius+ on this computer." }
         } catch {
             guard mine == listSeq else { return }
             listProblem = error.localizedDescription
@@ -150,7 +150,7 @@ final class ShareModel: ObservableObject {
         // Read again: the Mac may have been removed (or re-paired) in Dobius+ while this sheet stayed open.
         guard let p = SharedPairings.load()?.pairings.first(where: { $0.id == cached.id }),
               p.origin == cached.origin, p.token == cached.token else {
-            phase = .failed("That Mac is no longer paired in Dobius+. Open Dobius+ to pair it again.")
+            phase = .failed("That computer is no longer paired in Dobius+. Open Dobius+ to pair it again.")
             return
         }
         phase = .sending
@@ -194,8 +194,8 @@ struct ShareView: View {
                         .disabled(!editable)
                 }
                 if model.pairings.count > 1 {
-                    Section(header: Text("Mac")) {
-                        Picker("Mac", selection: Binding(get: { model.pairingId ?? "" }, set: { model.switchMac($0) })) {
+                    Section(header: Text("Computer")) {
+                        Picker("Computer", selection: Binding(get: { model.pairingId ?? "" }, set: { model.switchMac($0) })) {
                             ForEach(model.pairings, id: \.id) { Text($0.name).tag($0.id) }
                         }
                         .disabled(!editable)
@@ -238,9 +238,9 @@ struct ShareView: View {
 
     @ViewBuilder private var targetRows: some View {
         if model.pairing == nil {
-            Text("Open Dobius+ and pair with your Mac first.").foregroundColor(.secondary)
+            Text("Open Dobius+ and pair with your computer first.").foregroundColor(.secondary)
         } else if model.loadingTargets && model.targets.isEmpty {
-            HStack { ProgressView(); Text("Asking the Mac for its tabs").foregroundColor(.secondary) }
+            HStack { ProgressView(); Text("Asking the computer for its tabs").foregroundColor(.secondary) }
         } else if let problem = model.listProblem, model.targets.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 Text(problem).foregroundColor(.secondary)
