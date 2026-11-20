@@ -93,13 +93,15 @@ above assumed one tailnet. Tailscale's own answer is **node sharing**, and Dobiu
   machine's `...` menu, Share, Copy invite link; the recipient opens the link signed in to their own account and
   accepts). A shared machine is **quarantined**: it answers connections but never starts one. Team messages go both
   ways (messages, receipts in the answer, status reports back), so **each person shares their own computer with the
-  other**. Sharing needs the Owner or Admin role on each account; a personal account is its own Owner. Shared
+  other**. Sharing and accepting need the Owner, Admin or IT admin role on each account; a personal account is its own Owner. Shared
   machines are reached only by their full name, `<machine>.<their tailnet>.ts.net`, which is what invites carry.
 - `shared/tailnet-share.js`: `tailnetOf`, `crossTailnet`, `peerInStatus` (this computer's `tailscale status --json`
   lists a shared-in machine under its owner's tailnet name), and `crossTailnetHelp`, the steps both people see.
 - `team-net.js withTailnetFallback`: when a peer's MagicDNS name does not resolve, this computer's own netmap
   decides. Listed: one more try at its Tailscale IP with the same Host header and TLS name (a recipient tailnet with
-  MagicDNS off does not resolve shared-in names). Not listed: `reach: 'not-shared'`. `tailscale status` runs at most
+  MagicDNS off does not resolve shared-in names). Not listed: `reach: 'not-shared'` (`'not-in-tailnet'` when the name is on our own tailnet: renamed or
+  removed). "Check connection" proves only that THIS computer reaches theirs and their hello carries the linked keys
+  (`different-install` otherwise); it says nothing about their switches or the other direction. `tailscale status` runs at most
   once at a time and its answer is reused for 15 s (`statusJsonCached`). The transport stays untrusted: everything is
   sealed and signed, and the IP comes from our own netmap for that exact name.
 - Join: a cross-tailnet invite whose hello fails stops before sending anything (as before) and returns the error in

@@ -79,8 +79,9 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
     setChecking(id);
     const r = await api.teamCheckPeer(id);
     setChecking(null);
-    setCheckNote((n) => ({ ...n, [id]: r?.ok && r.reachable ? { ok: true, text: 'Reachable: messages can go through.' } : { ok: false, text: r?.error || 'not reachable' } }));
-    if (r?.help) setOpenHelp(id);
+    // Kept with the reach it found: a later send that sees something else hides it (Codex r1).
+    setCheckNote((n) => ({ ...n, [id]: r?.ok && r.reachable ? { ok: true, reach: null, text: 'This computer reaches theirs, and it answers as the Dobius+ you linked.' } : { ok: false, reach: r?.problem ?? null, text: r?.error || 'not reachable' } }));
+    if (r?.help && r.problem === 'not-shared') setOpenHelp(id);
     load();
   };
 
@@ -186,11 +187,14 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
                 {p.reach && (
                   <div style={{ color: 'var(--danger)', fontSize: 10 }}>
                     {p.reach === 'not-shared' ? 'Not shared with you in Tailscale yet: messages to them cannot go out'
-                      : p.reach === 'offline' ? 'Offline in Tailscale right now' : 'Did not answer the last time'}
-                    {p.help && <> · <button className="underline" onClick={() => setOpenHelp(openHelp === p.id ? null : p.id)}>{openHelp === p.id ? 'hide' : 'how to fix'}</button></>}
+                      : p.reach === 'offline' ? 'Offline in Tailscale right now'
+                        : p.reach === 'different-install' ? 'Answers, but not as the Dobius+ you linked (reinstalled?). Unlink and link again'
+                          : p.reach === 'not-in-tailnet' ? 'No longer on your Tailscale network (renamed or removed?). Unlink and link again'
+                          : 'Did not answer the last time'}
+                    {p.help && p.reach === 'not-shared' && <> · <button className="underline" onClick={() => setOpenHelp(openHelp === p.id ? null : p.id)}>{openHelp === p.id ? 'hide' : 'how to fix'}</button></>}
                   </div>
                 )}
-                {checkNote[p.id] && <div style={{ color: checkNote[p.id].ok ? 'var(--dim)' : 'var(--danger)', fontSize: 10 }}>{checkNote[p.id].text}</div>}
+                {checkNote[p.id] && checkNote[p.id].reach === (p.reach || null) && <div style={{ color: checkNote[p.id].ok ? 'var(--dim)' : 'var(--danger)', fontSize: 10 }}>{checkNote[p.id].text}</div>}
               </div>
               <div className="flex items-center gap-3 shrink-0">
                 <label className="flex items-center gap-1" style={{ color: 'var(--dim)' }} title="Type their messages into the orchestrator tab automatically">
@@ -201,13 +205,13 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
                 </label>
                 <button className="px-2 py-1 rounded" style={btn(false, checking === p.id)} disabled={checking === p.id} onClick={() => checkPeer(p.id)}>{checking === p.id ? 'Checking...' : 'Check connection'}</button>
                 {unlinking === p.id ? (
-                  <button className="px-2 py-1 rounded" style={{ ...btn(false), color: 'var(--danger)', borderColor: 'var(--danger)' }} onClick={async () => { await api.teamUnlink(p.id); setUnlinking(null); load(); }}>Confirm unlink</button>
+                  <button className="px-2 py-1 rounded" style={{ ...btn(false), color: 'var(--danger)', borderColor: 'var(--danger)' }} onClick={async () => { await api.teamUnlink(p.id); setUnlinking(null); setNote(null); load(); }}>Confirm unlink</button>
                 ) : (
                   <button className="px-2 py-1 rounded" style={btn(false)} onClick={() => setUnlinking(p.id)}>Unlink</button>
                 )}
               </div>
             </div>
-            {openHelp === p.id && p.help && <ShareHelp help={p.help} />}
+            {openHelp === p.id && p.help && p.reach === 'not-shared' && <ShareHelp help={p.help} />}
             </div>
           ))}
         </div>

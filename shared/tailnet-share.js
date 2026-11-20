@@ -56,7 +56,9 @@ export function shareSteps({ owner, machine, recipient }) {
   return [
     `${who}: open the Tailscale Machines page (${MACHINES_URL}) and find ${machine || 'this computer'}.`,
     'Click its ... menu, then Share, then the Copy invite link tab, then Copy share link.',
-    `Send that link to ${recipient || 'your teammate'}. They open it, sign in with their own Tailscale account and accept.`,
+    recipient === 'you'
+      ? 'They send you that link. You open it, sign in with your own Tailscale account and accept.'
+      : `Send that link to ${recipient || 'your teammate'}. They open it, sign in with their own Tailscale account and accept.`,
   ];
 }
 
@@ -72,7 +74,7 @@ export function crossTailnetHelp({ me, them, missing = 'both' }) {
   const theirMachine = String(them?.host || '').split('.')[0] || 'their computer';
   const name = them?.name || 'your teammate';
   const title = `${cap(name)} is on a different Tailscale network`;
-  const why = `Your computer is on ${tnName(mine) || 'one Tailscale network'} and ${name}'s is on ${tnName(theirs) || 'another'}. `
+  const why = `Your computer is on ${tnName(mine) || 'one Tailscale network'} and ${name}'s computer is on ${tnName(theirs) || 'another one'}. `
     + 'Computers on two networks only see each other once each owner shares their computer with the other. '
     + 'Tailscale lets a shared computer answer but not start a connection, so both of you share (two shares, once each).';
   const steps = [];
@@ -82,7 +84,7 @@ export function crossTailnetHelp({ me, them, missing = 'both' }) {
   if (missing !== 'theirs') {
     steps.push({ heading: `You share ${myMachine} with ${name}`, lines: shareSteps({ owner: 'You', machine: myMachine, recipient: name }) });
   }
-  const after = 'Sharing needs the Owner or Admin role on each Tailscale account (a personal account is its own Owner). '
+  const after = 'Sharing and accepting need the Owner, Admin or IT admin role on each Tailscale account (a personal account is its own Owner). '
     + 'When both shares are accepted, paste the invite again (or press Check connection).';
   const text = [title + '.', why, ...steps.flatMap((s, i) => [`${i + 1}. ${s.heading}:`, ...s.lines.map((l) => `   ${l}`)]), after].join('\n');
   return { title, why, steps, after, mine, theirs, text };

@@ -51,10 +51,10 @@ function run(bin, args, timeout = 20000) {
   });
 }
 
-async function statusJson() {
+async function statusJson(timeout) {
   const bin = tailscaleBin();
   if (!bin) return null;
-  const { err, stdout } = await run(bin, ['status', '--json']);
+  const { err, stdout } = await run(bin, ['status', '--json'], timeout);
   if (err) return null;
   try { return JSON.parse(stdout); } catch { return null; }
 }
@@ -62,12 +62,14 @@ async function statusJson() {
 // One shared, short-lived reading for callers that may ask often (team requests falling back to a peer's IP): at
 // most one `tailscale status` running, and its answer reused for 15 s. ponytail: a single slot, enough for one
 // question ("where is this peer"); a burst of failing sends shares it.
+// A failed reading (null) is cached for the same 15 s, so a run of failing sends never starts one CLI each, and the
+// CLI gets 5 s here, not the 20 s other callers allow (Codex r1).
 const STATUS_TTL_MS = 15_000;
-let statusCache = { at: 0, value: null, running: null };
+let statusCache = { at: -Infinity, value: null, running: null };
 export function statusJsonCached(now = Date.now()) {
   if (statusCache.running) return statusCache.running;
-  if (statusCache.value && now - statusCache.at < STATUS_TTL_MS) return Promise.resolve(statusCache.value);
-  statusCache.running = statusJson().then((v) => {
+  if (now - statusCache.at < STATUS_TTL_MS) return Promise.resolve(statusCache.value);
+  statusCache.running = statusJson(5000).then((v) => {
     statusCache = { at: Date.now(), value: v, running: null };
     return v;
   }, () => { statusCache = { at: Date.now(), value: null, running: null }; return null; });

@@ -175,3 +175,31 @@ test('same tailnet: no cross-tailnet help anywhere', async () => {
   assert.equal(a.svc.status().peers[0].cross, false);
   assert.equal(a.svc.status().peers[0].help, null);
 });
+
+test('a teammate answering with other keys stays "different-install" until a signed answer (Codex r1)', async () => {
+  const tn = net();
+  const sam = install('Sam', SAM, tn);
+  const zee = install('Zee', ZEE, tn);
+  assert.equal((await linkPair(sam, zee)).ok, true);
+  await new Promise((res) => setImmediate(res));
+  const id = sam.svc.status().peers[0].id;
+  // Zee reinstalls: a fresh install answers at the same name with new keys.
+  install('Zee', ZEE, tn);
+  const c = await sam.svc.checkPeer(id);
+  assert.equal(c.reachable, false);
+  assert.equal(c.problem, 'different-install');
+  assert.match(c.error, /Unlink and link again/);
+  sam.svc.send(id, 'are you there');
+  await sam.svc.pump();
+  assert.equal(sam.svc.status().peers[0].reach, 'different-install', 'their 403 does not clear it');
+  tn.hosts.set(ZEE, zee.svc); // the original install is back
+  assert.equal((await sam.svc.checkPeer(id)).reachable, true);
+  assert.equal(sam.svc.status().peers[0].reach, null);
+});
+
+test('fallback: a missing name on OUR tailnet is "not-in-tailnet", not a sharing problem (Codex r1)', async () => {
+  const deps = { tailnetOf, peerInStatus, isNameError };
+  const req = withTailnetFallback(async () => ({ error: 'ENOTFOUND' }), async () => ({ MagicDNSSuffix: 'tail6addbf.ts.net', Peer: {} }), deps);
+  assert.equal((await req({ host: 'brett-old.tail6addbf.ts.net', port: 8420 })).reach, 'not-in-tailnet');
+  assert.equal((await req({ host: ZEE, port: 8420 })).reach, 'not-shared');
+});

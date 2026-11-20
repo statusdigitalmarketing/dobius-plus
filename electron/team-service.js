@@ -72,10 +72,14 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   // What the last request to each teammate said about reaching them (docs: "Teammates on another Tailscale network"):
   // peer -> { problem: 'not-shared' | 'offline' | 'unreachable' | null, at }. Memory only, one entry per linked peer.
   const reach = new Map();
-  function noteReach(peerId, r) {
+  // `proven`: the answer was signed by the key we linked (a verified receipt, ack or hello). 'different-install' (it
+  // answers, but not with the linked key: reinstalled, or another install at that name) clears only on proof, never on
+  // a bare status code such as their 403 (Codex r1).
+  function noteReach(peerId, r, proven = false) {
     if (!store.peers()[peerId]) { reach.delete(peerId); return; }
-    const problem = r.status ? null : (r.reach || (r.error ? 'unreachable' : null));
     const prev = reach.get(peerId);
+    let problem = r.status ? null : (r.reach || (r.error ? 'unreachable' : null));
+    if (!problem && !proven && prev?.problem === 'different-install') problem = 'different-install';
     reach.set(peerId, { problem, at: now() });
     if ((prev?.problem || null) !== problem) changed();
   }
@@ -86,6 +90,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
       return `${peer.name}'s computer is on another Tailscale network and is not shared with you yet. Settings > Team shows the two Tailscale shares that fix it`;
     }
     if (r.reach === 'offline') return `${peer.name}'s computer is offline in Tailscale (${r.error})`;
+    if (r.reach === 'not-in-tailnet') return `${peer.host} is no longer on your Tailscale network (renamed or removed?). Unlink ${peer.name} and link again`;
     return null;
   }
 
@@ -203,7 +208,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     if (!a) {
       if (h.error && crossTailnet(m.host, inv.host)) {
         // The Zee case (2026-11-19): the invite names a machine on someone else's tailnet, not shared with this one.
-        const help = crossTailnetHelp({ me: m, them: { name: 'the person who sent the invite', host: inv.host }, missing: 'both' });
+        const help = crossTailnetHelp({ me: m, them: { name: 'your teammate', host: inv.host }, missing: 'both' });
         const why = h.reach === 'not-shared' ? 'it has not been shared with you in Tailscale yet' : `it did not answer (${h.error})`;
         return { ok: false, error: `Could not reach ${inv.host}: it is on another Tailscale network (${tailnetOf(inv.host)}) and ${why}. Both of you share your computer with the other in Tailscale, then paste the invite again.`, help };
       }
@@ -716,7 +721,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     reportTimes.set(row.peer, times);
     const wire = P.buildStatus(identity(), myFp(), peer, { id: row.id, ...rep }, now());
     const r = await request({ host: peer.host, port: peer.port, method: 'POST', path: '/team/status', body: wire.body, headers: { [SIG_HEADER]: wire.sig } });
-    noteReach(peer.id, r);
+    noteReach(peer.id, r, r.status === 200 && P.checkStatusAck(peer, myFp(), row.id, rep.seq, r.json?.ack));
     // Re-read: a newer report may have been queued while this one was in flight.
     // Pause on these whatever became of the row meanwhile (it may have been evicted during the request).
     if (r.status === 404) reportPause.set(row.peer, now() + REPORT_PAUSE_MS);
@@ -1091,7 +1096,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const env = { id: msg.id, kind: msg.kind, replyTo: msg.replyTo, text: msg.text, firstSentAt: msg.firstSentAt, deadline: msg.deadline };
     const wire = P.buildMessage(identity(), myFp(), peer, env, now());
     const r = await request({ host: peer.host, port: peer.port, method: 'POST', path: '/team/message', body: wire.body, headers: { [SIG_HEADER]: wire.sig } });
-    noteReach(peer.id, r);
+    noteReach(peer.id, r, r.status === 200 && !!P.checkReceipt(peer, myFp(), env, r.json?.receipt));
     // A row found still 'sending' was cut off mid-attempt (a failed write, a quit): that attempt may have arrived.
     const reached = msg.reached || msg.state === 'sending' || !!r.reached;
     if (r.status === 200 && P.checkReceipt(peer, myFp(), env, r.json?.receipt)) {
@@ -1122,12 +1127,17 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const nonce = P.newNonce();
     const r = await request({ host: peer.host, port: peer.port, method: 'GET', path: `/team/hello?nonce=${nonce}` });
     const good = r.status === 200 && !!P.checkHello(r.json, nonce, peer.id);
-    noteReach(id, good ? r : { ...r, status: 0, error: r.error || `answer ${r.status}` });
+    if (good) noteReach(id, r, true);
+    else if (r.status === 200) noteReach(id, { status: 0, reach: 'different-install' });
+    else noteReach(id, { ...r, status: 0, error: r.error || `answer ${r.status}` });
     if (good) return { ok: true, reachable: true, problem: null };
     const m = me();
     const problem = reach.get(id)?.problem || 'unreachable';
     const help = m && crossTailnet(m.host, peer.host) ? crossTailnetHelp({ me: m, them: peer, missing: problem === 'not-shared' ? 'theirs' : 'both' }) : null;
-    return { ok: true, reachable: false, problem, error: reachNote(peer, r) || r.error || `answer ${r.status}`, help };
+    const error = problem === 'different-install'
+      ? `${peer.name}'s computer answers, but not as the Dobius+ you linked (reinstalled, or a different install). Unlink and link again`
+      : reachNote(peer, r) || r.error || `answer ${r.status}`;
+    return { ok: true, reachable: false, problem, error, help };
   }
 
   // ---------- lifecycle ----------

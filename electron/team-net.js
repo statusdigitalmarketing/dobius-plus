@@ -83,7 +83,8 @@ export const _plainOnly = plainOnly;
  * whether that machine is in its netmap at all:
  *   - listed (it was shared with us, or it is ours): try once more at its Tailscale IP, same Host and TLS name. That
  *     covers a recipient whose resolver does not know shared-in names (MagicDNS off on their tailnet).
- *   - not listed: `reach: 'not-shared'` (another tailnet's machine nobody shared with us, or one that was removed).
+ *   - not listed: `reach: 'not-shared'` (another tailnet's machine nobody shared with us), or 'not-in-tailnet' for a
+ *     name on our own tailnet (renamed or removed).
  * Offline machines are marked `reach: 'offline'` when the IP try also fails. The transport is still untrusted:
  * everything on it is sealed and signed, and an IP taken from our own netmap for that exact name changes nothing.
  * statusFn() -> parsed `tailscale status --json` or null (unknown: the original error is returned as is).
@@ -96,7 +97,10 @@ export function withTailnetFallback(request, statusFn, { tailnetOf, peerInStatus
     try { status = await statusFn(); } catch (err) { console.warn('[team] tailscale status failed:', err?.message || err); }
     if (!status) return r;
     const p = peerInStatus(status, opts.host);
-    if (!p.found) return { ...r, reach: 'not-shared' };
+    // Missing from our netmap: another tailnet's machine nobody shared with us, or one of OUR tailnet's machines that
+    // was renamed or removed (Codex r1: that is not a sharing problem).
+    const own = String(status.MagicDNSSuffix || status.CurrentTailnet?.MagicDNSSuffix || '').toLowerCase().replace(/\.$/, '');
+    if (!p.found) return { ...r, reach: own && tailnetOf(opts.host) === own ? 'not-in-tailnet' : 'not-shared' };
     if (!p.ip) return { ...r, reach: p.online ? undefined : 'offline' };
     const r2 = await request({ ...opts, address: p.ip });
     return { ...r2, viaIp: true, ...(r2.error ? { reach: p.online ? 'unreachable' : 'offline' } : {}) };
