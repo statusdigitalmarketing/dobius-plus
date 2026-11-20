@@ -40,7 +40,10 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
     // an old "reaches theirs" can never come back after a later failure (Codex r2).
     if (s?.ok) {
       const now = new Map(s.peers.map((p) => [p.id, p.reach || null]));
-      setCheckNote((n) => Object.fromEntries(Object.entries(n).filter(([id, v]) => now.has(id) && now.get(id) === v.reach)));
+      // A success is only a snapshot: it also lapses after two minutes, since a bare 403 from a reinstalled teammate
+      // changes no reach state (Codex r6).
+      const t = Date.now();
+      setCheckNote((n) => Object.fromEntries(Object.entries(n).filter(([id, v]) => now.has(id) && now.get(id) === v.reach && (!v.ok || t - v.at < 120_000))));
     }
     if (s?.ok) setName((n) => n || s.settings.name);
   }, []);
@@ -86,7 +89,7 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
     const r = await api.teamCheckPeer(id);
     setChecking((s) => { const n = new Set(s); n.delete(id); return n; });
     // Kept with the reach it found: a later send that sees something else hides it (Codex r1).
-    setCheckNote((n) => ({ ...n, [id]: r?.ok && r.reachable ? { ok: true, reach: null, text: 'This computer reaches theirs, and it answers as the Dobius+ you linked.' } : { ok: false, reach: r?.problem ?? null, text: r?.error || 'not reachable' } }));
+    setCheckNote((n) => ({ ...n, [id]: r?.ok && r.reachable ? { ok: true, reach: null, at: Date.now(), text: 'Just checked: this computer reaches theirs, and it answers as the Dobius+ you linked.' } : { ok: false, reach: r?.problem ?? null, text: r?.error || 'not reachable' } }));
     if (r?.help && r.problem === 'not-shared') setOpenHelp(id);
     load();
   };
