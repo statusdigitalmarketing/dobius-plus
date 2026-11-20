@@ -1273,3 +1273,15 @@
 - **FIX**: After ANY build (desktop or mobile) while a dev harness runs, read the tab's screen first (`node hdrive.mjs screen 6`) and restart `claude --model haiku` before typing a prompt.
 - **CONTEXT**: Harness ship-tests of the question card, branch feat/phone-ask-card. A prompt typed into a shell is harmless here but wastes a cycle, and on a real project a shell line could run something.
 - **DETECTION**: `node scratchpad/hdrive.mjs screen 6 | grep -q '❯' || echo "Claude not running in harness tab"`
+
+### Build: 2026-11-20
+- **MISTAKE**: Edited `electron/tailscale.js` with a Python `open(p).read()` / `write()` script. The file has MIXED line endings (one CRLF block), and Python's universal newlines silently rewrote that block to LF, so the diff showed 15 unrelated lines changed.
+- **FIX**: For the mixed-ending files (`git ls-files --eol | grep mixed`: chrome-profiles.js, claude-presence.js, tailscale.js, window-manager.js) edit with the Edit tool, or open with `newline=''` on both read and write. Check `git diff --stat` after any scripted edit.
+- **CONTEXT**: Cross-tailnet team work, branch feat/team-cross-tailnet. Caught in self-review before the push.
+- **DETECTION**: `git ls-files --eol | grep mixed` then `git diff --stat` on those files after a scripted edit
+
+### Architecture: 2026-11-20
+- **MISTAKE**: The team communicator assumed every teammate was on Sam's tailnet. Zee (his own Tailscale account, Windows) got `could not reach <sam host> (ENOTFOUND)` from Join, with nothing saying why.
+- **FIX**: Teammates on another tailnet need Tailscale node sharing BOTH ways (a shared machine is quarantined: it answers, never starts). `shared/tailnet-share.js` explains it; `team-net.js withTailnetFallback` reads this computer's netmap to tell "not shared" from "offline" and retries a shared-in machine at its Tailscale IP.
+- **CONTEXT**: A failure across two Tailscale accounts first shows up as a DNS error, because MagicDNS only knows names that were shared with you.
+- **DETECTION**: `grep -n "crossTailnetHelp\|withTailnetFallback" electron/team-service.js electron/team-main.js`

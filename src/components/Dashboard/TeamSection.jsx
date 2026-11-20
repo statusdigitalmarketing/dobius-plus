@@ -194,7 +194,7 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
                     {p.help && p.reach === 'not-shared' && <> · <button className="underline" onClick={() => setOpenHelp(openHelp === p.id ? null : p.id)}>{openHelp === p.id ? 'hide' : 'how to fix'}</button></>}
                   </div>
                 )}
-                {checkNote[p.id] && checkNote[p.id].reach === (p.reach || null) && <div style={{ color: checkNote[p.id].ok ? 'var(--dim)' : 'var(--danger)', fontSize: 10 }}>{checkNote[p.id].text}</div>}
+                {checkNote[p.id] && checkNote[p.id].reach === (p.reach || null) && p.reach !== 'not-shared' && <div style={{ color: checkNote[p.id].ok ? 'var(--dim)' : 'var(--danger)', fontSize: 10 }}>{checkNote[p.id].text}</div>}
               </div>
               <div className="flex items-center gap-3 shrink-0">
                 <label className="flex items-center gap-1" style={{ color: 'var(--dim)' }} title="Type their messages into the orchestrator tab automatically">
