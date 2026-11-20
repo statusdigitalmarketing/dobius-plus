@@ -82,11 +82,12 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const cur = store.peers()[peerId];
     if (!cur) { reach.delete(peerId); return; }
     if (cur.host !== peer.host || cur.port !== peer.port || cur.linkedAt !== peer.linkedAt) return;
-    const prev = reach.get(peerId);
+    // An entry measured at another address (a re-link that moved them) is not this link's history (Codex r4).
+    const prev = reach.get(peerId)?.host === peer.host ? reach.get(peerId) : null;
     let problem = r.status ? null : (r.reach || (r.error ? 'unreachable' : null));
     // Sticky until a signed answer: a timeout in between must not turn it into something a bare 403 then clears.
     if (!proven && prev?.problem === 'different-install') problem = 'different-install';
-    reach.set(peerId, { problem, at: now() });
+    reach.set(peerId, { problem, at: now(), host: peer.host });
     if ((prev?.problem || null) !== problem) changed();
   }
   // The note an outgoing row gets when the teammate cannot be reached: the share steps when that is the cause.
@@ -121,7 +122,8 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const meNow = ep ? { name: store.settings().name, host: ep.host } : null;
     const peers = Object.values(store.peers()).map(({ ed, x, ...p }) => {
       const cross = !!meNow && crossTailnet(meNow.host, p.host);
-      const problem = reach.get(p.id)?.problem || null;
+      const entry = reach.get(p.id);
+      const problem = (entry?.host === p.host && entry.problem) || null;
       return {
         ...p, short: shortFp(p.id), tailnet: tailnetOf(p.host), cross, reach: problem,
         help: cross ? crossTailnetHelp({ me: meNow, them: p, missing: problem === 'not-shared' ? 'theirs' : 'both' }) : null,
@@ -213,6 +215,9 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const a = h.status === 200 ? P.checkHello(h.json, nonce, inv.fp) : null;
     // A wrong or hostile address learns nothing: we stop before sending anything (design step 2).
     if (!a) {
+      // Known causes that sharing cannot fix come first (Codex r4).
+      if (h.reach === 'tailscale-off') return { ok: false, error: 'Tailscale is not connected on this computer. Open Tailscale, sign in, then paste the invite again.' };
+      if (h.reach === 'offline') return { ok: false, error: `${inv.host} is offline in Tailscale right now (asleep, or Tailscale is off there). Paste the invite again once it is on.` };
       if (h.error && crossTailnet(m.host, inv.host)) {
         // The Zee case (2026-11-19): the invite names a machine on someone else's tailnet, not shared with this one.
         const help = crossTailnetHelp({ me: m, them: { name: 'your teammate', host: inv.host }, missing: 'both' });

@@ -29,7 +29,7 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
   const [unlinking, setUnlinking] = useState(null);
   const [showInviteHelp, setShowInviteHelp] = useState(false);
   const [openHelp, setOpenHelp] = useState(null); // peer id whose share steps are open
-  const [checking, setChecking] = useState(null);
+  const [checking, setChecking] = useState(() => new Set()); // peer ids with a check out
   const [checkNote, setCheckNote] = useState({}); // peer id -> { ok, text }
   const [nowMs, setNowMs] = useState(Date.now());
 
@@ -82,9 +82,9 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
   };
   const expiresIn = invite ? Math.max(0, Math.round((invite.expiresAt - nowMs) / 1000)) : 0;
   const checkPeer = async (id) => {
-    setChecking(id);
+    setChecking((s) => new Set(s).add(id));
     const r = await api.teamCheckPeer(id);
-    setChecking(null);
+    setChecking((s) => { const n = new Set(s); n.delete(id); return n; });
     // Kept with the reach it found: a later send that sees something else hides it (Codex r1).
     setCheckNote((n) => ({ ...n, [id]: r?.ok && r.reachable ? { ok: true, reach: null, text: 'This computer reaches theirs, and it answers as the Dobius+ you linked.' } : { ok: false, reach: r?.problem ?? null, text: r?.error || 'not reachable' } }));
     if (r?.help && r.problem === 'not-shared') setOpenHelp(id);
@@ -210,7 +210,7 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
                 <label className="flex items-center gap-1" style={{ color: 'var(--dim)' }} title="Off: their messages are refused">
                   On <Toggle checked={!!p.enabled} onChange={async (v) => { await api.teamUpdatePeer(p.id, { enabled: v }); load(); }} />
                 </label>
-                <button className="px-2 py-1 rounded" style={btn(false, checking === p.id)} disabled={checking === p.id} onClick={() => checkPeer(p.id)}>{checking === p.id ? 'Checking...' : 'Check connection'}</button>
+                <button className="px-2 py-1 rounded" style={btn(false, checking.has(p.id))} disabled={checking.has(p.id)} onClick={() => checkPeer(p.id)}>{checking.has(p.id) ? 'Checking...' : 'Check connection'}</button>
                 {unlinking === p.id ? (
                   <button className="px-2 py-1 rounded" style={{ ...btn(false), color: 'var(--danger)', borderColor: 'var(--danger)' }} onClick={async () => { await api.teamUnlink(p.id); setUnlinking(null); setNote(null); load(); }}>Confirm unlink</button>
                 ) : (

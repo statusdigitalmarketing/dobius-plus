@@ -246,3 +246,35 @@ test('a slow check of an old address never marks a teammate re-linked at a new a
   assert.equal(sam.svc.status().peers[0].host, 'zee-laptop.tail578ae1.ts.net');
   assert.equal(sam.svc.status().peers[0].reach, null, 'the old address result is dropped');
 });
+
+test('join: a known offline or signed-out cause is said plainly, with no share steps (Codex r4)', async () => {
+  const tn = net();
+  const sam = install('Sam', SAM, tn);
+  const zee = install('Zee', ZEE, tn);
+  const inv = sam.svc.createInvite();
+  tn.blocked.set(`${ZEE}>${SAM}`, 'offline');
+  const off = await zee.svc.join(inv.text);
+  assert.match(off.error, /offline in Tailscale/);
+  assert.equal(off.help, undefined);
+  tn.blocked.set(`${ZEE}>${SAM}`, 'tailscale-off');
+  const out = await zee.svc.join(inv.text);
+  assert.match(out.error, /Tailscale is not connected on this computer/);
+  assert.equal(out.help, undefined);
+});
+
+test('a reach result measured at an old address does not follow a teammate to a new one (Codex r4)', async () => {
+  const tn = net();
+  const sam = install('Sam', SAM, tn);
+  const zee = install('Zee', ZEE, tn);
+  assert.equal((await linkPair(sam, zee)).ok, true);
+  await new Promise((res) => setImmediate(res));
+  const id = sam.svc.status().peers[0].id;
+  install('Zee', ZEE, tn);
+  assert.equal((await sam.svc.checkPeer(id)).problem, 'different-install');
+  // Same keys come back at a new computer that is not shared yet: the old diagnosis must not stick.
+  const rec = sam.store.peers()[id];
+  sam.store.savePeer({ ...rec, host: 'zee-laptop.tail578ae1.ts.net' });
+  assert.equal(sam.svc.status().peers[0].reach, null);
+  tn.blocked.set(`${SAM}>zee-laptop.tail578ae1.ts.net`, 'not-shared');
+  assert.equal((await sam.svc.checkPeer(id)).problem, 'not-shared');
+});
