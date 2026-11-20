@@ -153,7 +153,7 @@ test('join across tailnets with only Sam shared: links, tells Zee to share back,
   await sam.svc.pump();
   const out = sam.store.messages().find((m) => m.dir === 'out');
   assert.equal(out.state, 'queued');
-  assert.match(out.note, /not shared with you yet/);
+  assert.match(out.note, /not shared with you/);
 
   // Zee shares: Check connection clears it, and the queued message goes through.
   tn.blocked.delete(`${SAM}>${ZEE}`);
@@ -202,4 +202,28 @@ test('fallback: a missing name on OUR tailnet is "not-in-tailnet", not a sharing
   const req = withTailnetFallback(async () => ({ error: 'ENOTFOUND' }), async () => ({ MagicDNSSuffix: 'tail6addbf.ts.net', Peer: {} }), deps);
   assert.equal((await req({ host: 'brett-old.tail6addbf.ts.net', port: 8420 })).reach, 'not-in-tailnet');
   assert.equal((await req({ host: ZEE, port: 8420 })).reach, 'not-shared');
+});
+
+test('fallback: this computer logged out of Tailscale is "tailscale-off", never blamed on sharing (Codex r2)', async () => {
+  const req = withTailnetFallback(async () => ({ error: 'ENOTFOUND' }), async () => ({ BackendState: 'NeedsLogin', Peer: {} }), { tailnetOf, peerInStatus, isNameError });
+  assert.equal((await req({ host: ZEE, port: 8420 })).reach, 'tailscale-off');
+});
+
+test('different-install survives a timeout then a bare 403; only a signed answer clears it (Codex r2)', async () => {
+  const tn = net();
+  const sam = install('Sam', SAM, tn);
+  const zee = install('Zee', ZEE, tn);
+  assert.equal((await linkPair(sam, zee)).ok, true);
+  await new Promise((res) => setImmediate(res));
+  const id = sam.svc.status().peers[0].id;
+  install('Zee', ZEE, tn); // reinstalled: new keys at the same name
+  assert.equal((await sam.svc.checkPeer(id)).problem, 'different-install');
+  tn.blocked.set(`${SAM}>${ZEE}`, undefined); // a plain network failure (no reach)
+  sam.svc.send(id, 'one');
+  await sam.svc.pump();
+  assert.equal(sam.svc.status().peers[0].reach, 'different-install');
+  tn.blocked.delete(`${SAM}>${ZEE}`);
+  clock += 10 * 60_000;
+  await sam.svc.pump(); // the new install answers 403
+  assert.equal(sam.svc.status().peers[0].reach, 'different-install');
 });

@@ -79,7 +79,8 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     if (!store.peers()[peerId]) { reach.delete(peerId); return; }
     const prev = reach.get(peerId);
     let problem = r.status ? null : (r.reach || (r.error ? 'unreachable' : null));
-    if (!problem && !proven && prev?.problem === 'different-install') problem = 'different-install';
+    // Sticky until a signed answer: a timeout in between must not turn it into something a bare 403 then clears.
+    if (!proven && prev?.problem === 'different-install') problem = 'different-install';
     reach.set(peerId, { problem, at: now() });
     if ((prev?.problem || null) !== problem) changed();
   }
@@ -87,9 +88,10 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   function reachNote(peer, r) {
     const m = me();
     if (r.reach === 'not-shared' && m && crossTailnet(m.host, peer.host)) {
-      return `${peer.name}'s computer is on another Tailscale network and is not shared with you yet. Settings > Team shows the two Tailscale shares that fix it`;
+      return `${peer.name}'s computer is on another Tailscale network and is not shared with you (or it was renamed). Settings > Team shows the fix`;
     }
     if (r.reach === 'offline') return `${peer.name}'s computer is offline in Tailscale (${r.error})`;
+    if (r.reach === 'tailscale-off') return 'Tailscale is not connected on this computer. Open Tailscale and sign in';
     if (r.reach === 'not-in-tailnet') return `${peer.host} is no longer on your Tailscale network (renamed or removed?). Unlink ${peer.name} and link again`;
     return null;
   }

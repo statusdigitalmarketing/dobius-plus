@@ -96,6 +96,8 @@ export function withTailnetFallback(request, statusFn, { tailnetOf, peerInStatus
     let status = null;
     try { status = await statusFn(); } catch (err) { console.warn('[team] tailscale status failed:', err?.message || err); }
     if (!status) return r;
+    // This computer's own Tailscale is logged out or stopped: that is the problem, not their sharing (Codex r2).
+    if (status.BackendState && status.BackendState !== 'Running') return { ...r, reach: 'tailscale-off' };
     const p = peerInStatus(status, opts.host);
     // Missing from our netmap: another tailnet's machine nobody shared with us, or one of OUR tailnet's machines that
     // was renamed or removed (Codex r1: that is not a sharing problem).

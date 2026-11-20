@@ -265,7 +265,7 @@ export function handleTeamBridge(body) {
   if (!st.ok) return { status: 503, json: { ok: false, error: st.error } };
   if (cmd === 'peers') {
     const lines = st.peers.length
-      ? st.peers.map((p) => `${oneLine(p.name, 80)}  ${p.short}  ${p.host}  ${p.enabled ? (p.autoRoute ? 'auto-route' : 'held for a person') : 'disabled'}${p.reach === 'not-shared' ? '  NOT SHARED WITH THIS COMPUTER IN TAILSCALE (Settings > Team shows the fix)' : p.reach === 'different-install' ? '  answers with different keys: unlink and link again' : p.reach === 'not-in-tailnet' ? '  no longer on your Tailscale network: unlink and link again' : p.reach ? `  unreachable (${p.reach})` : ''}`)
+      ? st.peers.map((p) => `${oneLine(p.name, 80)}  ${p.short}  ${p.host}  ${p.enabled ? (p.autoRoute ? 'auto-route' : 'held for a person') : 'disabled'}${p.reach === 'not-shared' ? '  NOT SHARED WITH THIS COMPUTER IN TAILSCALE (Settings > Team shows the fix)' : p.reach === 'different-install' ? '  answers with different keys: unlink and link again' : p.reach === 'not-in-tailnet' ? '  no longer on your Tailscale network: unlink and link again' : p.reach === 'tailscale-off' ? '  Tailscale is not connected on this computer' : p.reach ? `  unreachable (${p.reach})` : ''}`)
       : ['no linked teammates (Settings > Team > Invite a teammate)'];
     return { status: 200, json: { ok: true, lines: [`this Mac: ${oneLine(st.settings.name, 80)} ${st.short}`, ...lines] } };
   }

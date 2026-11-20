@@ -43,18 +43,18 @@ export function tailscaleBin() {
 // "Enable HTTPS" used to report success and write no certificate.
 const CLI_ENV = { ...process.env, TERM: process.env.TERM || 'dumb' };
 
-function run(bin, args, timeout = 20000) {
+function run(bin, args, timeout = 20000, killSignal = 'SIGTERM') {
   return new Promise((resolve) => {
-    execFile(bin, args, { timeout, env: CLI_ENV }, (err, stdout, stderr) => {
+    execFile(bin, args, { timeout, killSignal, env: CLI_ENV }, (err, stdout, stderr) => {
       resolve({ err, stdout: stdout || '', stderr: stderr || '' });
     });
   });
 }
 
-async function statusJson(timeout) {
+async function statusJson(timeout, killSignal) {
   const bin = tailscaleBin();
   if (!bin) return null;
-  const { err, stdout } = await run(bin, ['status', '--json'], timeout);
+  const { err, stdout } = await run(bin, ['status', '--json'], timeout, killSignal);
   if (err) return null;
   try { return JSON.parse(stdout); } catch { return null; }
 }
@@ -69,7 +69,10 @@ let statusCache = { at: -Infinity, value: null, running: null };
 export function statusJsonCached(now = Date.now()) {
   if (statusCache.running) return statusCache.running;
   if (now - statusCache.at < STATUS_TTL_MS) return Promise.resolve(statusCache.value);
-  statusCache.running = statusJson(5000).then((v) => {
+  // SIGKILL at the deadline (a stopped child ignores SIGTERM and the callback waits for its exit), and our own timer
+  // as a backstop, so a stuck CLI can never hold the outbox (Codex r2).
+  const backstop = new Promise((res) => { setTimeout(() => res(null), 7000).unref?.(); });
+  statusCache.running = Promise.race([statusJson(5000, 'SIGKILL'), backstop]).then((v) => {
     statusCache = { at: Date.now(), value: v, running: null };
     return v;
   }, () => { statusCache = { at: Date.now(), value: null, running: null }; return null; });

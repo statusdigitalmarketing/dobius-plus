@@ -36,6 +36,12 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
   const load = useCallback(async () => {
     const s = await api.teamStatus();
     setSt(s);
+    // A check result only stands while the teammate's state is the one it found: any change drops it for good, so
+    // an old "reaches theirs" can never come back after a later failure (Codex r2).
+    if (s?.ok) {
+      const now = new Map(s.peers.map((p) => [p.id, p.reach || null]));
+      setCheckNote((n) => Object.fromEntries(Object.entries(n).filter(([id, v]) => now.has(id) && now.get(id) === v.reach)));
+    }
     if (s?.ok) setName((n) => n || s.settings.name);
   }, []);
   useEffect(() => {
@@ -142,7 +148,7 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
           <button className="underline" style={{ color: 'var(--accent)' }} onClick={() => setShowInviteHelp((v) => !v)}>{showInviteHelp ? 'Hide the steps' : 'Share computers first'}</button>
         </div>
       )}
-      {showInviteHelp && st.inviteHelp && <ShareHelp help={st.inviteHelp} />}
+      {showInviteHelp && st.inviteHelp && <ShareHelp help={st.inviteHelp} onHide={() => setShowInviteHelp(false)} />}
       {invite && expiresIn > 0 && (
         <div className="flex items-start gap-3 px-3 py-2 rounded" style={box}>
           <div className="min-w-0 flex-1">
@@ -174,7 +180,7 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
           {note.error || note.info}
         </div>
       )}
-      {note?.help && <ShareHelp help={note.help} />}
+      {note?.help && <ShareHelp help={note.help} onHide={() => setNote((n) => (n ? { ...n, help: null } : n))} />}
 
       {st.peers.length > 0 && (
         <div className="space-y-2">
@@ -190,11 +196,12 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
                       : p.reach === 'offline' ? 'Offline in Tailscale right now'
                         : p.reach === 'different-install' ? 'Answers, but not as the Dobius+ you linked (reinstalled?). Unlink and link again'
                           : p.reach === 'not-in-tailnet' ? 'No longer on your Tailscale network (renamed or removed?). Unlink and link again'
+                            : p.reach === 'tailscale-off' ? 'Tailscale is not connected on this computer'
                           : 'Did not answer the last time'}
                     {p.help && p.reach === 'not-shared' && <> · <button className="underline" onClick={() => setOpenHelp(openHelp === p.id ? null : p.id)}>{openHelp === p.id ? 'hide' : 'how to fix'}</button></>}
                   </div>
                 )}
-                {checkNote[p.id] && checkNote[p.id].reach === (p.reach || null) && p.reach !== 'not-shared' && <div style={{ color: checkNote[p.id].ok ? 'var(--dim)' : 'var(--danger)', fontSize: 10 }}>{checkNote[p.id].text}</div>}
+                {checkNote[p.id] && p.reach !== 'not-shared' && <div style={{ color: checkNote[p.id].ok ? 'var(--dim)' : 'var(--danger)', fontSize: 10 }}>{checkNote[p.id].text}</div>}
               </div>
               <div className="flex items-center gap-3 shrink-0">
                 <label className="flex items-center gap-1" style={{ color: 'var(--dim)' }} title="Type their messages into the orchestrator tab automatically">
@@ -211,7 +218,7 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
                 )}
               </div>
             </div>
-            {openHelp === p.id && p.help && p.reach === 'not-shared' && <ShareHelp help={p.help} />}
+            {openHelp === p.id && p.help && p.reach === 'not-shared' && <ShareHelp help={p.help} onHide={() => setOpenHelp(null)} />}
             </div>
           ))}
         </div>
@@ -222,7 +229,7 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
 
 // Two teammates on two Tailscale networks: why it fails and the share(s) that fix it (shared/tailnet-share.js).
 // Copy steps puts the whole text on the clipboard, to send the teammate the half that is theirs.
-function ShareHelp({ help }) {
+function ShareHelp({ help, onHide }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="text-xs px-3 py-2 rounded space-y-2" style={{ ...box, borderColor: 'var(--accent)' }}>
@@ -240,6 +247,7 @@ function ShareHelp({ help }) {
       <div className="flex gap-2">
         <button className="px-2 py-1 rounded" style={btn(true)} onClick={() => api.openExternal(MACHINES_URL)}>Open Tailscale Machines</button>
         <button className="px-2 py-1 rounded" style={btn(false)} onClick={async () => { await navigator.clipboard.writeText(help.text); setCopied(true); setTimeout(() => setCopied(false), 1500); }}>{copied ? 'Copied' : 'Copy steps'}</button>
+        {onHide && <button className="px-2 py-1 rounded" style={btn(false)} onClick={onHide}>Hide</button>}
       </div>
     </div>
   );
