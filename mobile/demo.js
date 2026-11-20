@@ -68,7 +68,7 @@ export function installDemoFetch() {
       let code = '';
       try { code = String(JSON.parse(init?.body || '{}').code || ''); } catch { /* bad body */ }
       return code === DEMO_CODE
-        ? json({ ok: true, token: DEMO_TOKEN, name: 'Demo Mac' })
+        ? json({ ok: true, token: DEMO_TOKEN, name: 'Demo computer' })
         : json({ ok: false, error: 'Invalid pairing code. The demo code is 123456.' });
     }
     if (path === '/voice/audio') return json({ ok: true, transcript: VOICE_TRANSCRIPT, requestId: 'demo-voice' });
@@ -140,7 +140,7 @@ function cannedReply(text) {
   if (/explain|what|why|how/.test(t)) return 'Short version: the redirect target now comes from the `next` parameter, and `safeNext()` only accepts paths on this site, so a crafted link cannot send someone elsewhere.';
   // Never quote the user's text back: it would render as Markdown, and an
   // image link in it would load from the network.
-  return 'Done. I read the relevant files, made the change and ran the tests (all passing).\n\nThis is the Dobius+ demo, so these replies are samples. Paired with your Mac, this is your real Claude Code session.';
+  return 'Done. I read the relevant files, made the change and ran the tests (all passing).\n\nThis is the Dobius+ demo, so these replies are samples. Paired with your computer, this is your real Claude Code session.';
 }
 
 // ---- DemoConnection --------------------------------------------------------

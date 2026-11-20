@@ -88,7 +88,7 @@ export async function enablePush(connection) {
   try {
     const vres = await connection.request('/push/vapid', { cache: 'no-store' });
     const vj = await vres.json();
-    if (!vres.ok || !vj.ok || !vj.publicKey) return { ok: false, error: 'This Mac has no push key. Pair it again if access was revoked.' };
+    if (!vres.ok || !vj.ok || !vj.publicKey) return { ok: false, error: 'This computer has no push key. Pair it again if access was revoked.' };
     const key = urlB64ToUint8Array(vj.publicKey);
     let reg = await existingRegistration(connection);
     const { script, scope } = workerUrls(connection);
@@ -99,7 +99,7 @@ export async function enablePush(connection) {
     if (sub) {
       const existingKey = new Uint8Array(sub.options.applicationServerKey || []);
       if (existingKey.length !== key.length || existingKey.some((b, i) => b !== key[i])) {
-        return { ok: false, error: 'This Mac changed its notification key. Its existing subscription has been kept. Reset notification permissions for this app to enable it again.' };
+        return { ok: false, error: 'This computer changed its notification key. Its existing subscription has been kept. Reset notification permissions for this app to enable it again.' };
       }
     } else {
       sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });

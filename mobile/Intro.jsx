@@ -8,20 +8,20 @@
 export default function Intro({ onBack }) {
   const cards = [
     {
-      title: 'Pair with your Mac',
-      body: 'Install Dobius+ on your Mac from dobepros.com/dobius-plus, open Settings › Mobile Access, and scan the QR code shown there, or enter the Mac address and pairing code. Your phone connects to your own Mac over Tailscale, so terminals stay on your machine.',
+      title: 'Pair with your computer',
+      body: 'Install Dobius+ on your computer from dobepros.com/dobius-plus, open Settings › Mobile Access, and scan the QR code shown there, or enter the computer address and pairing code. Your phone connects to your own computer over Tailscale, so terminals stay on your machine.',
     },
     {
       title: 'Your terminals, anywhere',
-      body: 'Every Claude Code session running on your Mac shows up as a card. Tap one to open the live terminal, scroll back through output, send keystrokes, or type a new prompt.',
+      body: 'Every Claude Code session running on your computer shows up as a card. Tap one to open the live terminal, scroll back through output, send keystrokes, or type a new prompt.',
     },
     {
       title: 'Hold the mic to talk',
-      body: 'Hold the voice button to speak a command. The Mac transcribes locally with whisper.cpp, routes it to the right Claude session, and reads the reply back.',
+      body: 'Hold the voice button to speak a command. The computer transcribes locally with whisper.cpp, routes it to the right Claude session, and reads the reply back.',
     },
     {
-      title: 'Try it without a Mac',
-      body: 'Enter the Mac address demo.dobius and the pairing code 123456 to explore the full app with sample sessions. Nothing leaves your phone. Tap “Pair your Mac” on the session board to leave the demo.',
+      title: 'Try it without a computer',
+      body: 'Enter the computer address demo.dobius and the pairing code 123456 to explore the full app with sample sessions. Nothing leaves your phone. Tap “Pair your computer” on the session board to leave the demo.',
     },
   ];
   return (

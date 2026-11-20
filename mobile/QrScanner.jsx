@@ -4,8 +4,8 @@ import { parsePairingLink } from '../shared/pairing-link.js';
 const SCANS_PER_SECOND = 8;
 const SCAN_WIDTH = 640; // a QR filling a third of the view is still plenty of pixels
 
-const NOT_OURS = 'That is not a Dobius+ pairing code. Scan the one under Settings › Mobile Access on your Mac.';
-const TEAM_INVITE = 'That is a team invite. Those are pasted into Settings › Team on a Mac, not scanned here.';
+const NOT_OURS = 'That is not a Dobius+ pairing code. Scan the one under Settings › Mobile Access on your computer.';
+const TEAM_INVITE = 'That is a team invite. Those are pasted into Settings › Team on a computer, not scanned here.';
 
 function cameraMessage(err) {
   if (err?.name === 'NotAllowedError') return 'Camera access is off. Allow it in the Settings app under Dobius+, or enter the address instead.';
@@ -74,11 +74,11 @@ export default function QrScanner({ onResult, onCancel }) {
   }, []);
 
   return (
-    <div className="qr-scanner" role="dialog" aria-label="Scan the QR code on your Mac">
+    <div className="qr-scanner" role="dialog" aria-label="Scan the QR code on your computer">
       <video ref={videoRef} className="qr-video" playsInline muted autoPlay />
       {!failed && <div className="qr-frame" aria-hidden="true" />}
       <div className="qr-top">
-        <p>Point your camera at the QR code under Settings › Mobile Access on your Mac.</p>
+        <p>Point your camera at the QR code under Settings › Mobile Access on your computer.</p>
       </div>
       <div className="qr-bottom">
         {message && <p className="qr-message" role="status">{message}</p>}

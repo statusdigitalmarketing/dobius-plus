@@ -50,6 +50,9 @@ const loadList = (key) => {
 };
 const saveList = (key, list) => { try { localStorage.setItem(key, JSON.stringify(list)); } catch { /* private mode */ } };
 
+// Says the name opens a list: the other computers and Add a computer live there.
+export const TitleChevron = () => <svg className="board-title-chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3" /></svg>;
+
 export default function Board({ connection, status, onOpen, onShowHistory, onShowTasks, onShowSettings, macName, onMacs }) {
   const pinsKey = pairingKey(connection.pairing, PINS_KEY);
   const collapsedKey = pairingKey(connection.pairing, COLLAPSED_KEY);
@@ -196,11 +199,11 @@ export default function Board({ connection, status, onOpen, onShowHistory, onSho
           name over a quiet status line, and a pill of actions. */}
       <header className="board-header elevated">
         <div className="board-title-row">
-          <button className="tb-round" onClick={onMacs} aria-label={`Switch Mac, current Mac: ${macName}`}>
+          <button className="tb-round" onClick={onMacs} aria-label={`Switch computer, current computer: ${macName}`}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="11" rx="2" /><path d="M2.5 19h19" /></svg>
           </button>
-          <button className="board-title-mid" onClick={onMacs} aria-label={`${macName}: ${statusLine}. Switch Mac`}>
-            <span className="board-title-main">{macName}</span>
+          <button className="board-title-mid" onClick={onMacs} aria-label={`${macName}: ${statusLine}. Switch computer`}>
+            <span className="board-title-line"><span className="board-title-main">{macName}</span><TitleChevron /></span>
             <span className="board-title-sub">
               {status !== 'authed' && <span className="status-dot" style={{ backgroundColor: dotColor }} />}
               {needsCount > 0 && <span className="board-title-needs">{`${needsCount} needs you`}</span>}
@@ -250,8 +253,8 @@ export default function Board({ connection, status, onOpen, onShowHistory, onSho
             <p className="board-empty-title">No sessions running</p>
             <p className="muted small">
               {status === 'authed'
-                ? 'Open a terminal on your Mac and it will appear here.'
-                : 'Waiting for the connection to your Mac…'}
+                ? 'Open a terminal on your computer and it will appear here.'
+                : 'Waiting for the connection to your computer…'}
             </p>
           </div>
         ) : (

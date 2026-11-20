@@ -67,10 +67,10 @@ export function mixedContent(origin, pageOrigin) {
 
 export function reachabilityMessage(origin, pageOrigin) {
   if (mixedContent(origin, pageOrigin)) {
-    return 'This app uses HTTPS and cannot connect to an HTTP Mac. Enable HTTPS in Dobius+ on that Mac, or open it directly.';
+    return 'This app uses HTTPS and cannot connect to an HTTP computer. Enable HTTPS in Dobius+ on that computer, or open it directly.';
   }
   const crossOrigin = new URL(origin).origin !== pageOrigin && /^https?:/.test(pageOrigin);
   return crossOrigin
-    ? 'Could not reach this Mac. Check Tailscale and that the Mac is awake. If it is reachable directly, update Dobius+ on that Mac to allow connections from this app.'
-    : 'Could not reach this Mac. Check Tailscale is on, the Mac is awake, and Dobius+ is running.';
+    ? 'Could not reach this computer. Check Tailscale and that the computer is awake. If it is reachable directly, update Dobius+ on that computer to allow connections from this app.'
+    : 'Could not reach this computer. Check Tailscale is on, the computer is awake, and Dobius+ is running.';
 }

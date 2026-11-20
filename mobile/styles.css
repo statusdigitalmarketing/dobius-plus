@@ -965,6 +965,7 @@ button.secondary:disabled { opacity: 0.4; }
 .mac-remove { margin-top: 12px; color: var(--danger); overflow-wrap: anywhere; }
 .mac-remove button { margin: 8px 8px 0 0; }
 .mac-add { padding: 16px 20px; }
+.mac-add-hint { margin: 10px 2px 0; color: var(--dim); font-size: 13px; line-height: 18px; }
 .mac-error { padding: 12px 20px; overflow-wrap: anywhere; }
 .mac-problem { padding: 24px; display: flex; flex-direction: column; gap: 16px; line-height: 1.5; }
 .mac-problem a, .mac-direct { color: var(--accent); overflow-wrap: anywhere; }
@@ -1292,7 +1293,10 @@ button.secondary:disabled { opacity: 0.4; }
   display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; min-width: 0;
   padding: 2px 4px; border: 0; background: none; color: var(--fg); font: inherit; cursor: pointer;
 }
-.board-title-main { max-width: 100%; overflow: hidden; font-size: 17px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
+/* The name with a chevron: tapping it lists your computers and Add a computer. */
+.board-title-line { display: flex; align-items: center; justify-content: center; gap: 4px; max-width: 100%; min-width: 0; }
+.board-title-chev { flex-shrink: 0; width: 12px; height: 12px; fill: none; stroke: var(--dim); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.board-title-main { min-width: 0; max-width: 100%; overflow: hidden; font-size: 17px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
 .board-title-sub {
   display: flex; align-items: center; gap: 6px; max-width: 100%; overflow: hidden;
   color: var(--dim); font-size: 13.5px; white-space: nowrap; text-overflow: ellipsis;
@@ -1430,6 +1434,11 @@ a.today-title:active { opacity: 0.7; }
 .ios-switch.on .ios-switch-knob { transform: translateX(20px); }
 @media (prefers-reduced-motion: reduce) { .ios-switch, .ios-switch-knob { transition: none; } }
 .settings-group.spaced { margin-top: 10px; }
+/* A row that opens something (Settings > Computers): the whole row is the button. */
+.settings-link { width: 100%; border: 0; background: none; font: inherit; font-size: 17px; text-align: left; cursor: pointer;
+  -webkit-tap-highlight-color: transparent; }
+.settings-link:active { background: var(--surface-2); }
+.settings-chev { color: var(--dim); font-size: 22px; line-height: 1; }
 /* What stops notifications reaching this phone, and the one thing to do about it. */
 .settings-warn { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; border-color: rgba(217, 96, 90, 0.45); }
 .settings-warn-text { margin: 0; font-size: 15px; line-height: 20px; color: var(--fg); }

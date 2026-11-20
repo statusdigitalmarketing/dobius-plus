@@ -441,7 +441,7 @@ const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending,
         {command && detail && <SkillPreview detail={detail} label={detailLabel || 'skill'} />}
         {failed ? (
           <div className="chat-msg-state chat-msg-failed" role="status">
-            {failed === 'failed' ? 'Not sent' : 'Not confirmed by the Mac'}
+            {failed === 'failed' ? 'Not sent' : 'Not confirmed by the computer'}
             {onRetry && <button type="button" className="chat-retry" onClick={onRetry}>Send again</button>}
             {onRemove && <button type="button" className="chat-retry chat-remove" onClick={onRemove}>Remove</button>}
           </div>
@@ -1108,7 +1108,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           // After the phone stopped waiting: only a refusal that wrote nothing changes anything (the words come back).
           const late = lateReqRef.current.get(msg.reqId);
           lateReqRef.current.delete(msg.reqId);
-          if (!msg.ok && !msg.uncertain) returnWords(late, 'The Mac answered late: nothing was sent.');
+          if (!msg.ok && !msg.uncertain) returnWords(late, 'The computer answered late: nothing was sent.');
         }
       } else if (msg.type === 'terminalText' && msg.id === tabId) {
         setShellText(typeof msg.text === 'string' ? msg.text : '');
@@ -1182,7 +1182,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       }
       // A message the Mac already listed as read keeps that, whatever this late answer says.
       setEchoes((cur) => cur.map((e) => (e.sendId === entry.sendId && !e.delivered ? { ...e, fail: outcome } : e)));
-      showSendNote(outcome === 'failed' ? `Not sent: ${why}` : 'The Mac did not confirm a message. Tap Send again on it: it is delivered at most once.');
+      showSendNote(outcome === 'failed' ? `Not sent: ${why}` : 'The computer did not confirm a message. Tap Send again on it: it is delivered at most once.');
     } else if (failed) flashPhoneNote(why);
   };
 
@@ -1215,7 +1215,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     if (tabId && connection.status === 'authed') connection.send(phoneStateRequest(tabId, echoesRef.current));
     return { ok: false };
   };
-  const NOT_READY = 'Not sent: still connecting to the Mac. Send it again in a moment.';
+  const NOT_READY = 'Not sent: still connecting to the computer. Send it again in a moment.';
 
   const openMoveSheet = () => {
     if (!phoneOffered(connection.features) || phoneOn) return;
@@ -1432,7 +1432,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       return false;
     }
     if (!phoneRequest('phoneSend', { runId: e.runId, text: e.content, sendId: e.sendId }, { text: e.content, sendId: e.sendId })) {
-      showSendNote('Not sent: not connected to the Mac right now. Send it again in a moment.');
+      showSendNote('Not sent: not connected to the computer right now. Send it again in a moment.');
       return false;
     }
     setSendNote('');
@@ -1459,12 +1459,12 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       let full = false;
       try { full = outboxFull(localStorage, outboxKey, tabId); } catch (err) { console.warn('[phone] outbox not read:', err?.message || err); }
       if (full) {
-        showSendNote(`Messages are waiting for the Mac on ${OUTBOX_TABS} other tabs. Send them again or remove them there first.`);
+        showSendNote(`Messages are waiting for the computer on ${OUTBOX_TABS} other tabs. Send them again or remove them there first.`);
         return;
       }
       const sendId = freshId('s');
       if (!phone.runId || connection.status !== 'authed') {
-        showSendNote('Not sent: not connected to the Mac right now. Send it again in a moment.');
+        showSendNote('Not sent: not connected to the computer right now. Send it again in a moment.');
         return;
       }
       // runId: Send again goes to the run it was written for, never to a later one on the same tab (Codex r27).
@@ -1481,7 +1481,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       if (!phoneRequest('phoneSend', { runId: phone.runId, text, sendId }, { text, sendId })) {
         try { saveOutbox(localStorage, outboxKey, tabId, [], new Set([sendId])); } catch (err) { console.warn('[phone] outbox not cleaned:', err?.message || err); }
         ownedRef.current.delete(sendId);
-        showSendNote('Not sent: not connected to the Mac right now. Send it again in a moment.');
+        showSendNote('Not sent: not connected to the computer right now. Send it again in a moment.');
         return;
       }
       setSendNote('');
@@ -1558,7 +1558,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     const { token } = pressGuard.current.pressedCard(e, card);
     const w = writeGen();
     if (!w.ok) {
-      setSelNote('Still connecting to the Mac. Nothing was sent, tap again in a moment.');
+      setSelNote('Still connecting to the computer. Nothing was sent, tap again in a moment.');
       setTimeout(() => setSelNote(''), 4000);
       return false;
     }
@@ -1673,7 +1673,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     // letting the connection drop it while the words vanish from the screen (Codex Medium).
     // _suspect: a liveness probe after a wake, when the socket may be dead though it still reads open (Codex Medium).
     // A socket mid-close still reads authed until onclose, and would drop this unqueued message (Codex Medium, round 9).
-    if (connection.status !== 'authed' || connection._suspect || connection.ws?.readyState !== 1) { showSelNote('Still connecting to the Mac. Nothing was sent, try again in a moment.'); return false; }
+    if (connection.status !== 'authed' || connection._suspect || connection.ws?.readyState !== 1) { showSelNote('Still connecting to the computer. Nothing was sent, try again in a moment.'); return false; }
     if (text.length > FREE_TEXT_MAX) { showSelNote(`That answer is too long for the card. Keep it under ${FREE_TEXT_MAX} characters.`); return false; }
     // Those exact words would read as the empty row again, and a second send would add them twice (Codex, round 3).
     if (FREE_TEXT_LABEL.test(text.trim())) { showSelNote('Type your own answer in your own words, not the row\'s label.'); return false; }
@@ -1681,7 +1681,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     const { token } = pressGuard.current.pressedCard(e, card);
     if (!token) return false;
     const w = writeGen();
-    if (!w.ok) { showSelNote('Still connecting to the Mac. Nothing was sent, try again in a moment.'); return false; }
+    if (!w.ok) { showSelNote('Still connecting to the computer. Nothing was sent, try again in a moment.'); return false; }
     const reqId = freshId('t');
     const key = askCardKey(card);
     freeReqRef.current = { reqId, key, multi: lay.multi, text };
@@ -1697,7 +1697,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       while (lateReqRef.current.size > LATE_TEXT_MAX) lateReqRef.current.delete(lateReqRef.current.keys().next().value);
       setFreeBusy(false);
       // Not put back: they may have gone in, and the answer to say so may never arrive.
-      showSelNote(`No answer from the Mac yet. Your words may have gone in: check the card before typing "${req.text.length > 40 ? `${req.text.slice(0, 40)}...` : req.text}" again.`);
+      showSelNote(`No answer from the computer yet. Your words may have gone in: check the card before typing "${req.text.length > 40 ? `${req.text.slice(0, 40)}...` : req.text}" again.`);
     }, 15000);
     return true;
   };
@@ -1814,7 +1814,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       freeEl = row({ num: free.num, checked: free.checked }, free.text, ''); // the words typed into it: a box like any other
     } else if (free) {
       // An older Mac: its free row only opens Claude's own field, so the words go in from the terminal.
-      freeEl = row({ num: free.num, checked: free.checked }, 'Type your own answer', 'Open the terminal to type it, or update Dobius+ on your Mac to type it here');
+      freeEl = row({ num: free.num, checked: free.checked }, 'Type your own answer', 'Open the terminal to type it, or update Dobius+ on your computer to type it here');
     }
     return (
       <div
@@ -2030,7 +2030,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
             onClick={() => fileInputRef.current?.click()}
             disabled={uploading}
             aria-label="Attach a screenshot or file"
-            title="Attach a screenshot or file (uploads to the Mac, path goes into the prompt)"
+            title="Attach a screenshot or file (uploads to the computer, path goes into the prompt)"
           >
             {uploading ? '…' : (
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
@@ -2113,7 +2113,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
           <div className="chat-history-edge" aria-live="polite">
             {history === 'loading' && 'Loading earlier messages…'}
             {history === 'start' && 'Start of conversation'}
-            {history === 'cap' && 'Older messages are in History on your Mac.'}
+            {history === 'cap' && 'Older messages are in History on your computer.'}
             {history === 'more' && <button type="button" className="chat-history-more" onClick={loadOlder}>Load earlier messages</button>}
           </div>
         )}

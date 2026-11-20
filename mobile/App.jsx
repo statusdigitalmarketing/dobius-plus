@@ -1,7 +1,7 @@
 import { parsePairingLink } from '../shared/pairing-link.js';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Pairing from './Pairing';
-import Board from './Board';
+import Board, { TitleChevron } from './Board';
 import TerminalScreen from './Terminal';
 import History from './History';
 import Tasks from './Tasks';
@@ -65,7 +65,7 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
     const offMessage = c.onMessage((msg) => {
       if (msg.type === 'authFailed') {
         setAuthFailed(true);
-        setProblem('This Mac no longer accepts this pairing. Pair it again with a new code.');
+        setProblem('This computer no longer accepts this pairing. Pair it again with a new code.');
       }
     });
     let timeout;
@@ -159,11 +159,11 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
     <div className="screen board-screen">
       <header className="board-header elevated">
         <div className="board-title-row">
-          <button className="tb-round" onClick={onMacs} aria-label={`Switch Mac, current Mac: ${pairing.name}`}>
+          <button className="tb-round" onClick={onMacs} aria-label={`Switch computer, current computer: ${pairing.name}`}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="11" rx="2" /><path d="M2.5 19h19" /></svg>
           </button>
-          <button className="board-title-mid" onClick={onMacs} aria-label={`Switch Mac, current Mac: ${pairing.name}`}>
-            <span className="board-title-main">{pairing.name}</span>
+          <button className="board-title-mid" onClick={onMacs} aria-label={`Switch computer, current computer: ${pairing.name}`}>
+            <span className="board-title-line"><span className="board-title-main">{pairing.name}</span><TitleChevron /></span>
             <span className="board-title-sub">{problem ? 'offline' : 'connecting'}</span>
           </button>
           <span className="tb-spacer" aria-hidden="true" />
@@ -171,18 +171,18 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
       </header>
       <main className="mac-problem">
         <p className="mac-origin">{origin}</p>
-        <p role="status">{problem || 'Connecting to this Mac…'}</p>
+        <p role="status">{problem || 'Connecting to this computer…'}</p>
         {problem && <>
-          <a href={origin} target="_blank" rel="noreferrer">Open this Mac directly</a>
+          <a href={origin} target="_blank" rel="noreferrer">Open this computer directly</a>
           {!authFailed && <button onClick={() => setAttempt((n) => n + 1)}>Retry</button>}
-          <button onClick={onRepair}>Pair this Mac again</button>
+          <button onClick={onRepair}>Pair this computer again</button>
         </>}
       </main>
     </div>
   );
   if (view === 'history') return <History connection={connection} onBack={() => setView('board')} />;
   if (view === 'tasks') return <Tasks connection={connection} onBack={() => { setTasksStart(null); setTasksNotice(null); setView('board'); }} onOpenTab={openTabFromTasks} startView={tasksStart} notice={tasksNotice} />;
-  if (view === 'settings') return <Settings connection={connection} macName={pairing.name} onBack={() => setView('board')} />;
+  if (view === 'settings') return <Settings connection={connection} macName={pairing.name} onMacs={onMacs} onBack={() => setView('board')} />;
   if (view === 'terminal') return <TerminalScreen connection={connection} status={status} initialId={openTabId} openNonce={openNonce} onBack={() => { setView(terminalBack); setTerminalBack('board'); }} onShowHistory={() => setView('history')} onExactMissing={terminalBack === 'tasks' ? runTerminalGone : undefined} />;
   const board = <Board connection={connection} status={status} macName={pairing.name} onMacs={onMacs}
     onOpen={openTab} onShowHistory={() => setView('history')}
@@ -192,7 +192,7 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
   return <>
     <div className="demo-banner" role="status">
       <span>Sample data</span>
-      <button type="button" onClick={onLeaveDemo}>Pair your Mac</button>
+      <button type="button" onClick={onLeaveDemo}>Pair your computer</button>
     </div>
     <div className="demo-board">{board}</div>
   </>;
@@ -290,7 +290,7 @@ export default function App() {
       if (cancelled) return;
       stateRef.current = loaded;
       setState(loaded);
-    }).catch(() => { if (!cancelled) setError('Could not read or save your paired Macs. Check device storage and try again.'); });
+    }).catch(() => { if (!cancelled) setError('Could not read or save your paired computers. Check device storage and try again.'); });
     return () => { cancelled = true; };
   }, [loadAttempt]);
 
@@ -394,7 +394,7 @@ export default function App() {
         });
         return true;
       } catch {
-        setError('Could not save your paired Macs. Check device storage and try again.');
+        setError('Could not save your paired computers. Check device storage and try again.');
         try { const saved = await readPairings(storage); if (saved) adopt(saved); } catch { /* keep what is shown */ }
         return false;
       } finally { setBusy(false); }
@@ -440,9 +440,9 @@ export default function App() {
       errorSeqRef.current = ++opSeqRef.current;
       setError(message);
     };
-    const removedMessage = 'That notification came from a Mac that is no longer paired with this app.';
+    const removedMessage = 'That notification came from a computer that is no longer paired with this app.';
     // With several Macs saved, the Mac on screen not knowing the tap proves nothing about the others (Codex PR 31).
-    const notHereMessage = (name) => `${name} does not have the tab that notification is about. If it came from another of your Macs, switch to that Mac.`;
+    const notHereMessage = (name) => `${name} does not have the tab that notification is about. If it came from another of your computers, switch to that computer.`;
     // Taps are numbered and only the NEWEST one acts: an older tap still
     // waiting for the pairing lock leaves the document untouched when it gets
     // its turn, so it cannot switch Macs after a newer tap (Codex High).
@@ -470,7 +470,7 @@ export default function App() {
           // is the one on screen (Codex PR 31). update() never rejects. The overlay stays up (and the session inert)
           // for the whole wait; once the request is set, MacSession shows the board until the Mac names the tab.
           // An earlier tap's overlay names the Mac it is switching to: keep that one.
-          const onScreen = stateRef.current.pairings.find((p) => p.id === stateRef.current.activeId)?.name || 'your Mac';
+          const onScreen = stateRef.current.pairings.find((p) => p.id === stateRef.current.activeId)?.name || 'your computer';
           setSwitchingTo((cur) => cur ?? onScreen);
           await writes.current;
           if (seq !== tapSeqRef.current) return; // superseded: the newer tap finishes
@@ -497,7 +497,7 @@ export default function App() {
       if (!ok) {
         // Removed by another tab meanwhile, or storage refused the switch.
         cannotOpen(stateRef.current.pairings.some((p) => p.id === wanted)
-          ? 'Could not switch to the Mac that sent this notification. Check device storage and try again.'
+          ? 'Could not switch to the computer that sent this notification. Check device storage and try again.'
           : removedMessage);
       }
       // Some tap in this run closed a connection: whichever Mac is shown now,
@@ -548,7 +548,7 @@ export default function App() {
     // app also gives up the old pairing's APNs token there, so the new pairing
     // can register it (a token held by a live pairing is never moved).
     for (const gone of new Set([...replaceIds, atOrigin].filter(Boolean))) {
-      if (!stateRef.current.pairings.some((p) => p.id === gone)) forgetPush(gone).catch(() => { /* best effort: the Mac drops a dead endpoint */ });
+      if (!stateRef.current.pairings.some((p) => p.id === gone)) forgetPush(gone).catch(() => { /* best effort: the computer drops a dead endpoint */ });
       // A replaced record may keep its id with a new token (upsertPairing keeps the proven one's id): judged by the
       // token, so the old pairing's APNs registration is given up either way (Codex round 4).
       const old = before.get(gone);
@@ -597,7 +597,7 @@ export default function App() {
         // A removed Mac must stop notifying this app (Codex). Decided by the
         // saved list, not the result: a save whose read-back failed may still
         // have removed it.
-        if (!stateRef.current.pairings.some((p) => p.id === id)) forgetPush(id).catch(() => { /* best effort: the Mac drops a dead endpoint */ });
+        if (!stateRef.current.pairings.some((p) => p.id === id)) forgetPush(id).catch(() => { /* best effort: the computer drops a dead endpoint */ });
         return ok;
       }}
       onAdd={() => showPairing({ host: '' })} />}

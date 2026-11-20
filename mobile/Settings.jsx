@@ -86,7 +86,7 @@ function useReach(connection, info) {
   let action = null;
   if (state.checking) line = null;
   else if (state.native) {
-    if (!info?.apnsReady) line = 'Your Mac cannot send to this app yet: its Apple push key is not set up. Until then nothing arrives here.';
+    if (!info?.apnsReady) line = 'Your computer cannot send to this app yet: its Apple push key is not set up. Until then nothing arrives here.';
     else if (state.perm === 'denied') line = 'Notifications are off for Dobius+ in iPhone Settings. Turn them on there to get these.';
     else if (state.perm !== 'granted' || !info?.thisPhoneApns) { line = 'Notifications are not on for this phone yet.'; action = 'Turn On Notifications'; }
   } else if (!state.supported) {
@@ -172,8 +172,8 @@ function Accounts({ connection, onChanged }) {
     setError('');
     const r = await ask(connection, { type: 'accountActivate', id: row.isDefault ? null : row.id }, 'accountResult');
     setBusy(false);
-    if (!r) setError('No answer from your Mac. Try again in a moment.');
-    else if (!r.ok) setError(r.error === 'unavailable' ? 'Your Mac would not switch accounts.' : r.error || 'Your Mac would not switch accounts.');
+    if (!r) setError('No answer from your computer. Try again in a moment.');
+    else if (!r.ok) setError(r.error === 'unavailable' ? 'Your computer would not switch accounts.' : r.error || 'Your computer would not switch accounts.');
     load();
     onChanged();
   };
@@ -196,7 +196,7 @@ function Accounts({ connection, onChanged }) {
           </button>
         ))}
       </div>
-      <p className="settings-foot">New tabs on your Mac start on the checked account. Tabs already running stay where they are.</p>
+      <p className="settings-foot">New tabs on your computer start on the checked account. Tabs already running stay where they are.</p>
       {error && <p className="today-warn">{error}</p>}
       {list.codex.length > 1 && (
         <>
@@ -212,14 +212,14 @@ function Accounts({ connection, onChanged }) {
               </div>
             ))}
           </div>
-          <p className="settings-foot">Switch the Codex account on the Mac (Settings, Accounts).</p>
+          <p className="settings-foot">Switch the Codex account on the computer (Settings, Accounts).</p>
         </>
       )}
     </>
   );
 }
 
-export default function Settings({ connection, onBack, macName }) {
+export default function Settings({ connection, onBack, macName, onMacs }) {
   const supported = useFeature(connection, 'settings');
   const hasAlerts = useFeature(connection, 'alerts');
   const hasAccounts = useFeature(connection, 'accounts');
@@ -248,8 +248,8 @@ export default function Settings({ connection, onBack, macName }) {
     setError('');
     const r = await ask(connection, { type: 'settingsWrite', key, value }, 'settingsResult');
     setSaving(false);
-    if (!r) setError('No answer from your Mac. Try again in a moment.');
-    else if (!r.ok) setError(ERRORS[r.error] || 'Your Mac would not save that.');
+    if (!r) setError('No answer from your computer. Try again in a moment.');
+    else if (!r.ok) setError(ERRORS[r.error] || 'Your computer would not save that.');
     load();
   };
 
@@ -260,10 +260,18 @@ export default function Settings({ connection, onBack, macName }) {
       <span className="spacer" />
     </header>
   );
-  if (supported === null) return <div className="screen history">{header}<main className="today-body"><p className="muted pad">Connecting to your Mac…</p></main></div>;
-  if (!supported) return <div className="screen history">{header}<main className="today-body"><p className="muted pad">This Mac needs a newer Dobius+ for Settings here. Update Dobius+ on the Mac.</p></main></div>;
-  if (!data) return <div className="screen history">{header}<main className="today-body"><p className="muted pad">Loading…</p></main></div>;
-  if (data.failed) return <div className="screen history">{header}<main className="today-body"><p className="muted pad">Could not read settings from your Mac. <button className="link-btn" onClick={load}>Try again</button></p></main></div>;
+  // First, and on every state of this screen (an older Dobius+ shows no settings here): where to add or switch
+  // computers, which people look for under Settings (Max, 2026-11-19).
+  const computers = onMacs && <>
+    <p className="settings-head">Computers</p>
+    <div className="settings-group">
+      <button type="button" className="settings-row settings-link" onClick={onMacs}><span>Add or switch computers</span><span className="settings-chev" aria-hidden="true">›</span></button>
+    </div>
+  </>;
+  if (supported === null) return <div className="screen history">{header}<main className="today-body settings-body">{computers}<p className="muted pad">Connecting to your computer…</p></main></div>;
+  if (!supported) return <div className="screen history">{header}<main className="today-body settings-body">{computers}<p className="muted pad">This computer needs a newer Dobius+ for Settings here. Update Dobius+ on the computer.</p></main></div>;
+  if (!data) return <div className="screen history">{header}<main className="today-body settings-body">{computers}<p className="muted pad">Loading…</p></main></div>;
+  if (data.failed) return <div className="screen history">{header}<main className="today-body settings-body">{computers}<p className="muted pad">Could not read settings from your computer. <button className="link-btn" onClick={load}>Try again</button></p></main></div>;
 
   const n = data.todayNudges;
   const tool = data.newTabTool;
@@ -273,6 +281,7 @@ export default function Settings({ connection, onBack, macName }) {
     <div className="screen history">
       {header}
       <main className="today-body settings-body">
+        {computers}
         {hasAlerts && data.phoneAlerts && <Notifications data={data} connection={connection} write={write} saving={saving} onChanged={load} />}
         {error && <p className="today-warn">{error}</p>}
 
@@ -322,11 +331,11 @@ export default function Settings({ connection, onBack, macName }) {
           Alerts say how many things are on Today, never what they are. The first five go out in the morning, the next five once those are done or snoozed.
           {n.imessage && !onWindows && !data.info.imessageReady && ' Texts need your iMessage handle set on the Mac (Settings, iMessage Bridge).'}
           {n.push && !data.info.phonePush && (hasAlerts
-            ? ' No phone can get notifications from this Mac yet: turn them on under Notifications above.'
-            : ' No phone has notifications on for this Mac yet: tap the bell on the home screen of the web app.')}
+            ? ' No phone can get notifications from this computer yet: turn them on under Notifications above.'
+            : ' No phone has notifications on for this computer yet: tap the bell on the home screen of the web app.')}
         </p>
 
-        <p className="settings-head">This Mac</p>
+        <p className="settings-head">This computer</p>
         <div className="settings-group">
           <div className="settings-row"><span>Name</span><span className="muted">{macName}</span></div>
           <div className="settings-row"><span>Dobius+</span><span className="muted">{data.info.version}</span></div>
