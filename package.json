@@ -108,7 +108,7 @@
     "test:inbox": "node --import ./electron/__tests__/register.mjs --test electron/__tests__/inbox-board.test.mjs electron/__tests__/tasks-inbox.test.mjs shared/__tests__/task-due.test.mjs",
     "test:bridgehard": "node --import ./electron/__tests__/register.mjs --test electron/__tests__/bridge-hardening.test.mjs",
     "test:teamproto": "node --test electron/__tests__/team-protocol.test.mjs",
-    "test:teamsvc": "node --test --test-timeout=60000 electron/__tests__/team-service.test.mjs",
+    "test:teamsvc": "node --test --test-timeout=60000 electron/__tests__/team-service.test.mjs electron/__tests__/team-cross-tailnet.test.mjs",
     "test:handoffcmds": "node --test electron/__tests__/handoff-commands.test.mjs",
     "test:projectboard": "node --test electron/__tests__/project-board.test.mjs",
     "test:tabcontext": "node --experimental-test-module-mocks --import ./electron/__tests__/register.mjs --test electron/__tests__/tab-context-clear.test.mjs",

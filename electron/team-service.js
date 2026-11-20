@@ -17,6 +17,7 @@ import * as P from './team-protocol.js';
 import { shortFp, fingerprint } from './team-crypto.js';
 import { looksLikeFingerprint } from './team-store.js';
 import { isDone } from '../shared/team-done.js';
+import { tailnetOf, crossTailnet, crossTailnetHelp } from '../shared/tailnet-share.js';
 import { deliver, deliveryCard, handoffCard, GAVE_UP_NOTE } from './team-deliver.js';
 
 export const SEND_DEADLINE_MS = 24 * 3600 * 1000;
@@ -68,6 +69,39 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   // shared): at most REPORTS_PER_MIN a minute, and a pause after an answer that says they do not have the route.
   const reportTimes = new Map(); // peer -> recent request times
   const reportPause = new Map(); // peer -> until
+  // What the last request to each teammate said about reaching them (docs: "Teammates on another Tailscale network"):
+  // peer -> { problem: 'not-shared' | 'offline' | 'unreachable' | null, at }. Memory only, one entry per linked peer.
+  const reach = new Map();
+  // `proven`: the answer was signed by the key we linked (a verified receipt, ack or hello). 'different-install' (it
+  // answers, but not with the linked key: reinstalled, or another install at that name) clears only on proof, never on
+  // a bare status code such as their 403 (Codex r1).
+  // `peer` is the record the request was made with: an answer about an address that is no longer the saved one (an
+  // unlink and re-link while the request was out) says nothing about the current link (Codex r3).
+  function noteReach(peer, r, proven = false) {
+    const peerId = peer.id;
+    const cur = store.peers()[peerId];
+    if (!cur) { reach.delete(peerId); return; }
+    if (cur.host !== peer.host || cur.port !== peer.port || cur.linkedAt !== peer.linkedAt) return;
+    // An entry measured at another address (a re-link that moved them) is not this link's history (Codex r4).
+    const old = reach.get(peerId);
+    const prev = old?.host === peer.host && old?.port === peer.port ? old : null;
+    let problem = r.status ? null : (r.reach || (r.error ? 'unreachable' : null));
+    // Sticky until a signed answer: a timeout in between must not turn it into something a bare 403 then clears.
+    if (!proven && prev?.problem === 'different-install') problem = 'different-install';
+    reach.set(peerId, { problem, at: now(), host: peer.host, port: peer.port });
+    if ((prev?.problem || null) !== problem) changed();
+  }
+  // The note an outgoing row gets when the teammate cannot be reached: the share steps when that is the cause.
+  function reachNote(peer, r) {
+    const m = me();
+    if (r.reach === 'not-shared' && m && crossTailnet(m.host, peer.host)) {
+      return `${peer.name}'s computer is on another Tailscale network and is not shared with you (or it was renamed, or a Tailscale access rule hides it). Settings > Team shows the fix`;
+    }
+    if (r.reach === 'offline') return `${peer.name}'s computer is offline in Tailscale (${r.error})`;
+    if (r.reach === 'tailscale-off') return 'Tailscale is not connected on this computer. Open Tailscale and sign in';
+    if (r.reach === 'not-in-tailnet') return `${peer.host} is no longer on your Tailscale network (renamed or removed?). Unlink ${peer.name} and link again`;
+    return null;
+  }
 
   const identity = () => store.loadIdentity();
   const myFp = () => fpOf(identity());
@@ -86,9 +120,21 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     try { id = identity(); } catch (err) { return { ok: false, error: err.message }; }
     const fp = fpOf(id);
     const ep = endpoint();
-    const peers = Object.values(store.peers()).map(({ ed, x, ...p }) => ({ ...p, short: shortFp(p.id) }));
+    const meNow = ep ? { name: store.settings().name, host: ep.host } : null;
+    const peers = Object.values(store.peers()).map(({ ed, x, ...p }) => {
+      const cross = !!meNow && crossTailnet(meNow.host, p.host);
+      const entry = reach.get(p.id);
+      const problem = (entry?.host === p.host && entry?.port === p.port && entry.problem) || null;
+      return {
+        ...p, short: shortFp(p.id), tailnet: tailnetOf(p.host), cross, reach: problem,
+        help: cross ? crossTailnetHelp({ me: meNow, them: p, missing: problem === 'not-shared' ? 'theirs' : 'both' }) : null,
+      };
+    });
     return {
-      ok: true, fp, short: shortFp(fp), endpoint: ep, notReachable: ep ? null : notReachable(), settings: store.settings(), peers,
+      ok: true, fp, short: shortFp(fp), endpoint: ep, tailnet: ep ? tailnetOf(ep.host) : null,
+      notReachable: ep ? null : notReachable(), settings: store.settings(), peers,
+      // Generic steps for the Invite screen: a teammate on another Tailscale account must be shared both ways first.
+      inviteHelp: meNow ? crossTailnetHelp({ me: meNow, them: { name: 'your teammate', host: '' }, missing: 'both' }) : null,
       pendingLinks: [...invites.entries()].filter(([, v]) => v.decision === 'pending' && v.expiresAt > now())
         .map(([inviteId, v]) => ({ inviteId, name: v.joiner.name, short: shortFp(v.joiner.id), host: v.joiner.host })),
     };
@@ -149,6 +195,9 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     }
     entry.decision = accept ? 'accepted' : 'declined';
     changed();
+    // Can this Mac reach them back? Joining only proves THEY reach US; across two Tailscale networks the other
+    // direction needs its own share, and the peer row says so right away instead of at the first failed send.
+    if (accept) checkPeer(entry.joiner.id).catch((err) => console.warn('[team] reach check failed:', err?.message || err));
     return { ok: true };
   }
 
@@ -166,7 +215,18 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const h = await request({ host: inv.host, port: inv.port, method: 'GET', path: `/team/hello?nonce=${nonce}` });
     const a = h.status === 200 ? P.checkHello(h.json, nonce, inv.fp) : null;
     // A wrong or hostile address learns nothing: we stop before sending anything (design step 2).
-    if (!a) return { ok: false, error: h.error ? `could not reach ${inv.host} (${h.error})` : 'the Mac at that address is not the one that made the invite' };
+    if (!a) {
+      // Known causes that sharing cannot fix come first (Codex r4).
+      if (h.reach === 'tailscale-off') return { ok: false, error: 'Tailscale is not connected on this computer. Open Tailscale, sign in, then paste the invite again.' };
+      if (h.reach === 'offline') return { ok: false, error: `${inv.host} is offline in Tailscale right now (asleep, or Tailscale is off there). Paste the invite again once it is on.` };
+      if (h.error && crossTailnet(m.host, inv.host)) {
+        // The Zee case (2026-11-19): the invite names a machine on someone else's tailnet, not shared with this one.
+        const help = crossTailnetHelp({ me: m, them: { name: 'your teammate', host: inv.host }, missing: 'both' });
+        const why = h.reach === 'not-shared' ? 'it has not been shared with you in Tailscale yet' : `it did not answer (${h.error})`;
+        return { ok: false, error: `Could not reach ${inv.host}: it is on another Tailscale network (${tailnetOf(inv.host)}) and ${why}. Both of you share your computer with the other in Tailscale, then paste the invite again.`, help };
+      }
+      return { ok: false, error: h.error ? `could not reach ${inv.host} (${h.error})` : 'the Mac at that address is not the one that made the invite' };
+    }
     const reqNonce = P.newNonce();
     const lr = P.buildLinkRequest(identity(), m, { id: inv.fp, x: a.x }, inv.secret, reqNonce);
     const end = now() + P.INVITE_MS;
@@ -181,7 +241,9 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
         }
         const saved = store.savePeer(peer);
         changed();
-        return { ok: true, peer: { id: saved.id, name: saved.name, short: shortFp(saved.id) } };
+        // Across two Tailscale networks their share reached us, but our messages need OUR computer shared with them.
+        const help = crossTailnet(m.host, saved.host) ? crossTailnetHelp({ me: m, them: saved, missing: 'mine' }) : null;
+        return { ok: true, peer: { id: saved.id, name: saved.name, short: shortFp(saved.id) }, help };
       }
       if (r.status === 403) return { ok: false, error: r.json?.state === 'declined' ? 'they declined the link' : 'the invite was refused (expired, already used, or not for this Mac)' };
       if (r.status && r.status !== 202 && r.status !== 429 && r.status !== 503) return { ok: false, error: `unexpected answer ${r.status}` };
@@ -398,6 +460,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   function unlink(id) {
     const ok = store.removePeer(id);
     if (ok) unlinkedAt.set(id, now());
+    reach.delete(id);
     // An accepted invite would otherwise keep confirming the link to a joiner that is no longer a teammate.
     for (const v of invites.values()) if (v.joiner?.id === id) v.decision = 'declined';
     changed();
@@ -671,6 +734,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     reportTimes.set(row.peer, times);
     const wire = P.buildStatus(identity(), myFp(), peer, { id: row.id, ...rep }, now());
     const r = await request({ host: peer.host, port: peer.port, method: 'POST', path: '/team/status', body: wire.body, headers: { [SIG_HEADER]: wire.sig } });
+    noteReach(peer, r, r.status === 200 && P.checkStatusAck(peer, myFp(), row.id, rep.seq, r.json?.ack));
     // Re-read: a newer report may have been queued while this one was in flight.
     // Pause on these whatever became of the row meanwhile (it may have been evicted during the request).
     if (r.status === 404) reportPause.set(row.peer, now() + REPORT_PAUSE_MS);
@@ -1045,6 +1109,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const env = { id: msg.id, kind: msg.kind, replyTo: msg.replyTo, text: msg.text, firstSentAt: msg.firstSentAt, deadline: msg.deadline };
     const wire = P.buildMessage(identity(), myFp(), peer, env, now());
     const r = await request({ host: peer.host, port: peer.port, method: 'POST', path: '/team/message', body: wire.body, headers: { [SIG_HEADER]: wire.sig } });
+    noteReach(peer, r, r.status === 200 && !!P.checkReceipt(peer, myFp(), env, r.json?.receipt));
     // A row found still 'sending' was cut off mid-attempt (a failed write, a quit): that attempt may have arrived.
     const reached = msg.reached || msg.state === 'sending' || !!r.reached;
     if (r.status === 200 && P.checkReceipt(peer, myFp(), env, r.json?.receipt)) {
@@ -1054,13 +1119,38 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     } else {
       // Anything but a VERIFIED receipt is retried until the deadline, a 409 included: a status code is not signed,
       // so whatever answers at that address (a reassigned name) cannot end the retries.
-      const why = r.error || (r.status === 200 ? 'the receipt did not check out' : `answer ${r.status}`);
+      const why = reachNote(peer, r) || r.error || (r.status === 200 ? 'the receipt did not check out' : `answer ${r.status}`);
       // A signed status that landed while this attempt was out already settled the row: keep it delivered.
       const cur = store.messages().find((x) => x.dir === 'out' && x.peer === msg.peer && x.id === msg.id);
       if (cur?.state === 'delivered') { changed(); return; }
       store.patchMessage('out', msg.peer, msg.id, { state: 'queued', reached, nextAt: now() + backoff, note: why });
     }
     changed();
+  }
+
+  // ---------- reachability ----------
+
+  /**
+   * Settings > Team "Check connection", and right after accepting a link: ask the teammate's /team/hello (public, no
+   * secret) and check it answers with THEIR keys. { ok, reachable, problem, help }.
+   */
+  async function checkPeer(id) {
+    const peer = store.peers()[id];
+    if (!peer) return { ok: false, error: 'not a linked teammate' };
+    const nonce = P.newNonce();
+    const r = await request({ host: peer.host, port: peer.port, method: 'GET', path: `/team/hello?nonce=${nonce}` });
+    const good = r.status === 200 && !!P.checkHello(r.json, nonce, peer.id);
+    if (good) noteReach(peer, r, true);
+    else if (r.status === 200) noteReach(peer, { status: 0, reach: 'different-install' });
+    else noteReach(peer, { ...r, status: 0, error: r.error || `answer ${r.status}` });
+    if (good) return { ok: true, reachable: true, problem: null };
+    const m = me();
+    const problem = reach.get(id)?.problem || 'unreachable';
+    const help = m && crossTailnet(m.host, peer.host) ? crossTailnetHelp({ me: m, them: peer, missing: problem === 'not-shared' ? 'theirs' : 'both' }) : null;
+    const error = problem === 'different-install'
+      ? `${peer.name}'s computer answers, but not as the Dobius+ you linked (reinstalled, or a different install). Unlink and link again`
+      : reachNote(peer, r) || r.error || `answer ${r.status}`;
+    return { ok: true, reachable: false, problem, error, help };
   }
 
   // ---------- lifecycle ----------
@@ -1154,7 +1244,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
 
   return {
     unlink, dismiss, archive, messagesForUi,
-    status, createInvite, hello, link, decideLink, join, receive, routeNow,
+    status, createInvite, hello, link, decideLink, join, checkPeer, receive, routeNow,
     findPeer, send, reply, retry, sendAgain, start, stop, settingsChanged, pump,
     handoff, approveHandoff, receiveStatus, tabEvent, markIncoming, pumpReports, following, followedPid,
     SIG_HEADER,

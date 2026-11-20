@@ -576,6 +576,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   teamRouteNow: (peer, id) => ipcRenderer.invoke('team:routeNow', peer, id),
   teamUpdatePeer: (id, patch) => ipcRenderer.invoke('team:updatePeer', id, patch),
   teamUnlink: (id) => ipcRenderer.invoke('team:unlink', id),
+  teamCheckPeer: (id) => ipcRenderer.invoke('team:checkPeer', id),
   teamSettings: (patch) => ipcRenderer.invoke('team:settings', patch),
   onTeamChanged: (callback) => {
     const handler = () => callback();

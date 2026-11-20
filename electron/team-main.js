@@ -7,7 +7,9 @@ import path from 'node:path';
 import { app, safeStorage, ipcMain, BrowserWindow, Notification } from 'electron';
 import { createTeamStore } from './team-store.js';
 import { createTeamService } from './team-service.js';
-import { teamRequest } from './team-net.js';
+import { teamRequest, withTailnetFallback } from './team-net.js';
+import { statusJsonCached } from './tailscale.js';
+import { tailnetOf, peerInStatus, isNameError } from '../shared/tailnet-share.js';
 import { shortFp } from './team-crypto.js';
 import { oneLine } from './team-deliver.js';
 import { terminalInstance, addInputObserver, getTerminalClaudeInfo } from './terminal-manager.js';
@@ -85,7 +87,9 @@ export function initTeam({ bridgeOpenDeps: w, endpoint, endpointProblem, onMessa
   });
   service = createTeamService({
     store,
-    request: teamRequest,
+    // A teammate on another Tailscale network: a name that does not resolve is looked up in this computer's own
+    // netmap (shared-in machines are listed there) before it counts as unreachable.
+    request: withTailnetFallback(teamRequest, () => statusJsonCached(), { tailnetOf, peerInStatus, isNameError }),
     endpoint,
     endpointProblem,
     fileReport,
@@ -232,6 +236,7 @@ function registerIpc() {
     return p ? { ok: true } : { ok: false, error: 'no such teammate' };
   }));
   ipcMain.handle('team:unlink', safe((id) => service.unlink(str(id, 64))));
+  ipcMain.handle('team:checkPeer', safe((id) => service.checkPeer(str(id, 64))));
   ipcMain.handle('team:settings', safe((patch) => {
     const p = patch && typeof patch === 'object' ? patch : {};
     const next = {};
@@ -260,7 +265,7 @@ export function handleTeamBridge(body) {
   if (!st.ok) return { status: 503, json: { ok: false, error: st.error } };
   if (cmd === 'peers') {
     const lines = st.peers.length
-      ? st.peers.map((p) => `${oneLine(p.name, 80)}  ${p.short}  ${p.host}  ${p.enabled ? (p.autoRoute ? 'auto-route' : 'held for a person') : 'disabled'}`)
+      ? st.peers.map((p) => `${oneLine(p.name, 80)}  ${p.short}  ${p.host}  ${p.enabled ? (p.autoRoute ? 'auto-route' : 'held for a person') : 'disabled'}${p.reach === 'not-shared' ? '  NOT SHARED WITH THIS COMPUTER IN TAILSCALE (Settings > Team shows the fix)' : p.reach === 'different-install' ? '  answers with different keys: unlink and link again' : p.reach === 'not-in-tailnet' ? '  no longer on your Tailscale network: unlink and link again' : p.reach === 'tailscale-off' ? '  Tailscale is not connected on this computer' : p.reach ? `  unreachable (${p.reach})` : ''}`)
       : ['no linked teammates (Settings > Team > Invite a teammate)'];
     return { status: 200, json: { ok: true, lines: [`this Mac: ${oneLine(st.settings.name, 80)} ${st.short}`, ...lines] } };
   }

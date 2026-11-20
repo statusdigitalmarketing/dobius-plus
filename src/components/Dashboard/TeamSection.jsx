@@ -2,6 +2,7 @@
 // docs/team-communicator.md. Section, SettingRow and Toggle come from Settings.jsx so the page stays one style.
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { isWindows, baseName } from '../../../shared/platform.js';
+import { MACHINES_URL } from '../../../shared/tailnet-share.js';
 
 const api = window.electronAPI;
 const box = { backgroundColor: 'var(--surface)', border: '1px solid var(--border)' };
@@ -26,11 +27,24 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
   const [note, setNote] = useState(null);
   const [name, setName] = useState('');
   const [unlinking, setUnlinking] = useState(null);
+  const [showInviteHelp, setShowInviteHelp] = useState(false);
+  const [openHelp, setOpenHelp] = useState(null); // peer id whose share steps are open
+  const [checking, setChecking] = useState(() => new Set()); // peer ids with a check out
+  const [checkNote, setCheckNote] = useState({}); // peer id -> { ok, text }
   const [nowMs, setNowMs] = useState(Date.now());
 
   const load = useCallback(async () => {
     const s = await api.teamStatus();
     setSt(s);
+    // A check result only stands while the teammate's state is the one it found: any change drops it for good, so
+    // an old "reaches theirs" can never come back after a later failure (Codex r2).
+    if (s?.ok) {
+      const now = new Map(s.peers.map((p) => [p.id, p.reach || null]));
+      // A success is only a snapshot: it also lapses after two minutes, since a bare 403 from a reinstalled teammate
+      // changes no reach state (Codex r6).
+      const t = Date.now();
+      setCheckNote((n) => Object.fromEntries(Object.entries(n).filter(([id, v]) => now.has(id) && now.get(id) === v.reach && (!v.ok || t - v.at < 120_000))));
+    }
     if (s?.ok) setName((n) => n || s.settings.name);
   }, []);
   useEffect(() => {
@@ -63,11 +77,22 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
     setNote({ info: 'Checking the invite and waiting for them to accept (up to 15 minutes)...' });
     const r = await api.teamJoin(joinText.trim());
     setBusy(false);
-    setNote(r.ok ? { info: `Linked with ${r.peer.name} (${r.peer.short}).` } : { error: r.error });
+    setNote(r.ok
+      ? { info: r.help ? `Linked with ${r.peer.name} (${r.peer.short}). One more step so their messages reach you: share this computer with them in Tailscale (below), if you have not already.` : `Linked with ${r.peer.name} (${r.peer.short}).`, help: r.help || null }
+      : { error: r.error, help: r.help || null });
     if (r.ok) setJoinText('');
     load();
   };
   const expiresIn = invite ? Math.max(0, Math.round((invite.expiresAt - nowMs) / 1000)) : 0;
+  const checkPeer = async (id) => {
+    setChecking((s) => new Set(s).add(id));
+    const r = await api.teamCheckPeer(id);
+    setChecking((s) => { const n = new Set(s); n.delete(id); return n; });
+    // Kept with the reach it found: a later send that sees something else hides it (Codex r1).
+    setCheckNote((n) => ({ ...n, [id]: r?.ok && r.reachable ? { ok: true, reach: null, at: Date.now(), text: 'Just checked: this computer reaches theirs, and it answers as the Dobius+ you linked.' } : { ok: false, reach: r?.problem ?? null, text: r?.error || 'not reachable' } }));
+    if (r?.help && r.problem === 'not-shared') setOpenHelp(id);
+    load();
+  };
 
   return (
     <Section id="team" title="Team">
@@ -120,6 +145,13 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
       <SettingRow label="Invite a teammate" description={st.endpoint ? 'Send them the invite (iMessage is fine). It works once, for 15 minutes, and you confirm before anything is linked' : st.notReachable}>
         <button className="text-xs px-3 py-1 rounded" style={btn(true, false, !st.endpoint)} onClick={makeInvite} disabled={!st.endpoint} title={st.endpoint ? undefined : st.notReachable}>New invite</button>
       </SettingRow>
+      {st.inviteHelp && (
+        <div className="text-xs" style={{ color: 'var(--dim)', fontSize: 10 }}>
+          Teammate signed in to a different Tailscale account?{' '}
+          <button className="underline" style={{ color: 'var(--accent)' }} onClick={() => setShowInviteHelp((v) => !v)}>{showInviteHelp ? 'Hide the steps' : 'Share computers first'}</button>
+        </div>
+      )}
+      {showInviteHelp && st.inviteHelp && <ShareHelp help={st.inviteHelp} onHide={() => setShowInviteHelp(false)} />}
       {invite && expiresIn > 0 && (
         <div className="flex items-start gap-3 px-3 py-2 rounded" style={box}>
           <div className="min-w-0 flex-1">
@@ -151,14 +183,28 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
           {note.error || note.info}
         </div>
       )}
+      {note?.help && <ShareHelp help={note.help} onHide={() => setNote((n) => (n ? { ...n, help: null } : n))} />}
 
       {st.peers.length > 0 && (
         <div className="space-y-2">
           {st.peers.map((p) => (
-            <div key={p.id} className="flex items-center justify-between gap-3 px-3 py-2 rounded text-xs" style={box}>
+            <div key={p.id} className="space-y-2">
+            <div className="flex items-center justify-between gap-3 px-3 py-2 rounded text-xs" style={box}>
               <div className="min-w-0">
                 <PeerName peer={p} onSaved={load} />
-                <div className="truncate" style={{ color: 'var(--dim)', fontSize: 10 }}>{p.host}:{p.port}</div>
+                <div className="truncate" style={{ color: 'var(--dim)', fontSize: 10 }}>{p.host}:{p.port}{p.cross ? ' · another Tailscale network' : ''}</div>
+                {p.reach && (
+                  <div style={{ color: 'var(--danger)', fontSize: 10 }}>
+                    {p.reach === 'not-shared' ? 'Not shared with you in Tailscale yet: messages to them cannot go out'
+                      : p.reach === 'offline' ? 'Offline in Tailscale right now'
+                        : p.reach === 'different-install' ? 'Answers, but not as the Dobius+ you linked (reinstalled?). Unlink and link again'
+                          : p.reach === 'not-in-tailnet' ? 'No longer on your Tailscale network (renamed or removed?). Unlink and link again'
+                            : p.reach === 'tailscale-off' ? 'Tailscale is not connected on this computer'
+                          : 'Did not answer the last time'}
+                    {p.help && p.reach === 'not-shared' && <> · <button className="underline" onClick={() => setOpenHelp(openHelp === p.id ? null : p.id)}>{openHelp === p.id ? 'hide' : 'how to fix'}</button></>}
+                  </div>
+                )}
+                {checkNote[p.id] && p.reach !== 'not-shared' && <div style={{ color: checkNote[p.id].ok ? 'var(--dim)' : 'var(--danger)', fontSize: 10 }}>{checkNote[p.id].text}</div>}
               </div>
               <div className="flex items-center gap-3 shrink-0">
                 <label className="flex items-center gap-1" style={{ color: 'var(--dim)' }} title="Type their messages into the orchestrator tab automatically">
@@ -167,17 +213,46 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
                 <label className="flex items-center gap-1" style={{ color: 'var(--dim)' }} title="Off: their messages are refused">
                   On <Toggle checked={!!p.enabled} onChange={async (v) => { await api.teamUpdatePeer(p.id, { enabled: v }); load(); }} />
                 </label>
+                <button className="px-2 py-1 rounded" style={btn(false, checking.has(p.id))} disabled={checking.has(p.id)} onClick={() => checkPeer(p.id)}>{checking.has(p.id) ? 'Checking...' : 'Check connection'}</button>
                 {unlinking === p.id ? (
-                  <button className="px-2 py-1 rounded" style={{ ...btn(false), color: 'var(--danger)', borderColor: 'var(--danger)' }} onClick={async () => { await api.teamUnlink(p.id); setUnlinking(null); load(); }}>Confirm unlink</button>
+                  <button className="px-2 py-1 rounded" style={{ ...btn(false), color: 'var(--danger)', borderColor: 'var(--danger)' }} onClick={async () => { await api.teamUnlink(p.id); setUnlinking(null); setNote(null); load(); }}>Confirm unlink</button>
                 ) : (
                   <button className="px-2 py-1 rounded" style={btn(false)} onClick={() => setUnlinking(p.id)}>Unlink</button>
                 )}
               </div>
             </div>
+            {openHelp === p.id && p.help && p.reach === 'not-shared' && <ShareHelp help={p.help} onHide={() => setOpenHelp(null)} />}
+            </div>
           ))}
         </div>
       )}
     </Section>
+  );
+}
+
+// Two teammates on two Tailscale networks: why it fails and the share(s) that fix it (shared/tailnet-share.js).
+// Copy steps puts the whole text on the clipboard, to send the teammate the half that is theirs.
+function ShareHelp({ help, onHide }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="text-xs px-3 py-2 rounded space-y-2" style={{ ...box, borderColor: 'var(--accent)' }}>
+      <div style={{ color: 'var(--fg)', fontWeight: 600 }}>{help.title}</div>
+      <div style={{ color: 'var(--dim)' }}>{help.why}</div>
+      {help.steps.map((step, i) => (
+        <div key={step.heading}>
+          <div style={{ color: 'var(--fg)' }}>{i + 1}. {step.heading}</div>
+          <ul className="pl-4" style={{ color: 'var(--dim)', listStyle: 'disc' }}>
+            {step.lines.map((l) => <li key={l} className="select-text">{l}</li>)}
+          </ul>
+        </div>
+      ))}
+      <div style={{ color: 'var(--dim)' }}>{help.after}</div>
+      <div className="flex gap-2">
+        <button className="px-2 py-1 rounded" style={btn(true)} onClick={() => api.openExternal(MACHINES_URL)}>Open Tailscale Machines</button>
+        <button className="px-2 py-1 rounded" style={btn(false)} onClick={async () => { await navigator.clipboard.writeText(help.text); setCopied(true); setTimeout(() => setCopied(false), 1500); }}>{copied ? 'Copied' : 'Copy steps'}</button>
+        {onHide && <button className="px-2 py-1 rounded" style={btn(false)} onClick={onHide}>Hide</button>}
+      </div>
+    </div>
   );
 }
 
