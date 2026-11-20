@@ -59,6 +59,21 @@ async function statusJson() {
   try { return JSON.parse(stdout); } catch { return null; }
 }
 
+// One shared, short-lived reading for callers that may ask often (team requests falling back to a peer's IP): at
+// most one `tailscale status` running, and its answer reused for 15 s. ponytail: a single slot, enough for one
+// question ("where is this peer"); a burst of failing sends shares it.
+const STATUS_TTL_MS = 15_000;
+let statusCache = { at: 0, value: null, running: null };
+export function statusJsonCached(now = Date.now()) {
+  if (statusCache.running) return statusCache.running;
+  if (statusCache.value && now - statusCache.at < STATUS_TTL_MS) return Promise.resolve(statusCache.value);
+  statusCache.running = statusJson().then((v) => {
+    statusCache = { at: Date.now(), value: v, running: null };
+    return v;
+  }, () => { statusCache = { at: Date.now(), value: null, running: null }; return null; });
+  return statusCache.running;
+}
+
 /** The Mac's MagicDNS name (no trailing dot), or null. */
 export async function getMagicDNSName() {
   const name = (await statusJson())?.Self?.DNSName;

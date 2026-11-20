@@ -83,6 +83,36 @@ keeps what their Mac calls itself as `selfName`. Current names are unique (a ren
 name is refused); `dobius-team send <ref>` matches a fingerprint, then current names, then `selfName`; an empty name
 goes back to `selfName`. Nothing is sent to the teammate.
 
+### Teammates on another Tailscale network (2026-11-20)
+
+Zee's onboarding (2026-11-19): his PC is on his own Tailscale account (`tail578ae1.ts.net`), Sam's Mac on
+`tail6addbf.ts.net`, and Join answered `could not reach sams-macbook-pro.tail6addbf.ts.net (ENOTFOUND)`. The design
+above assumed one tailnet. Tailscale's own answer is **node sharing**, and Dobius now explains it and uses it:
+
+- A machine on another tailnet is reachable only after its owner shares it with you (admin console, Machines, the
+  machine's `...` menu, Share, Copy invite link; the recipient opens the link signed in to their own account and
+  accepts). A shared machine is **quarantined**: it answers connections but never starts one. Team messages go both
+  ways (messages, receipts in the answer, status reports back), so **each person shares their own computer with the
+  other**. Sharing needs the Owner or Admin role on each account; a personal account is its own Owner. Shared
+  machines are reached only by their full name, `<machine>.<their tailnet>.ts.net`, which is what invites carry.
+- `shared/tailnet-share.js`: `tailnetOf`, `crossTailnet`, `peerInStatus` (this computer's `tailscale status --json`
+  lists a shared-in machine under its owner's tailnet name), and `crossTailnetHelp`, the steps both people see.
+- `team-net.js withTailnetFallback`: when a peer's MagicDNS name does not resolve, this computer's own netmap
+  decides. Listed: one more try at its Tailscale IP with the same Host header and TLS name (a recipient tailnet with
+  MagicDNS off does not resolve shared-in names). Not listed: `reach: 'not-shared'`. `tailscale status` runs at most
+  once at a time and its answer is reused for 15 s (`statusJsonCached`). The transport stays untrusted: everything is
+  sealed and signed, and the IP comes from our own netmap for that exact name.
+- Join: a cross-tailnet invite whose hello fails stops before sending anything (as before) and returns the error in
+  words plus `help` (both shares). A cross-tailnet join that succeeds returns `help` for the one share it cannot
+  check: the joiner's computer shared back with the inviter.
+- The inviter checks the way back right after Accept (`checkPeer`: GET `/team/hello`, keys must match), so the peer
+  row says "Not shared with you in Tailscale yet" before the first send fails. Each outgoing attempt and status report
+  updates the same in-memory `reach` per peer; an outgoing row's note names the missing share instead of `ENOTFOUND`.
+  Settings > Team: a "Share computers first" hint under Invite, the steps card (Open Tailscale Machines, Copy steps)
+  on Join errors and on a peer row, and Check connection per teammate. `dobius-team peers` prints the same.
+- Not done: a relay or Tailscale Funnel for teammates with no share. Funnel would put the whole phone server on the
+  public internet; sharing keeps it to one named person.
+
 ### Messages
 
 - Plain envelope (inside the encryption): `{ v:1, id (uuid), from, to, kind: "ask"|"reply"|"note", replyTo?, text
@@ -241,7 +271,8 @@ reason), `stopped` (the orchestrator tab closed first).
 
 ## Not in v1
 
-Status sharing ("what my sessions are working on"), attachments, group messages, a relay for Macs off the tailnet,
+Status sharing ("what my sessions are working on"), attachments, group messages, a relay for Macs off the tailnet
+(teammates on another tailnet use Tailscale sharing, above),
 message expiry beyond 24 h retry.
 
 ## Risks (accepted by Sam's choice of auto-route)

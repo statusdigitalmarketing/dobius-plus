@@ -4,6 +4,7 @@
  *
  * - Own agents, no keep-alive, no proxy, a hard deadline per request, responses capped at 64 KB.
  * - Requests name the peer's full MagicDNS host (its /team routes require it) and never carry an Origin.
+ * - `address` (optional): the peer's Tailscale IP to connect to; Host and TLS still use `host`.
  * - `reached`: the request body was fully handed to the socket. The outbox uses it to tell "may have arrived"
  *   (unconfirmed) from "never left" (not delivered).
  */
@@ -17,14 +18,16 @@ const agents = { http: new http.Agent({ keepAlive: false }), https: new https.Ag
 const plainOnly = new Map();
 const PLAIN_TTL_MS = 60 * 60 * 1000;
 
-function once(scheme, { host, port, method, path, body, headers, timeoutMs }) {
+function once(scheme, { host, address, port, method, path, body, headers, timeoutMs }) {
   return new Promise((resolve) => {
     let reached = false;
     let settled = false;
     const done = (r) => { if (!settled) { settled = true; clearTimeout(timer); resolve({ ...r, reached }); } };
     const lib = scheme === 'https' ? https : http;
+    // `address`: connect to this Tailscale IP instead of resolving `host` (a shared-in machine whose name this
+    // computer's resolver does not know). The Host header and the TLS name stay the MagicDNS name either way.
     const req = lib.request({
-      host, port, method, path, agent: agents[scheme], servername: scheme === 'https' ? host : undefined,
+      host: address || host, port, method, path, agent: agents[scheme], servername: scheme === 'https' ? host : undefined,
       headers: { Host: `${host}:${port}`, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/octet-stream', 'Content-Length': body.length } : {}), ...headers },
     }, (res) => {
       const chunks = [];
@@ -73,3 +76,29 @@ export async function teamRequest(opts, now = Date.now()) {
 }
 
 export const _plainOnly = plainOnly;
+
+/**
+ * Wraps a team request for teammates on other Tailscale networks (docs/team-communicator.md, "Teammates on another
+ * Tailscale network"). When the peer's MagicDNS name does not resolve, this computer's own `tailscale status` says
+ * whether that machine is in its netmap at all:
+ *   - listed (it was shared with us, or it is ours): try once more at its Tailscale IP, same Host and TLS name. That
+ *     covers a recipient whose resolver does not know shared-in names (MagicDNS off on their tailnet).
+ *   - not listed: `reach: 'not-shared'` (another tailnet's machine nobody shared with us, or one that was removed).
+ * Offline machines are marked `reach: 'offline'` when the IP try also fails. The transport is still untrusted:
+ * everything on it is sealed and signed, and an IP taken from our own netmap for that exact name changes nothing.
+ * statusFn() -> parsed `tailscale status --json` or null (unknown: the original error is returned as is).
+ */
+export function withTailnetFallback(request, statusFn, { tailnetOf, peerInStatus, isNameError }) {
+  return async function teamRequestVia(opts) {
+    const r = await request(opts);
+    if (opts.address || !isNameError(r.error) || !tailnetOf(opts.host)) return r;
+    let status = null;
+    try { status = await statusFn(); } catch (err) { console.warn('[team] tailscale status failed:', err?.message || err); }
+    if (!status) return r;
+    const p = peerInStatus(status, opts.host);
+    if (!p.found) return { ...r, reach: 'not-shared' };
+    if (!p.ip) return { ...r, reach: p.online ? undefined : 'offline' };
+    const r2 = await request({ ...opts, address: p.ip });
+    return { ...r2, viaIp: true, ...(r2.error ? { reach: p.online ? 'unreachable' : 'offline' } : {}) };
+  };
+}
