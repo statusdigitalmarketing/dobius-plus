@@ -227,3 +227,22 @@ test('different-install survives a timeout then a bare 403; only a signed answer
   await sam.svc.pump(); // the new install answers 403
   assert.equal(sam.svc.status().peers[0].reach, 'different-install');
 });
+
+test('a slow check of an old address never marks a teammate re-linked at a new address (Codex r3)', async () => {
+  const tn = net();
+  const sam = install('Sam', SAM, tn);
+  const zee = install('Zee', ZEE, tn);
+  assert.equal((await linkPair(sam, zee)).ok, true);
+  await new Promise((res) => setImmediate(res));
+  const id = sam.svc.status().peers[0].id;
+  // The old address fails; the check is out (awaiting its request) while Zee is unlinked and re-linked elsewhere.
+  tn.blocked.set(`${SAM}>${ZEE}`, 'not-shared');
+  const check = sam.svc.checkPeer(id);
+  const rec = sam.store.peers()[id];
+  sam.svc.unlink(id);
+  clock += 1000;
+  sam.store.savePeer({ ...rec, host: 'zee-laptop.tail578ae1.ts.net' });
+  await check;
+  assert.equal(sam.svc.status().peers[0].host, 'zee-laptop.tail578ae1.ts.net');
+  assert.equal(sam.svc.status().peers[0].reach, null, 'the old address result is dropped');
+});

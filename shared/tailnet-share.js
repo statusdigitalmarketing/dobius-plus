@@ -86,7 +86,8 @@ export function crossTailnetHelp({ me, them, missing = 'both' }) {
   }
   const after = 'Sharing and accepting need the Owner, Admin or IT admin role on each Tailscale account (a personal account is its own Owner). '
     + 'When both shares are accepted, paste the invite again (or press Check connection). '
-    + 'Already shared and it still fails? The computer may have been renamed in Tailscale: unlink and link again with a new invite.';
+    + 'Already shared and it still fails? The computer may have been renamed in Tailscale (unlink and link again with a new '
+    + 'invite), or an access rule in either Tailscale account may block it (check the Access controls page).';
   const text = [title + '.', why, ...steps.flatMap((s, i) => [`${i + 1}. ${s.heading}:`, ...s.lines.map((l) => `   ${l}`)]), after].join('\n');
   return { title, why, steps, after, mine, theirs, text };
 }

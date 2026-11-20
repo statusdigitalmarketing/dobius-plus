@@ -75,8 +75,13 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   // `proven`: the answer was signed by the key we linked (a verified receipt, ack or hello). 'different-install' (it
   // answers, but not with the linked key: reinstalled, or another install at that name) clears only on proof, never on
   // a bare status code such as their 403 (Codex r1).
-  function noteReach(peerId, r, proven = false) {
-    if (!store.peers()[peerId]) { reach.delete(peerId); return; }
+  // `peer` is the record the request was made with: an answer about an address that is no longer the saved one (an
+  // unlink and re-link while the request was out) says nothing about the current link (Codex r3).
+  function noteReach(peer, r, proven = false) {
+    const peerId = peer.id;
+    const cur = store.peers()[peerId];
+    if (!cur) { reach.delete(peerId); return; }
+    if (cur.host !== peer.host || cur.port !== peer.port || cur.linkedAt !== peer.linkedAt) return;
     const prev = reach.get(peerId);
     let problem = r.status ? null : (r.reach || (r.error ? 'unreachable' : null));
     // Sticky until a signed answer: a timeout in between must not turn it into something a bare 403 then clears.
@@ -88,7 +93,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   function reachNote(peer, r) {
     const m = me();
     if (r.reach === 'not-shared' && m && crossTailnet(m.host, peer.host)) {
-      return `${peer.name}'s computer is on another Tailscale network and is not shared with you (or it was renamed). Settings > Team shows the fix`;
+      return `${peer.name}'s computer is on another Tailscale network and is not shared with you (or it was renamed, or a Tailscale access rule hides it). Settings > Team shows the fix`;
     }
     if (r.reach === 'offline') return `${peer.name}'s computer is offline in Tailscale (${r.error})`;
     if (r.reach === 'tailscale-off') return 'Tailscale is not connected on this computer. Open Tailscale and sign in';
@@ -723,7 +728,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     reportTimes.set(row.peer, times);
     const wire = P.buildStatus(identity(), myFp(), peer, { id: row.id, ...rep }, now());
     const r = await request({ host: peer.host, port: peer.port, method: 'POST', path: '/team/status', body: wire.body, headers: { [SIG_HEADER]: wire.sig } });
-    noteReach(peer.id, r, r.status === 200 && P.checkStatusAck(peer, myFp(), row.id, rep.seq, r.json?.ack));
+    noteReach(peer, r, r.status === 200 && P.checkStatusAck(peer, myFp(), row.id, rep.seq, r.json?.ack));
     // Re-read: a newer report may have been queued while this one was in flight.
     // Pause on these whatever became of the row meanwhile (it may have been evicted during the request).
     if (r.status === 404) reportPause.set(row.peer, now() + REPORT_PAUSE_MS);
@@ -1098,7 +1103,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const env = { id: msg.id, kind: msg.kind, replyTo: msg.replyTo, text: msg.text, firstSentAt: msg.firstSentAt, deadline: msg.deadline };
     const wire = P.buildMessage(identity(), myFp(), peer, env, now());
     const r = await request({ host: peer.host, port: peer.port, method: 'POST', path: '/team/message', body: wire.body, headers: { [SIG_HEADER]: wire.sig } });
-    noteReach(peer.id, r, r.status === 200 && !!P.checkReceipt(peer, myFp(), env, r.json?.receipt));
+    noteReach(peer, r, r.status === 200 && !!P.checkReceipt(peer, myFp(), env, r.json?.receipt));
     // A row found still 'sending' was cut off mid-attempt (a failed write, a quit): that attempt may have arrived.
     const reached = msg.reached || msg.state === 'sending' || !!r.reached;
     if (r.status === 200 && P.checkReceipt(peer, myFp(), env, r.json?.receipt)) {
@@ -1129,9 +1134,9 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const nonce = P.newNonce();
     const r = await request({ host: peer.host, port: peer.port, method: 'GET', path: `/team/hello?nonce=${nonce}` });
     const good = r.status === 200 && !!P.checkHello(r.json, nonce, peer.id);
-    if (good) noteReach(id, r, true);
-    else if (r.status === 200) noteReach(id, { status: 0, reach: 'different-install' });
-    else noteReach(id, { ...r, status: 0, error: r.error || `answer ${r.status}` });
+    if (good) noteReach(peer, r, true);
+    else if (r.status === 200) noteReach(peer, { status: 0, reach: 'different-install' });
+    else noteReach(peer, { ...r, status: 0, error: r.error || `answer ${r.status}` });
     if (good) return { ok: true, reachable: true, problem: null };
     const m = me();
     const problem = reach.get(id)?.problem || 'unreachable';
