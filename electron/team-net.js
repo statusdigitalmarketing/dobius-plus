@@ -105,6 +105,7 @@ export function withTailnetFallback(request, statusFn, { tailnetOf, peerInStatus
     if (!p.found) return { ...r, reach: own && tailnetOf(opts.host) === own ? 'not-in-tailnet' : 'not-shared' };
     if (!p.ip) return { ...r, reach: p.online ? undefined : 'offline' };
     const r2 = await request({ ...opts, address: p.ip });
-    return { ...r2, viaIp: true, ...(r2.error ? { reach: p.online ? 'unreachable' : 'offline' } : {}) };
+    // A connection that got as far as sending is not "offline", whatever the (up to 15 s old) netmap said (Codex r5).
+    return { ...r2, viaIp: true, ...(r2.error && !r2.reached ? { reach: p.online ? 'unreachable' : 'offline' } : {}) };
   };
 }

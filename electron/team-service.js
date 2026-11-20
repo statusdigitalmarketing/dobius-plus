@@ -83,11 +83,12 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     if (!cur) { reach.delete(peerId); return; }
     if (cur.host !== peer.host || cur.port !== peer.port || cur.linkedAt !== peer.linkedAt) return;
     // An entry measured at another address (a re-link that moved them) is not this link's history (Codex r4).
-    const prev = reach.get(peerId)?.host === peer.host ? reach.get(peerId) : null;
+    const old = reach.get(peerId);
+    const prev = old?.host === peer.host && old?.port === peer.port ? old : null;
     let problem = r.status ? null : (r.reach || (r.error ? 'unreachable' : null));
     // Sticky until a signed answer: a timeout in between must not turn it into something a bare 403 then clears.
     if (!proven && prev?.problem === 'different-install') problem = 'different-install';
-    reach.set(peerId, { problem, at: now(), host: peer.host });
+    reach.set(peerId, { problem, at: now(), host: peer.host, port: peer.port });
     if ((prev?.problem || null) !== problem) changed();
   }
   // The note an outgoing row gets when the teammate cannot be reached: the share steps when that is the cause.
@@ -123,7 +124,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const peers = Object.values(store.peers()).map(({ ed, x, ...p }) => {
       const cross = !!meNow && crossTailnet(meNow.host, p.host);
       const entry = reach.get(p.id);
-      const problem = (entry?.host === p.host && entry.problem) || null;
+      const problem = (entry?.host === p.host && entry?.port === p.port && entry.problem) || null;
       return {
         ...p, short: shortFp(p.id), tailnet: tailnetOf(p.host), cross, reach: problem,
         help: cross ? crossTailnetHelp({ me: meNow, them: p, missing: problem === 'not-shared' ? 'theirs' : 'both' }) : null,

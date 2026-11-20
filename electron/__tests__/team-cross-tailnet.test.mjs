@@ -278,3 +278,11 @@ test('a reach result measured at an old address does not follow a teammate to a 
   tn.blocked.set(`${SAM}>zee-laptop.tail578ae1.ts.net`, 'not-shared');
   assert.equal((await sam.svc.checkPeer(id)).problem, 'not-shared');
 });
+
+test('fallback: an IP retry that reached the peer is never labelled offline (Codex r5)', async () => {
+  const inner = async (o) => (o.address ? { error: 'ECONNRESET', reached: true } : { error: 'ENOTFOUND', reached: false });
+  const status = { BackendState: 'Running', Peer: { k: { DNSName: `${ZEE}.`, TailscaleIPs: ['100.90.1.2'], Online: false } } };
+  const r = await withTailnetFallback(inner, async () => status, { tailnetOf, peerInStatus, isNameError })({ host: ZEE, port: 8420 });
+  assert.equal(r.reach, undefined);
+  assert.equal(r.reached, true);
+});
