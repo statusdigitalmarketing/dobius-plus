@@ -92,7 +92,7 @@ jobs:
           echo "ELECTRON_ZIP_SHA256=$WANT" >> "$GITHUB_ENV"
 
       - name: Unit tests (Windows port)
-        run: node --import ./electron/__tests__/register.mjs --test electron/__tests__/windows-port.test.mjs electron/__tests__/osc-only.test.mjs
+        run: node --import ./electron/__tests__/register.mjs --test electron/__tests__/windows-port.test.mjs electron/__tests__/osc-only.test.mjs electron/__tests__/team-cli-win.test.mjs
 
       # node-pty ships N-API Windows prebuilds that load under Electron as is;
       # only better-sqlite3 needs Electron's build, fetched prebuilt so nothing

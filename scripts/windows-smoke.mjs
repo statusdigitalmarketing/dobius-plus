@@ -138,6 +138,27 @@ try {
   const interrupted = await waitFor(async () => /after-42/.test(await terminalText(page)), 8000);
   step('Ctrl+C interrupts a running command', !!interrupted);
 
+  // dobius-team on Windows (node script in <userData>/bin): PowerShell tabs call it through a function, Git Bash
+  // (Claude Code's Bash tool) through the extensionless launcher. No teammates and no pinned tab in a fresh profile, so peers lists
+  // none and a send is refused by the bridge, which proves the whole path (token, POST, answer) end to end.
+  await page.keyboard.type('dobius-team peers');
+  await page.keyboard.press('Enter');
+  const teamPs = await waitFor(async () => { const t = await terminalText(page); return /this PC: /.test(t) && /no linked teammates/.test(t); }, 20000);
+  step('dobius-team peers runs in PowerShell', !!teamPs);
+  await page.keyboard.type(`& "$env:ProgramFiles\\Git\\bin\\bash.exe" -c 'dobius-team peers >/dev/null && echo bash-team-ok-$((6*7))'`);
+  await page.keyboard.press('Enter');
+  const teamSh = await waitFor(async () => /bash-team-ok-42/.test(await terminalText(page)), 20000);
+  step('dobius-team peers runs in Git Bash', !!teamSh);
+  await page.keyboard.type(`& "$env:ProgramFiles\\Git\\bin\\bash.exe" -c 'printf "h\\303\\251llo" | dobius-team send nobody; echo send-exit-$((40+$?))'`);
+  await page.keyboard.press('Enter');
+  const teamSend = await waitFor(async () => { const t = await terminalText(page); return /no team orchestrator tab is pinned/.test(t) && /send-exit-41/.test(t); }, 20000);
+  step('dobius-team send reads stdin and reports the bridge refusal', !!teamSend);
+  await page.keyboard.type(`('h' + [char]0xe9 + 'llo') | dobius-team send nobody; "ps-send-exit-$($LASTEXITCODE + 40)"`);
+  await page.keyboard.press('Enter');
+  const teamPsSend = await waitFor(async () => /ps-send-exit-41/.test(await terminalText(page)), 20000);
+  step('dobius-team send takes piped text in PowerShell', !!teamPsSend);
+  await page.screenshot({ path: path.join(out, '2b-dobius-team.png') });
+
   await page.keyboard.type(`node "${path.join(standinDir, 'cli.js')}"`);
   await page.keyboard.press('Enter');
   const ready = await waitFor(async () => /stand-in claude ready/.test(await terminalText(page)), 30000);

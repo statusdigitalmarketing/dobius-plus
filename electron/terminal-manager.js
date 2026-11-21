@@ -296,6 +296,8 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
     DOBIUS_TAB_ID: id,
     // What Dobius gives an agent here (agent-context.js); the SessionStart hook prints it into Claude's context.
     DOBIUS_AGENT_CONTEXT: path.join(app.getPath('userData'), 'agent-context.md'),
+    // Windows: what the PowerShell dobius-team function runs (shared/new-tab.js PS_TEAM_FUNCTION).
+    ...(IS_WIN ? { DOBIUS_TEAM_CLI_JS: path.join(tabBinDir(), 'dobius-team.mjs'), DOBIUS_ELECTRON_EXE: process.execPath } : {}),
     ...extraEnv,
     ...termEnv,
   };

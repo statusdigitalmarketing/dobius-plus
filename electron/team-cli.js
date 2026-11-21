@@ -60,3 +60,33 @@ for line in r.get("lines", []): print(clean(line))
 '
 `;
 }
+
+/**
+ * Windows: the extensionless sh launcher for electron/team-cli-win.mjs (copied to <userData>/bin/dobius-team.mjs), for
+ * Git Bash, which Claude Code's Bash tool uses on Windows. It runs under Dobius's own Electron in node mode, so Windows
+ * needs no bash script, python3 or curl. PowerShell tabs get a function instead (shared/new-tab.js PS_TEAM_FUNCTION);
+ * there is deliberately no .cmd launcher (cmd.exe would read & | < > in an argument as more commands). Null when a path
+ * holds a control character.
+ */
+export function windowsTeamSh(execPath, jsPath) {
+  // Single-quoted with forward slashes, so $ ` " and \ stay literal; only control characters are refused.
+  if (![execPath, jsPath].every((p) => typeof p === 'string' && p && !/[\x00-\x1f\x7f]/.test(p))) return null;
+  const q = (p) => `'${p.replace(/\\/g, '/').replace(/'/g, `'\\''`)}'`;
+  // NODE_DEBUG=net would make node log the request, bridge token included (the Mac script runs curl -q for the same
+  // reason). Windows reads variable names in any case, so every case of each is cleared (node_debug works as well as
+  // NODE_DEBUG there); shell patterns, so no extra process per variable. Git Bash would rewrite an argument that looks
+  // like a path (/Sam becomes C:/Program Files/Git/Sam), which could name another teammate: MSYS_NO_PATHCONV and
+  // MSYS2_ARG_CONV_EXCL turn that off for the Electron it starts.
+  return `#!/bin/sh
+for v in $(env | sed -n 's/^\\([A-Za-z_][A-Za-z0-9_]*\\)=.*/\\1/p'); do
+  case "$v" in [Nn][Oo][Dd][Ee]_[Dd][Ee][Bb][Uu][Gg]|[Nn][Oo][Dd][Ee]_[Dd][Ee][Bb][Uu][Gg]_[Nn][Aa][Tt][Ii][Vv][Ee]|[Nn][Oo][Dd][Ee]_[Oo][Pp][Tt][Ii][Oo][Nn][Ss]) unset "$v" ;; esac
+done
+export ELECTRON_RUN_AS_NODE=1 MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+exec ${q(execPath)} ${q(jsPath)} "$@"
+`;
+}
+
+/** dobius-team.json beside the script: where the bridge listens and where its token is. */
+export function windowsTeamConfig({ port, tokenFile }) {
+  return `${JSON.stringify({ port, tokenFile }, null, 2)}\n`;
+}

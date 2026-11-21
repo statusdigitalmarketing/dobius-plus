@@ -293,3 +293,25 @@ message expiry beyond 24 h retry.
 - Ship-test: two isolated desktop instances on this Mac (phone servers on 8461 and 8471, the multi-Mac harness
   recipe), link them, send both ways, auto-route into a stand-in `claude` orchestrator tab that logs what it
   receives, reply through `dobius-team reply`, switch Auto-route off and see the message wait.
+
+## dobius-team on Windows (2026-11-21)
+
+The Mac's `dobius-team` is a bash script that needs python3 and curl, so Windows never had the command. Since 2.2.44 Dobius
+installs a node version, `electron/team-cli-win.mjs`, as `<userData>/bin/dobius-team.mjs` with `dobius-team.json`
+(port, token file path) beside it. It runs under Dobius's own Electron in node mode, so nothing else needs installing.
+Same commands, same rules: text on stdin only, the token only in the Authorization header to 127.0.0.1, every printed
+line stripped of control characters, send and reply only from the pinned orchestrator tab.
+
+- **Git Bash** (Claude Code's Bash tool on Windows): the extensionless `<userData>/bin/dobius-team` sh launcher, so
+  `dobius-team send Sam < note.txt` and heredocs work exactly as on the Mac.
+- **PowerShell tabs**: a `dobius-team` function the tab defines at start (`shared/new-tab.js PS_TEAM_FUNCTION`,
+  env `DOBIUS_TEAM_CLI_JS` and `DOBIUS_ELECTRON_EXE`). `Get-Content note.txt | dobius-team send Sam` sends the text as
+  UTF-8 in PowerShell 5.1 and 7.
+- **No `.cmd` launcher, on purpose.** PowerShell starts a `.cmd` through cmd.exe, which reads `& | < >` in an argument
+  as more commands, and a teammate picks their own name (Codex, High). A PowerShell started without the function
+  (Claude's own PowerShell tool) gets "not recognized"; use the Bash tool there.
+- Both launchers clear `NODE_DEBUG` and `NODE_OPTIONS`: `NODE_DEBUG=net` would log the token (Codex, High).
+- **Not on Windows yet:** a message is not typed into the pinned tab on its own (the "Claude is at its prompt" check
+  reads `ps`/`lsof`, which Windows lacks), so incoming messages wait in Tasks > Team; the orchestrator reads them with
+  `dobius-team inbox` and `dobius-team show <id@fingerprint>` and answers with `dobius-team reply`. The SessionStart
+  context that tells Claude about these commands is not installed on Windows either (no status hooks there).

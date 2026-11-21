@@ -1285,3 +1285,9 @@
 - **FIX**: Teammates on another tailnet need Tailscale node sharing BOTH ways (a shared machine is quarantined: it answers, never starts). `shared/tailnet-share.js` explains it; `team-net.js withTailnetFallback` reads this computer's netmap to tell "not shared" from "offline" and retries a shared-in machine at its Tailscale IP.
 - **CONTEXT**: A failure across two Tailscale accounts first shows up as a DNS error, because MagicDNS only knows names that were shared with you.
 - **DETECTION**: `grep -n "crossTailnetHelp\|withTailnetFallback" electron/team-service.js electron/team-main.js`
+
+### Security: 2026-11-21
+- **MISTAKE**: The first Windows `dobius-team` copied the gws launcher pattern and shipped a `dobius-team.cmd`. Codex (High): from PowerShell, `dobius-team send 'Sam&whoami'` runs `whoami`, because a `.cmd` is started through cmd.exe, which parses `&` in an unquoted argument, and teammate names are chosen by the teammate. Same review: `NODE_DEBUG=net` in the environment makes node log the request, bearer token included.
+- **FIX**: No `.cmd` for anything that takes remotely influenced arguments. PowerShell tabs get a function that starts Electron through ProcessStartInfo (`PS_TEAM_FUNCTION` in shared/new-tab.js, same machinery as the gws function); Git Bash gets an extensionless sh launcher. Launchers `unset NODE_DEBUG NODE_DEBUG_NATIVE NODE_OPTIONS` before running node code that holds a secret.
+- **CONTEXT**: Any Windows command that wraps node or Electron. The existing `gws.cmd` has the same cmd.exe parsing for cmd.exe users (its arguments are the person's own, not a teammate's).
+- **DETECTION**: `grep -rn "\.cmd'\|%\*" electron/*.js shared/*.js`
