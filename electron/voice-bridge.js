@@ -36,7 +36,8 @@ import { validateTabRename, buildTabCliScript } from './tab-rename.js';
 import { buildCodexStatusScript, HOOK_HEAD_BYTES } from './codex-status.js';
 import { buildOpenCliScript, stripControls } from './bridge-open-tab.js';
 import { defangHarnessTags } from './tab-send.js';
-import { buildTeamCliScript } from './team-cli.js';
+import { buildTeamCliScript, windowsTeamSh, windowsTeamConfig } from './team-cli.js';
+import { fileURLToPath } from 'url';
 import { buildProjectCliScript } from './project-cli.js';
 import { profileMain } from './perf-profile.js';
 import { completeTaskByRef, resolveTaskRef, advanceTask } from './tasks-service.js';
@@ -773,8 +774,8 @@ export function startVoiceBridge() {
   // The isolated ship-test instance must not rewrite ~/.local/bin: those
   // scripts bake in THIS instance's token path, so the live app's dobius-*
   // commands would 401 until it next restarted.
-  // Windows: these helpers are sh scripts; not installed there yet.
-  if (process.platform === 'win32') return;
+  // Windows: the other helpers are sh scripts and are not installed there yet; dobius-team has a node version.
+  if (process.platform === 'win32') { installTeamCliWindows(); return; }
   if (!process.env.DOBIUS_USERDATA_DIR) installCliScript();
   installTabCli();
 }
@@ -792,6 +793,25 @@ function installTabCli() {
     writeIfChanged(path.join(tabBinDir(), 'dobius-project'), buildProjectCliScript({ port: PORT, tokenFile: TOKEN_FILE }));
   } catch (err) {
     console.warn(`[voice-bridge] dobius-tab install failed: ${err.message}`);
+  }
+}
+
+// Windows: dobius-team as a node script in <userData>/bin (every tab's PATH), with the sh launcher Git Bash runs and the
+// settings file it reads. PowerShell tabs call the script through a function (shared/new-tab.js). No .cmd: from
+// PowerShell it would run through cmd.exe, which treats & | < > in a teammate's name as commands.
+function installTeamCliWindows() {
+  try {
+    const dir = tabBinDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const js = path.join(dir, 'dobius-team.mjs');
+    writeIfChanged(js, fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'team-cli-win.mjs'), 'utf8'));
+    writeIfChanged(path.join(dir, 'dobius-team.json'), windowsTeamConfig({ port: PORT, tokenFile: TOKEN_FILE }));
+    const sh = windowsTeamSh(process.execPath, js);
+    const shPath = path.join(dir, 'dobius-team');
+    if (sh) writeIfChanged(shPath, sh);
+    else { try { fs.unlinkSync(shPath); } catch { /* none there */ } console.warn('[voice-bridge] dobius-team for Git Bash left out: the install path has a control character'); }
+  } catch (err) {
+    console.warn(`[voice-bridge] dobius-team (Windows) install failed: ${err.message}`);
   }
 }
 
