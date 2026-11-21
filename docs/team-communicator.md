@@ -310,7 +310,12 @@ line stripped of control characters, send and reply only from the pinned orchest
 - **No `.cmd` launcher, on purpose.** PowerShell starts a `.cmd` through cmd.exe, which reads `& | < >` in an argument
   as more commands, and a teammate picks their own name (Codex, High). A PowerShell started without the function
   (Claude's own PowerShell tool) gets "not recognized"; use the Bash tool there.
-- Both launchers clear `NODE_DEBUG` and `NODE_OPTIONS`: `NODE_DEBUG=net` would log the token (Codex, High).
+- `NODE_DEBUG=net` would log the token (Codex, High), in three layers: both launchers clear `NODE_DEBUG`,
+  `NODE_DEBUG_NATIVE` and `NODE_OPTIONS` in any case (Windows names ignore case); the script itself refuses with exit 2,
+  before reading the token, when a `NODE_DEBUG` of any case is set (a launcher can be bypassed: no `env`/`sed` on PATH,
+  invalid UTF-8 in a value); and the Authorization header is set with `req.setHeader`, outside the options object
+  net.connect's debug log prints. Git Bash would also rewrite `/Sam` into a Windows path, so the launcher sets
+  `MSYS_NO_PATHCONV=1` and `MSYS2_ARG_CONV_EXCL='*'`.
 - **Not on Windows yet:** a message is not typed into the pinned tab on its own (the "Claude is at its prompt" check
   reads `ps`/`lsof`, which Windows lacks), so incoming messages wait in Tasks > Team; the orchestrator reads them with
   `dobius-team inbox` and `dobius-team show <id@fingerprint>` and answers with `dobius-team reply`. The SessionStart
