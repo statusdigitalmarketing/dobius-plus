@@ -254,7 +254,12 @@ test('Git Bash launcher run by sh: NODE_DEBUG and NODE_OPTIONS in any case never
     const launcher = path.join(dir, 'dobius-team');
     fs.writeFileSync(launcher, windowsTeamSh(process.execPath, stand));
     const env = { ...process.env, DOBIUS_TAB_ID: 'tab-1', NODE_DEBUG: 'net', node_debug: 'net', Node_Options: '--inspect', NODE_DEBUG_NATIVE: 'x' };
-    const r = spawnSync(shBin, [launcher, 'send', '/Sam', 'two words', "it's"], { env, encoding: 'utf8' });
+    // The arguments are written inside a driver script, as a shell (Claude's Bash tool) would pass them. Handing them to
+    // sh.exe on its own command line from a native program would test Windows command-line parsing instead (Git's sh
+    // reads a bare ' there as a quote).
+    const driver = path.join(dir, 'drive.sh');
+    fs.writeFileSync(driver, `exec sh '${launcher.replace(/\\/g, '/')}' send /Sam 'two words' "it's"\n`);
+    const r = spawnSync(shBin, [driver], { env, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
     const got = JSON.parse(r.stdout);
     assert.deepEqual(got.keys, [], 'every case of NODE_DEBUG, NODE_DEBUG_NATIVE and NODE_OPTIONS is cleared');
